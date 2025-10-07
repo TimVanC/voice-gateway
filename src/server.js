@@ -291,8 +291,17 @@ async function sttOpenAIFromWav(wavBuf) {
     throw new Error(`STT failed ${r.status}: ${errorText}`);
   }
   
-  const j = await r.json();
-  return j.text?.trim() || "";
+  // Handle both JSON and plain text responses from OpenAI
+  const contentType = r.headers.get('content-type');
+  if (contentType && contentType.includes('application/json')) {
+    const j = await r.json();
+    return j.text?.trim() || "";
+  } else {
+    // OpenAI returned plain text (likely an error message)
+    const text = await r.text();
+    console.warn("OpenAI returned non-JSON response:", text);
+    return "";  // Skip this utterance
+  }
 }
 
 async function chatOpenAI(userText, slots) {
@@ -394,13 +403,16 @@ app.post("/twilio/voice", (req, res) => {
     const host = new URL(base).host; // e.g. e4ae1d6ab985.ngrok-free.app
     const response = new twilio.twiml.VoiceResponse();
 
-    // ---- TEMP sanity check (uncomment to hear a test greeting, then re-comment) ----
-    // response.say("Hello from your local server. Media streaming will be enabled next.");
+    // TEMP: Test if Twilio audio works at all (uncomment to test)
+    // response.say("Testing one two three. Can you hear me?");
     // return res.type("text/xml").send(response.toString());
-    // -------------------------------------------------------------------------------
 
     const connect = response.connect();
-    connect.stream({ url: `wss://${host}/media-stream` });
+    const stream = connect.stream({ 
+      url: `wss://${host}/media-stream`
+    });
+    // Enable bidirectional audio
+    stream.parameter({ name: 'track', value: 'both_tracks' });
 
     return res.type("text/xml").send(response.toString());
   } catch (err) {
@@ -494,6 +506,7 @@ wss.on("connection", (ws, req) => {
     try {
       const ulaw8k = await ttsElevenLabsUlaw8k(text);
       console.log(`🔊 TTS audio: ${ulaw8k.length} bytes, ${Math.ceil(ulaw8k.length / FRAME_SIZE)} frames`);
+      console.log(`🔍 First 16 bytes:`, ulaw8k.slice(0, 16).toString('hex'));
 
       let offset = 0;
       framesSent = 0;
