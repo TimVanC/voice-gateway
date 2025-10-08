@@ -6,6 +6,7 @@ const WebSocket = require("ws");
 const bodyParser = require("body-parser");
 const twilio = require("twilio");
 const { pcm16ToMuLaw, muLawToPcm16, pcm16leBufferToInt16, int16ToPcm16leBuffer } = require("./g711");
+const { downsampleTo8k, upsample8kTo24k } = require("./resample");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -69,6 +70,8 @@ wss.on("connection", async (twilioWs, req) => {
   let streamSid = null;
   let callSid = null;
   let sessionReady = false;
+  let realtimeOutputRate = 24000;  // Default assumption; updated when session confirms
+  let deltaCount = 0;
   
   // Playback state for pacing
   let playBuffer = Buffer.alloc(0);
@@ -88,15 +91,15 @@ wss.on("connection", async (twilioWs, req) => {
     openaiWs.on("open", () => {
       console.log("✅ Connected to OpenAI Realtime API");
       
-      // FIX 1: Configure session FIRST and WAIT for confirmation
+      // FIX 1: Configure session FIRST with EXPLICIT 8kHz format objects
       const sessionConfig = {
         type: "session.update",
         session: {
           modalities: ["text", "audio"],
           instructions: "You are a polite and efficient HVAC receptionist. Your job is to collect the following information from callers: 1) Full name, 2) Phone number, 3) Service address (including city and zip), 4) Type of system (furnace, AC, heat pump, etc), 5) Brief description of the issue. Always confirm details back to the caller clearly. Be warm but concise. If the caller mentions an emergency (gas smell, no heat in winter, water leak), prioritize accordingly and let them know help is coming soon.",
           voice: "alloy",
-          input_audio_format: "pcm16",
-          output_audio_format: "pcm16",
+          input_audio_format: "g711_ulaw",   // Native 8kHz μ-law support!
+          output_audio_format: "g711_ulaw",  // Native 8kHz μ-law support!
           input_audio_transcription: {
             model: "whisper-1"
           },
@@ -115,45 +118,70 @@ wss.on("connection", async (twilioWs, req) => {
       console.log("📤 Sent session configuration, waiting for confirmation...");
     });
 
-    // FIX 2 & 4: Handle audio deltas with proper pacing
-    function handleRealtimeDelta(b64Pcm) {
-      const pcmBuf = Buffer.from(b64Pcm, 'base64');           // PCM16LE bytes
-      console.log(`   → PCM16 buffer: ${pcmBuf.length} bytes (${pcmBuf.length/2} samples)`);
+    // Handle audio deltas - OpenAI sends μ-law directly, just pace it!
+    function handleRealtimeDelta(b64Mulaw) {
+      const mulawBuf = Buffer.from(b64Mulaw, 'base64');  // Already μ-law at 8kHz!
       
-      const pcmInt16 = pcm16leBufferToInt16(pcmBuf);          // Int16Array
-      console.log(`   → First few samples: [${Array.from(pcmInt16.slice(0, 8)).join(', ')}]`);
+      // Log first 10 deltas
+      if (deltaCount < 10) {
+        deltaCount++;
+        console.log(`🔊 Delta ${deltaCount}: ${mulawBuf.length} bytes μ-law (8kHz)`);
+      }
       
-      const mulaw = pcm16ToMuLaw(pcmInt16);                   // μ-law bytes
-      console.log(`   → μ-law buffer: ${mulaw.length} bytes`);
+      // Queue for Twilio pacing (160 bytes per 20 ms)
+      playBuffer = Buffer.concat([playBuffer, mulawBuf]);
       
-      playBuffer = Buffer.concat([playBuffer, mulaw]);
-      console.log(`   → Total playback buffer: ${playBuffer.length} bytes`);
-      pumpFrames();
+      // Pacing is always running, no need to start it here
     }
     
     function pumpFrames() {
       // Start pacing loop if not already running
       if (paceTimer) return;
       
-      paceTimer = setInterval(() => {
-        // Send exactly 160 bytes per 20ms
-        if (playBuffer.length >= 160) {
-          const chunk = playBuffer.subarray(0, 160);
-          playBuffer = playBuffer.subarray(160);
-          
-          if (twilioWs.readyState === WebSocket.OPEN) {
-            twilioWs.send(JSON.stringify({
-              event: 'media',
-              streamSid: streamSid,
-              media: { payload: chunk.toString('base64') }
-            }));
-          }
-        } else if (playBuffer.length === 0) {
-          // Nothing left, stop pacing
-          clearInterval(paceTimer);
+      // μ-law silence byte is 0xFF (not 0x00!)
+      const silenceFrame = Buffer.alloc(160, 0xFF);
+      
+      // High-precision timer using hrtime for drift correction
+      let startTime = process.hrtime.bigint();
+      let frameCount = 0;
+      
+      function sendNextFrame() {
+        if (twilioWs.readyState !== WebSocket.OPEN) {
           paceTimer = null;
+          return;
         }
-      }, 20); // Exactly 20ms per frame
+        
+        // Send frame
+        let chunk;
+        if (playBuffer.length >= 160) {
+          chunk = playBuffer.subarray(0, 160);
+          playBuffer = playBuffer.subarray(160);
+        } else if (playBuffer.length > 0) {
+          chunk = Buffer.concat([playBuffer, silenceFrame.subarray(0, 160 - playBuffer.length)]);
+          playBuffer = Buffer.alloc(0);
+        } else {
+          chunk = silenceFrame;
+        }
+        
+        twilioWs.send(JSON.stringify({
+          event: 'media',
+          streamSid: streamSid,
+          media: { payload: chunk.toString('base64') }
+        }));
+        
+        // Calculate next frame time with drift correction
+        frameCount++;
+        const expectedTime = startTime + BigInt(frameCount * 20_000_000); // 20ms in nanoseconds
+        const currentTime = process.hrtime.bigint();
+        const drift = Number(expectedTime - currentTime) / 1_000_000; // Convert to ms
+        
+        // Schedule next frame with drift correction (clamp between 1-40ms)
+        const nextDelay = Math.max(1, Math.min(40, Math.round(20 + drift)));
+        paceTimer = setTimeout(sendNextFrame, nextDelay);
+      }
+      
+      // Start the loop
+      paceTimer = setTimeout(sendNextFrame, 20);
     }
 
     // Handle OpenAI messages
@@ -167,7 +195,13 @@ wss.on("connection", async (twilioWs, req) => {
             break;
             
           case "session.updated":
-            console.log("✅ Session updated and ready");
+            // Extract the actual sample rate from session confirmation
+            const inRate = event.session?.input_audio_format?.sample_rate_hz;
+            const outRate = event.session?.output_audio_format?.sample_rate_hz;
+            console.log("✅ Session updated - formats:", 
+              `input=${inRate}Hz`, `output=${outRate}Hz`);
+            
+            if (outRate) realtimeOutputRate = outRate;
             sessionReady = true;
             
             // NOW it's safe to request greeting
@@ -226,12 +260,8 @@ wss.on("connection", async (twilioWs, req) => {
             
           case "input_audio_buffer.speech_started":
             console.log("🎤 User started speaking");
-            // Clear playback buffer on barge-in
+            // Clear playback buffer on barge-in (but keep pacing running for silence)
             playBuffer = Buffer.alloc(0);
-            if (paceTimer) {
-              clearInterval(paceTimer);
-              paceTimer = null;
-            }
             break;
             
           case "input_audio_buffer.speech_stopped":
@@ -269,7 +299,7 @@ wss.on("connection", async (twilioWs, req) => {
     openaiWs.on("close", () => {
       console.log("🔌 OpenAI WebSocket closed");
       if (paceTimer) {
-        clearInterval(paceTimer);
+        clearTimeout(paceTimer);
         paceTimer = null;
       }
     });
@@ -290,18 +320,18 @@ wss.on("connection", async (twilioWs, req) => {
           streamSid = msg.start.streamSid;
           callSid = msg.start.callSid;
           console.log("📞 Stream started:", { streamSid, callSid });
+          
+          // Start continuous audio pacing immediately
+          pumpFrames();
+          console.log("🎵 Started continuous audio stream to Twilio");
           break;
           
         case "media":
-          // FIX 3 & 5: Properly decode μ-law to PCM16LE for OpenAI
+          // Pass μ-law directly to OpenAI (no conversion needed!)
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady) {
-            const mulawBuf = Buffer.from(msg.media.payload, 'base64');
-            const pcmInt16 = muLawToPcm16(mulawBuf);              // Int16Array
-            const pcmLE = int16ToPcm16leBuffer(pcmInt16);         // Buffer (LE)
-            
             const audioAppend = {
               type: "input_audio_buffer.append",
-              audio: pcmLE.toString('base64')
+              audio: msg.media.payload  // Already base64 μ-law from Twilio!
             };
             openaiWs.send(JSON.stringify(audioAppend));
           }
@@ -319,7 +349,7 @@ wss.on("connection", async (twilioWs, req) => {
             openaiWs.close();
           }
           if (paceTimer) {
-            clearInterval(paceTimer);
+            clearTimeout(paceTimer);
             paceTimer = null;
           }
           break;
@@ -344,7 +374,7 @@ wss.on("connection", async (twilioWs, req) => {
       openaiWs.close();
     }
     if (paceTimer) {
-      clearInterval(paceTimer);
+      clearTimeout(paceTimer);
       paceTimer = null;
     }
   });
