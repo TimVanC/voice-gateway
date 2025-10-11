@@ -1,23 +1,33 @@
-// server-realtime.js - Twilio → OpenAI Realtime API relay (FIXED)
+// server-hybrid.js - OpenAI Realtime (text) + ElevenLabs TTS
 require("dotenv").config();
 const express = require("express");
 const { WebSocketServer } = require("ws");
 const WebSocket = require("ws");
 const bodyParser = require("body-parser");
 const twilio = require("twilio");
-const { pcm16ToMuLaw, muLawToPcm16, pcm16leBufferToInt16, int16ToPcm16leBuffer } = require("./g711");
-const { downsampleTo8k, upsample8kTo24k } = require("./resample");
+const axios = require("axios");
+const ffmpeg = require("fluent-ffmpeg");
+const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
+const { Readable } = require("stream");
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
 const PORT = process.env.PORT || 8080;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // Default: Rachel
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01";
 
 // Validate environment
 if (!OPENAI_API_KEY) {
   console.error("❌ OPENAI_API_KEY is required");
+  process.exit(1);
+}
+if (!ELEVENLABS_API_KEY) {
+  console.error("❌ ELEVENLABS_API_KEY is required");
   process.exit(1);
 }
 
@@ -39,7 +49,7 @@ app.post("/twilio/voice", (req, res) => {
     const host = new URL(base).host;
     const response = new twilio.twiml.VoiceResponse();
     const connect = response.connect();
-    connect.stream({ url: `wss://${host}/realtime/twilio` });
+    connect.stream({ url: `wss://${host}/hybrid/twilio` });
 
     return res.type("text/xml").send(response.toString());
   } catch (err) {
@@ -57,11 +67,12 @@ app.get("/health", (_req, res) => {
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server listening on port ${PORT}`);
   console.log(`✅ OpenAI API key configured`);
+  console.log(`✅ ElevenLabs API key configured`);
   console.log(`✅ Public URL: ${process.env.PUBLIC_BASE_URL}`);
 });
 
 // WebSocket server for Twilio Media Streams
-const wss = new WebSocketServer({ server, path: "/realtime/twilio" });
+const wss = new WebSocketServer({ server, path: "/hybrid/twilio" });
 
 wss.on("connection", async (twilioWs, req) => {
   console.log("\n📞 New Twilio connection from:", req.socket.remoteAddress);
@@ -70,8 +81,7 @@ wss.on("connection", async (twilioWs, req) => {
   let streamSid = null;
   let callSid = null;
   let sessionReady = false;
-  let realtimeOutputRate = 24000;  // Default assumption; updated when session confirms
-  let deltaCount = 0;
+  let greetingSent = false;  // Prevent duplicate greetings
   
   // Playback state for pacing
   let playBuffer = Buffer.alloc(0);
@@ -91,11 +101,11 @@ wss.on("connection", async (twilioWs, req) => {
     openaiWs.on("open", () => {
       console.log("✅ Connected to OpenAI Realtime API");
       
-      // FIX 1: Configure session FIRST with EXPLICIT 8kHz format objects
+      // Configure session - we'll use text responses and ignore audio
       const sessionConfig = {
         type: "session.update",
         session: {
-          modalities: ["text", "audio"],
+          modalities: ["text", "audio"],  // Keep both, but we'll only use text output
           instructions: `You are Zelda, a warm and professional receptionist for RSE Energy. Follow this exact script flow:
 
 **0) GREETING:**
@@ -146,14 +156,15 @@ Then immediately confirm: "That's [Address]. Correct?"
 - Always confirm personal info immediately after collecting it
 - Speak in short, natural sentences
 - Ask ONE question at a time
+- Use natural pauses and occasional filler words ("um", "let me see")
 - Keep tone warm, patient, and friendly
 - Do NOT promise arrival times - say "a dispatcher will confirm"
 - Always check for emergencies FIRST
 - Spell back details only when unsure or caller requests
 - End every call with a polite close`,
-          voice: "alloy",
-          input_audio_format: "g711_ulaw",   // Native 8kHz μ-law support!
-          output_audio_format: "g711_ulaw",  // Native 8kHz μ-law support!
+          voice: "alloy",  // Not used since we're doing text-only output
+          input_audio_format: "g711_ulaw",
+          output_audio_format: "g711_ulaw",  // We'll ignore this
           input_audio_transcription: {
             model: "whisper-1"
           },
@@ -161,41 +172,22 @@ Then immediately confirm: "That's [Address]. Correct?"
             type: "server_vad",
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 500
+            silence_duration_ms: 700
           },
-          temperature: 0.7,
+          temperature: 0.8,  // Slightly higher for more natural variation
           max_response_output_tokens: 4096
         }
       };
       
       openaiWs.send(JSON.stringify(sessionConfig));
-      console.log("📤 Sent session configuration, waiting for confirmation...");
+      console.log("📤 Sent session configuration");
     });
 
-    // Handle audio deltas - OpenAI sends μ-law directly, just pace it!
-    function handleRealtimeDelta(b64Mulaw) {
-      const mulawBuf = Buffer.from(b64Mulaw, 'base64');  // Already μ-law at 8kHz!
-      
-      // Log first 10 deltas
-      if (deltaCount < 10) {
-        deltaCount++;
-        console.log(`🔊 Delta ${deltaCount}: ${mulawBuf.length} bytes μ-law (8kHz)`);
-      }
-      
-      // Queue for Twilio pacing (160 bytes per 20 ms)
-      playBuffer = Buffer.concat([playBuffer, mulawBuf]);
-      
-      // Pacing is always running, no need to start it here
-    }
-    
+    // High-precision audio pacing
     function pumpFrames() {
-      // Start pacing loop if not already running
       if (paceTimer) return;
       
-      // μ-law silence byte is 0xFF (not 0x00!)
       const silenceFrame = Buffer.alloc(160, 0xFF);
-      
-      // High-precision timer using hrtime for drift correction
       let startTime = process.hrtime.bigint();
       let frameCount = 0;
       
@@ -205,7 +197,6 @@ Then immediately confirm: "That's [Address]. Correct?"
           return;
         }
         
-        // Send frame
         let chunk;
         if (playBuffer.length >= 160) {
           chunk = playBuffer.subarray(0, 160);
@@ -223,19 +214,71 @@ Then immediately confirm: "That's [Address]. Correct?"
           media: { payload: chunk.toString('base64') }
         }));
         
-        // Calculate next frame time with drift correction
         frameCount++;
-        const expectedTime = startTime + BigInt(frameCount * 20_000_000); // 20ms in nanoseconds
+        const expectedTime = startTime + BigInt(frameCount * 20_000_000);
         const currentTime = process.hrtime.bigint();
-        const drift = Number(expectedTime - currentTime) / 1_000_000; // Convert to ms
-        
-        // Schedule next frame with drift correction (clamp between 1-40ms)
+        const drift = Number(expectedTime - currentTime) / 1_000_000;
         const nextDelay = Math.max(1, Math.min(40, Math.round(20 + drift)));
         paceTimer = setTimeout(sendNextFrame, nextDelay);
       }
       
-      // Start the loop
       paceTimer = setTimeout(sendNextFrame, 20);
+    }
+
+    // Stream TTS from ElevenLabs and convert to μ-law
+    async function speakWithElevenLabs(text) {
+      try {
+        const displayText = text.length > 60 ? text.substring(0, 60) + "..." : text;
+        console.log("🎙️ AI:", displayText);
+        
+        // ElevenLabs streaming API
+        const response = await axios({
+          method: 'post',
+          url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
+          headers: {
+            'Accept': 'audio/mpeg',
+            'xi-api-key': ELEVENLABS_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          data: {
+            text: text,
+            model_id: "eleven_turbo_v2_5",  // Fastest, lowest latency
+            voice_settings: {
+              stability: 0.4,              // Lower = more expressive/varied
+              similarity_boost: 0.75,       // Voice clarity
+              style: 0.7,                   // Higher = more dramatic intonation
+              use_speaker_boost: true       // Enhance clarity
+            },
+            optimize_streaming_latency: 4,  // Maximum optimization (0-4)
+            output_format: "mp3_22050_32"   // Lower bitrate = faster streaming
+          },
+          responseType: 'stream'
+        });
+
+        // Stream MP3 -> μ-law conversion in real-time
+        const mp3Stream = response.data;
+        
+        ffmpeg(mp3Stream)
+          .inputFormat('mp3')
+          .audioCodec('pcm_mulaw')
+          .audioFrequency(8000)
+          .audioChannels(1)
+          .format('mulaw')
+          .on('error', (err) => {
+            console.error('❌ FFmpeg error:', err.message);
+          })
+          .on('end', () => {
+            console.log("✅ TTS playback complete");
+          })
+          .pipe()
+          .on('data', (chunk) => {
+            // Stream μ-law chunks directly to playback buffer
+            playBuffer = Buffer.concat([playBuffer, chunk]);
+          });
+        
+      } catch (error) {
+        console.error("❌ ElevenLabs error:", error.message);
+      }
     }
 
     // Handle OpenAI messages
@@ -249,72 +292,61 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "session.updated":
-            // Extract the actual sample rate from session confirmation
-            const inRate = event.session?.input_audio_format?.sample_rate_hz;
-            const outRate = event.session?.output_audio_format?.sample_rate_hz;
-            console.log("✅ Session updated - formats:", 
-              `input=${inRate}Hz`, `output=${outRate}Hz`);
-            
-            if (outRate) realtimeOutputRate = outRate;
+            console.log("✅ Session updated - hybrid mode enabled");
             sessionReady = true;
             
-            // NOW it's safe to request greeting
-            setTimeout(() => {
-              if (openaiWs.readyState === WebSocket.OPEN) {
-                const greeting = {
-                  type: "response.create",
-                  response: {
-                    modalities: ["audio", "text"],
-                    instructions: "Use the exact greeting from step 0: 'Thanks for calling RSE Energy. This is Zelda. How can I help today?'"
-                  }
-                };
-                openaiWs.send(JSON.stringify(greeting));
-                console.log("👋 Sent initial greeting request");
-              }
-            }, 250);
+            // Trigger OpenAI to generate greeting text (ONLY ONCE)
+            if (!greetingSent) {
+              greetingSent = true;
+              setTimeout(() => {
+                if (openaiWs.readyState === WebSocket.OPEN) {
+                  const greetingPrompt = {
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [
+                        {
+                          type: "input_text",
+                          text: "[System: Start the call with the greeting from step 0]"
+                        }
+                      ]
+                    }
+                  };
+                  openaiWs.send(JSON.stringify(greetingPrompt));
+                  
+                  // Trigger response with explicit modalities
+                  openaiWs.send(JSON.stringify({
+                    type: "response.create",
+                    response: {
+                      modalities: ["text"],  // Request text output only
+                      instructions: "Use the exact greeting from step 0: 'Thanks for calling RSE Energy. This is Zelda. How can I help today?'"
+                    }
+                  }));
+                  console.log("👋 Requested greeting from OpenAI");
+                }
+              }, 500);
+            }
             break;
             
           case "conversation.item.created":
-            console.log("💬 Conversation item created");
-            break;
-            
-          case "response.audio.delta":
-            // FIX 2 & 4: Stream audio with proper pacing
-            if (event.delta) {
-              const deltaSize = Buffer.from(event.delta, 'base64').length;
-              console.log(`🔊 Received audio delta: ${deltaSize} bytes (base64 decoded)`);
-              handleRealtimeDelta(event.delta);
-            }
-            break;
-            
-          case "response.audio.done":
-            console.log("✅ Audio response complete");
-            // Send mark to Twilio
-            if (twilioWs.readyState === WebSocket.OPEN) {
-              twilioWs.send(JSON.stringify({
-                event: "mark",
-                streamSid: streamSid,
-                mark: { name: "audio_done" }
-              }));
-            }
+            // Silent - too verbose
             break;
             
           case "response.text.delta":
-            // Log the text being generated
-            if (event.delta) {
-              process.stdout.write(event.delta);
-            }
+            // Silent - we'll get the full text later
             break;
             
           case "response.text.done":
-            if (event.text) {
-              console.log("\n📝 AI said:", event.text);
-            }
+            // Silent - we use audio_transcript.done instead
+            break;
+            
+          case "response.output_item.done":
+            // Silent - handled by audio_transcript.done
             break;
             
           case "input_audio_buffer.speech_started":
             console.log("🎤 User started speaking");
-            // Clear playback buffer on barge-in (but keep pacing running for silence)
             playBuffer = Buffer.alloc(0);
             break;
             
@@ -326,8 +358,15 @@ Then immediately confirm: "That's [Address]. Correct?"
             console.log("📝 Transcription:", event.transcript);
             break;
             
+          case "response.audio_transcript.done":
+            // Extract transcript and send to ElevenLabs
+            if (event.transcript) {
+              speakWithElevenLabs(event.transcript);
+            }
+            break;
+            
           case "response.done":
-            console.log("✅ Response complete");
+            // Silent - response complete
             break;
             
           case "error":
@@ -335,8 +374,7 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           default:
-            // Uncomment to see all events:
-            // console.log("📨 OpenAI event:", event.type);
+            // Silent - only log important events above
             break;
         }
       } catch (err) {
@@ -344,12 +382,10 @@ Then immediately confirm: "That's [Address]. Correct?"
       }
     });
 
-    // Handle OpenAI errors
     openaiWs.on("error", (error) => {
       console.error("❌ OpenAI WebSocket error:", error);
     });
 
-    // Handle OpenAI close
     openaiWs.on("close", () => {
       console.log("🔌 OpenAI WebSocket closed");
       if (paceTimer) {
@@ -374,31 +410,24 @@ Then immediately confirm: "That's [Address]. Correct?"
           streamSid = msg.start.streamSid;
           callSid = msg.start.callSid;
           console.log("📞 Stream started:", { streamSid, callSid });
-          
-          // Start continuous audio pacing immediately
           pumpFrames();
-          console.log("🎵 Started continuous audio stream to Twilio");
+          console.log("🎵 Started continuous audio stream");
           break;
           
         case "media":
-          // Pass μ-law directly to OpenAI (no conversion needed!)
+          // Pass μ-law directly to OpenAI for STT
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady) {
             const audioAppend = {
               type: "input_audio_buffer.append",
-              audio: msg.media.payload  // Already base64 μ-law from Twilio!
+              audio: msg.media.payload
             };
             openaiWs.send(JSON.stringify(audioAppend));
           }
           break;
           
-        case "mark":
-          // Audio playback marker from Twilio
-          break;
-          
         case "stop":
           console.log("📴 Stream stopped");
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-            // Commit any pending audio
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
             openaiWs.close();
           }
@@ -411,17 +440,12 @@ Then immediately confirm: "That's [Address]. Correct?"
         case "connected":
           console.log("📨 Twilio connected");
           break;
-          
-        default:
-          console.log("📨 Twilio event:", msg.event);
-          break;
       }
     } catch (err) {
       console.error("❌ Error parsing Twilio message:", err);
     }
   });
 
-  // Handle Twilio close
   twilioWs.on("close", () => {
     console.log("🔌 Twilio WebSocket closed");
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -433,12 +457,13 @@ Then immediately confirm: "That's [Address]. Correct?"
     }
   });
 
-  // Handle Twilio errors
   twilioWs.on("error", (error) => {
     console.error("❌ Twilio WebSocket error:", error);
   });
 });
 
-console.log("\n✨ Voice Gateway Ready!");
+console.log("\n✨ Hybrid Voice Gateway Ready!");
 console.log("📍 Webhook URL: " + process.env.PUBLIC_BASE_URL + "/twilio/voice");
+console.log("🎙️ Using ElevenLabs for ultra-natural TTS");
+console.log("🤖 Using OpenAI Realtime for conversation");
 console.log("🎧 Waiting for calls...\n");
