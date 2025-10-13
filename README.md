@@ -170,6 +170,85 @@ The AI receptionist (Zelda) follows this structured script:
 - ✅ Safety-first approach
 - ✅ Professional but warm
 
+## 🔍 **Confidence Checking & Verification**
+
+The system automatically validates and verifies all collected information to ensure accuracy.
+
+### **How It Works:**
+
+**1. Confidence Threshold:** 
+- Every transcription has a confidence score (0-1)
+- If confidence ≤ 0.60, verification is triggered
+
+**2. Format Validation:**
+- **Email:** Regex validation (must have @, domain, TLD)
+- **Phone:** 10-11 digit validation
+- **Address:** Minimum length and letter presence
+- **Names:** Check for unlikely characters (numbers, symbols)
+
+**3. Verification Prompts:**
+
+**Personal Info (spelling required):**
+- First/Last Name: "Could you please spell your [first/last] name for me?"
+- Email: "Do you mind spelling out that email for me?"
+- Phone: "Could you say your phone number slowly, digit by digit?"
+- Address: "Could you please spell that street name for me?"
+
+**Problem Context (repeat-back):**
+- Issue/Equipment/Symptoms: "I heard: '[transcript]'. Is that correct?"
+- If NO: "No problem. Please repeat that once more, and I will confirm."
+
+**4. Once-Per-Field Rule:**
+- Each field is only verified ONCE
+- After successful verification, field is marked as `verified: true`
+- Won't loop unless caller explicitly requests correction
+
+**5. Data Structure:**
+
+Each captured field stores:
+```json
+{
+  "field": "email",
+  "raw_value": "tim at example dot com",
+  "final_value": "tim@example.com",
+  "confidence": 0.54,
+  "verified": true,
+  "verified_at": "2025-10-13T21:30:00.000Z"
+}
+```
+
+Verification events log:
+```json
+{
+  "field": "email",
+  "reason": "low_confidence",
+  "prompt_used": "Do you mind spelling out that email for me?",
+  "timestamp": "2025-10-13T21:30:00.000Z",
+  "confidence": 0.54
+}
+```
+
+**6. SharePoint Integration:**
+
+At call end, the system outputs:
+- `fields[]` - All captured and verified fields
+- `verification_events[]` - Log of all verification attempts
+
+Ready for direct SharePoint/database logging.
+
+### **Monitored Fields:**
+
+**Personal Info:**
+- first_name, last_name
+- email, phone
+- street, city, state, zip
+- preferred_contact_method
+
+**Problem Context:**
+- issue_description
+- equipment_type, brand
+- symptoms, urgency
+
 ## 📊 System Prompt
 
 Edit the `instructions` field in either server file to customize:
@@ -178,6 +257,7 @@ Edit the `instructions` field in either server file to customize:
 - Emergency handling
 - Tone and personality
 - Script flow and phrasing
+- Verification behavior
 
 ## 🔧 Troubleshooting
 

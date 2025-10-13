@@ -9,6 +9,7 @@ const axios = require("axios");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const { Readable } = require("stream");
+const { FieldValidator } = require("./field-validator");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -39,11 +40,17 @@ app.use((req, res, next) => {
 
 // Twilio webhook - returns TwiML to start media stream
 app.post("/twilio/voice", (req, res) => {
+  console.log("\n📞 Incoming call to /twilio/voice");
+  console.log("From:", req.body.From);
+  console.log("To:", req.body.To);
+  
   try {
     const base = process.env.PUBLIC_BASE_URL;
     if (!base || !/^https:\/\/.+/i.test(base)) {
-      console.error("PUBLIC_BASE_URL missing/invalid:", base);
-      return res.status(500).send("PUBLIC_BASE_URL missing or invalid");
+      console.error("❌ PUBLIC_BASE_URL missing/invalid:", base);
+      const errorResponse = new twilio.twiml.VoiceResponse();
+      errorResponse.say("We're sorry, the system is not configured properly. Please try again later.");
+      return res.type("text/xml").send(errorResponse.toString());
     }
 
     const host = new URL(base).host;
@@ -51,10 +58,14 @@ app.post("/twilio/voice", (req, res) => {
     const connect = response.connect();
     connect.stream({ url: `wss://${host}/hybrid/twilio` });
 
-    return res.type("text/xml").send(response.toString());
+    const twiml = response.toString();
+    console.log("✅ Sending TwiML:", twiml);
+    return res.type("text/xml").send(twiml);
   } catch (err) {
-    console.error("Error in /twilio/voice:", err);
-    return res.status(500).send("Internal Server Error");
+    console.error("❌ Error in /twilio/voice:", err);
+    const errorResponse = new twilio.twiml.VoiceResponse();
+    errorResponse.say("We're sorry, an application error has occurred. Please try again later.");
+    return res.type("text/xml").send(errorResponse.toString());
   }
 });
 
@@ -82,6 +93,10 @@ wss.on("connection", async (twilioWs, req) => {
   let callSid = null;
   let sessionReady = false;
   let greetingSent = false;  // Prevent duplicate greetings
+  let streamStarted = false;  // Track if stream has started
+  
+  // Field validation and verification
+  const fieldValidator = new FieldValidator();
   
   // Playback state for pacing
   let playBuffer = Buffer.alloc(0);
@@ -106,10 +121,10 @@ wss.on("connection", async (twilioWs, req) => {
         type: "session.update",
         session: {
           modalities: ["text", "audio"],  // Keep both, but we'll only use text output
-          instructions: `You are Zelda, a warm and professional receptionist for RSE Energy. Follow this exact script flow:
+          instructions: `You are Zelda, a warm, friendly, and upbeat receptionist for RSE Energy. You're helpful and cheerful without being over-the-top. Follow this exact script flow:
 
 **0) GREETING:**
-"Thanks for calling RSE Energy. This is Zelda. How can I help today?"
+"Hi there! Thanks for calling RSE Energy. This is Zelda. How can I help you today?"
 
 **1) SAFETY CHECK (ALWAYS ASK FIRST):**
 "Before we dive in, is anyone in danger or do you smell gas or smoke?"
@@ -160,7 +175,10 @@ Then immediately confirm: "That's [Address]. Correct?"
 - Keep tone warm, patient, and friendly
 - Do NOT promise arrival times - say "a dispatcher will confirm"
 - Always check for emergencies FIRST
-- Spell back details only when unsure or caller requests
+- If you're unsure about what you heard (low confidence), ask the caller to spell it or confirm it
+- For emails and phone numbers, ask for spelling/digit-by-digit if unclear
+- For problem descriptions, repeat back what you heard and ask "Is that correct?"
+- Only verify each field ONCE - don't loop verification unless caller requests
 - End every call with a polite close`,
           voice: "alloy",  // Not used since we're doing text-only output
           input_audio_format: "g711_ulaw",
@@ -244,9 +262,9 @@ Then immediately confirm: "That's [Address]. Correct?"
             text: text,
             model_id: "eleven_turbo_v2_5",  // Fastest, lowest latency
             voice_settings: {
-              stability: 0.4,              // Lower = more expressive/varied
+              stability: 0.3,              // Lower = more expressive/varied (more animated)
               similarity_boost: 0.75,       // Voice clarity
-              style: 0.7,                   // Higher = more dramatic intonation
+              style: 0.5,                   // Moderate style (less dramatic, more natural)
               use_speaker_boost: true       // Enhance clarity
             },
             optimize_streaming_latency: 4,  // Maximum optimization (0-4)
@@ -295,37 +313,30 @@ Then immediately confirm: "That's [Address]. Correct?"
             console.log("✅ Session updated - hybrid mode enabled");
             sessionReady = true;
             
-            // Trigger OpenAI to generate greeting text (ONLY ONCE)
-            if (!greetingSent) {
+            // Send greeting if stream has already started
+            if (streamStarted && !greetingSent) {
               greetingSent = true;
               setTimeout(() => {
-                if (openaiWs.readyState === WebSocket.OPEN) {
-                  const greetingPrompt = {
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [
-                        {
-                          type: "input_text",
-                          text: "[System: Start the call with the greeting from step 0]"
-                        }
-                      ]
-                    }
-                  };
-                  openaiWs.send(JSON.stringify(greetingPrompt));
-                  
-                  // Trigger response with explicit modalities
-                  openaiWs.send(JSON.stringify({
-                    type: "response.create",
-                    response: {
-                      modalities: ["text"],  // Request text output only
-                      instructions: "Use the exact greeting from step 0: 'Thanks for calling RSE Energy. This is Zelda. How can I help today?'"
-                    }
-                  }));
-                  console.log("👋 Requested greeting from OpenAI");
-                }
-              }, 500);
+                const greeting = "Hi there! Thanks for calling RSE Energy. This is Zelda. How can I help you today?";
+                console.log("👋 Sending greeting");
+                speakWithElevenLabs(greeting);
+                
+                // Add the greeting to conversation history so OpenAI knows we already said it
+                const greetingItem = {
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "assistant",
+                    content: [
+                      {
+                        type: "text",
+                        text: greeting
+                      }
+                    ]
+                  }
+                };
+                openaiWs.send(JSON.stringify(greetingItem));
+              }, 300);
             }
             break;
             
@@ -355,7 +366,32 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "conversation.item.input_audio_transcription.completed":
-            console.log("📝 Transcription:", event.transcript);
+            const transcript = event.transcript || "";
+            const confidence = event.confidence || 1.0; // OpenAI doesn't always provide confidence
+            
+            console.log(`📝 Transcription (conf: ${confidence.toFixed(2)}):`, transcript);
+            
+            // Check if we're awaiting verification
+            if (fieldValidator.getCurrentVerification()) {
+              const verification = fieldValidator.handleVerificationResponse(transcript);
+              
+              if (verification.success) {
+                console.log(`✅ Verified: ${verification.normalizedValue}`);
+                // Continue conversation naturally - OpenAI will proceed
+              } else if (verification.prompt) {
+                console.log(`🔄 Re-verification needed`);
+                // Send verification prompt through ElevenLabs
+                speakWithElevenLabs(verification.prompt);
+                
+                // If it's a retry, clear the verification state so they can try again
+                if (verification.shouldRetry) {
+                  fieldValidator.clearVerification();
+                }
+              }
+            }
+            
+            // Note: Actual field extraction would happen in a more sophisticated way
+            // For now, OpenAI handles the conversation flow and we log confidence
             break;
             
           case "response.audio_transcript.done":
@@ -412,6 +448,7 @@ Then immediately confirm: "That's [Address]. Correct?"
           console.log("📞 Stream started:", { streamSid, callSid });
           pumpFrames();
           console.log("🎵 Started continuous audio stream");
+          streamStarted = true;  // Mark that stream is ready
           break;
           
         case "media":
@@ -448,6 +485,16 @@ Then immediately confirm: "That's [Address]. Correct?"
 
   twilioWs.on("close", () => {
     console.log("🔌 Twilio WebSocket closed");
+    
+    // Log SharePoint-ready data
+    const sharePointData = fieldValidator.getSharePointData();
+    if (sharePointData.fields.length > 0 || sharePointData.verification_events.length > 0) {
+      console.log("\n📊 Call Summary:");
+      console.log("Captured Fields:", JSON.stringify(sharePointData.fields, null, 2));
+      console.log("Verification Events:", JSON.stringify(sharePointData.verification_events, null, 2));
+      console.log("\n💾 Ready for SharePoint logging\n");
+    }
+    
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.close();
     }
