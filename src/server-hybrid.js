@@ -10,6 +10,7 @@ const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const { Readable } = require("stream");
 const { FieldValidator } = require("./field-validator");
+const { estimateConfidence, inferFieldContext } = require("./confidence-estimator");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -94,6 +95,7 @@ wss.on("connection", async (twilioWs, req) => {
   let sessionReady = false;
   let greetingSent = false;  // Prevent duplicate greetings
   let streamStarted = false;  // Track if stream has started
+  let lastAIResponse = "";  // Track last AI question for context
   
   // Field validation and verification
   const fieldValidator = new FieldValidator();
@@ -367,9 +369,17 @@ Then immediately confirm: "That's [Address]. Correct?"
             
           case "conversation.item.input_audio_transcription.completed":
             const transcript = event.transcript || "";
-            const confidence = event.confidence || 1.0; // OpenAI doesn't always provide confidence
             
-            console.log(`📝 Transcription (conf: ${confidence.toFixed(2)}):`, transcript);
+            // Estimate confidence since OpenAI always returns 1.0
+            const fieldContext = inferFieldContext(lastAIResponse);
+            const confidenceResult = estimateConfidence(transcript, fieldContext);
+            const estimatedConfidence = confidenceResult.confidence;
+            
+            // Log with estimated confidence and indicators
+            const indicatorStr = confidenceResult.indicators.length > 0 
+              ? ` [${confidenceResult.indicators.join(', ')}]` 
+              : '';
+            console.log(`📝 Transcription (est: ${estimatedConfidence.toFixed(2)}${indicatorStr}):`, transcript);
             
             // Check if we're awaiting verification
             if (fieldValidator.getCurrentVerification()) {
@@ -388,15 +398,25 @@ Then immediately confirm: "That's [Address]. Correct?"
                   fieldValidator.clearVerification();
                 }
               }
+            } else {
+              // Not in verification mode - check if this response needs verification
+              // based on estimated confidence and field context
+              if (fieldContext !== 'general' && estimatedConfidence < 0.60) {
+                const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+                
+                if (captureResult.needsVerify && captureResult.prompt) {
+                  console.log(`⚠️  Low confidence (${estimatedConfidence.toFixed(2)}) - requesting verification`);
+                  // Interrupt the flow to verify
+                  speakWithElevenLabs(captureResult.prompt);
+                }
+              }
             }
-            
-            // Note: Actual field extraction would happen in a more sophisticated way
-            // For now, OpenAI handles the conversation flow and we log confidence
             break;
             
           case "response.audio_transcript.done":
             // Extract transcript and send to ElevenLabs
             if (event.transcript) {
+              lastAIResponse = event.transcript; // Track for context
               speakWithElevenLabs(event.transcript);
             }
             break;

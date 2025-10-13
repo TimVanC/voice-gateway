@@ -176,9 +176,17 @@ The system automatically validates and verifies all collected information to ens
 
 ### **How It Works:**
 
-**1. Confidence Threshold:** 
-- Every transcription has a confidence score (0-1)
-- If confidence ≤ 0.60, verification is triggered
+**1. Confidence Estimation:** 
+- OpenAI Realtime API doesn't provide real confidence scores (always returns 1.0)
+- We use **heuristic estimation** based on transcription quality indicators:
+  - Transcription artifacts ([inaudible], [unclear])
+  - Unusual length for field type
+  - Excessive filler words (um, uh, like)
+  - Gibberish patterns (random consonant clusters)
+  - Repeated words
+  - Field-specific format validation
+  - Very short responses to open questions
+- If estimated confidence ≤ 0.60, verification is triggered
 
 **2. Format Validation:**
 - **Email:** Regex validation (must have @, domain, TLD)
