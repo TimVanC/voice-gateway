@@ -7,6 +7,8 @@ const bodyParser = require("body-parser");
 const twilio = require("twilio");
 const { pcm16ToMuLaw, muLawToPcm16, pcm16leBufferToInt16, int16ToPcm16leBuffer } = require("./g711");
 const { downsampleTo8k, upsample8kTo24k } = require("./resample");
+const { FieldValidator } = require("./field-validator");
+const { estimateConfidence, inferFieldContext } = require("./confidence-estimator");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -72,10 +74,23 @@ wss.on("connection", async (twilioWs, req) => {
   let sessionReady = false;
   let realtimeOutputRate = 24000;  // Default assumption; updated when session confirms
   let deltaCount = 0;
+  let lastAIResponse = "";  // Track last AI question for context
+  let awaitingVerification = false;  // Flag to prevent processing during verification
+  let pendingTranscription = null;  // Store transcription awaiting validation
+  
+  // Field validation and verification
+  const fieldValidator = new FieldValidator();
   
   // Playback state for pacing
   let playBuffer = Buffer.alloc(0);
   let paceTimer = null;
+  
+  // Manual VAD state for detecting speech end
+  let speechDetected = false;
+  let silenceFrames = 0;
+  const SILENCE_THRESHOLD = 0.01;  // RMS threshold for silence
+  const SILENCE_FRAMES_REQUIRED = 25;  // ~500ms at 20ms per frame
+  let audioFrameCount = 0;
   
   // Connect to OpenAI Realtime API
   try {
@@ -157,12 +172,7 @@ Then immediately confirm: "That's [Address]. Correct?"
           input_audio_transcription: {
             model: "whisper-1"
           },
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 500
-          },
+          turn_detection: null,  // DISABLE server VAD - manual control for pre-validation
           temperature: 0.7,
           max_response_output_tokens: 4096
         }
@@ -172,6 +182,18 @@ Then immediately confirm: "That's [Address]. Correct?"
       console.log("📤 Sent session configuration, waiting for confirmation...");
     });
 
+    // Helper function to calculate RMS of audio buffer
+    function calculateRMS(buffer) {
+      if (buffer.length === 0) return 0;
+      const samples = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.length / 2);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const normalized = samples[i] / 32768.0;
+        sum += normalized * normalized;
+      }
+      return Math.sqrt(sum / samples.length);
+    }
+    
     // Handle audio deltas - OpenAI sends μ-law directly, just pace it!
     function handleRealtimeDelta(b64Mulaw) {
       const mulawBuf = Buffer.from(b64Mulaw, 'base64');  // Already μ-law at 8kHz!
@@ -252,24 +274,36 @@ Then immediately confirm: "That's [Address]. Correct?"
             // Extract the actual sample rate from session confirmation
             const inRate = event.session?.input_audio_format?.sample_rate_hz;
             const outRate = event.session?.output_audio_format?.sample_rate_hz;
-            console.log("✅ Session updated - formats:", 
+            console.log("✅ Session updated with manual VAD - formats:", 
               `input=${inRate}Hz`, `output=${outRate}Hz`);
             
             if (outRate) realtimeOutputRate = outRate;
             sessionReady = true;
             
-            // NOW it's safe to request greeting
+            // Send greeting manually with manual trigger
             setTimeout(() => {
               if (openaiWs.readyState === WebSocket.OPEN) {
-                const greeting = {
+                const greeting = "Thanks for calling RSE Energy. This is Zelda. How can I help today?";
+                
+                // Add greeting to conversation history
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "assistant",
+                    content: [{ type: "text", text: greeting }]
+                  }
+                }));
+                
+                // Trigger audio generation
+                openaiWs.send(JSON.stringify({
                   type: "response.create",
                   response: {
-                    modalities: ["audio", "text"],
-                    instructions: "Use the exact greeting from step 0: 'Thanks for calling RSE Energy. This is Zelda. How can I help today?'"
+                    modalities: ["audio"],
+                    instructions: `Say exactly: "${greeting}"`
                   }
-                };
-                openaiWs.send(JSON.stringify(greeting));
-                console.log("👋 Sent initial greeting request");
+                }));
+                console.log("👋 Sent initial greeting");
               }
             }, 250);
             break;
@@ -309,21 +343,158 @@ Then immediately confirm: "That's [Address]. Correct?"
           case "response.text.done":
             if (event.text) {
               console.log("\n📝 AI said:", event.text);
+              lastAIResponse = event.text;  // Track for context inference
             }
             break;
             
           case "input_audio_buffer.speech_started":
-            console.log("🎤 User started speaking");
-            // Clear playback buffer on barge-in (but keep pacing running for silence)
-            playBuffer = Buffer.alloc(0);
+            console.log("🎤 User started speaking (buffer event)");
+            speechDetected = true;
+            silenceFrames = 0;
+            playBuffer = Buffer.alloc(0);  // Clear playback buffer on barge-in
             break;
             
           case "input_audio_buffer.speech_stopped":
-            console.log("🔇 User stopped speaking");
+            console.log("🔇 User stopped speaking (buffer event)");
+            speechDetected = false;
+            break;
+            
+          case "input_audio_buffer.committed":
+            console.log("✅ Audio buffer committed, waiting for transcription...");
             break;
             
           case "conversation.item.input_audio_transcription.completed":
-            console.log("📝 Transcription:", event.transcript);
+            if (!event || !event.transcript) break;
+            
+            const transcript = event.transcript;
+            console.log(`📝 Raw transcription received: "${transcript}"`);
+            
+            // If we're awaiting verification, handle the verification response
+            if (awaitingVerification) {
+              console.log(`📝 Processing as verification response`);
+              
+              const verification = fieldValidator.handleVerificationResponse(transcript);
+              
+              if (verification.success) {
+                console.log(`✅ Verified: ${verification.normalizedValue}`);
+                awaitingVerification = false;
+                
+                // Inject verified value into conversation and trigger response
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: verification.normalizedValue }]
+                    }
+                  }));
+                  openaiWs.send(JSON.stringify({ 
+                    type: "response.create",
+                    response: { modalities: ["audio", "text"] }
+                  }));
+                }
+              } else if (verification.prompt) {
+                console.log(`🔄 Re-verification needed`);
+                // Speak verification prompt using OpenAI TTS
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "text", text: verification.prompt }]
+                    }
+                  }));
+                  openaiWs.send(JSON.stringify({
+                    type: "response.create",
+                    response: {
+                      modalities: ["audio"],
+                      instructions: `Say exactly: "${verification.prompt}"`
+                    }
+                  }));
+                }
+                if (verification.shouldRetry) {
+                  fieldValidator.clearVerification();
+                }
+              }
+              
+              pendingTranscription = null;
+              break;
+            }
+            
+            // Estimate confidence since OpenAI always returns 1.0
+            const fieldContext = inferFieldContext(lastAIResponse);
+            const confidenceResult = estimateConfidence(transcript, fieldContext);
+            const estimatedConfidence = confidenceResult.confidence;
+            
+            // Log with estimated confidence and indicators
+            const indicatorStr = confidenceResult.indicators.length > 0 
+              ? ` [${confidenceResult.indicators.join(', ')}]` 
+              : '';
+            console.log(`📊 Confidence: ${estimatedConfidence.toFixed(2)}${indicatorStr} | Context: ${fieldContext}`);
+            
+            // CRITICAL: Validate BEFORE OpenAI processes it
+            if (fieldContext !== 'general' && estimatedConfidence < 0.60 && transcript.trim().length > 0) {
+              console.log(`⚠️  LOW CONFIDENCE - Intercepting before OpenAI processes`);
+              
+              // Store pending transcription
+              pendingTranscription = { transcript, fieldContext, confidence: estimatedConfidence };
+              
+              // Get appropriate verification prompt
+              const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              
+              if (captureResult.needsVerify && captureResult.prompt) {
+                awaitingVerification = true;
+                
+                // Speak the verification prompt WITHOUT letting OpenAI respond to original transcript
+                setTimeout(() => {
+                  if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                    openaiWs.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "assistant",
+                        content: [{ type: "text", text: captureResult.prompt }]
+                      }
+                    }));
+                    openaiWs.send(JSON.stringify({
+                      type: "response.create",
+                      response: {
+                        modalities: ["audio"],
+                        instructions: `Say exactly: "${captureResult.prompt}"`
+                      }
+                    }));
+                  }
+                }, 200);
+              }
+              
+              // DO NOT trigger response.create - we're handling this ourselves
+              break;
+            }
+            
+            // High confidence - let OpenAI process it normally
+            if (fieldContext !== 'general' && transcript.trim().length > 0) {
+              fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+            }
+            
+            // Inject transcript as user message and trigger OpenAI response
+            if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !awaitingVerification) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: transcript }]
+                }
+              }));
+              openaiWs.send(JSON.stringify({ 
+                type: "response.create",
+                response: { modalities: ["audio", "text"] }
+              }));
+            }
+            
+            pendingTranscription = null;
             break;
             
           case "response.done":
@@ -381,13 +552,56 @@ Then immediately confirm: "That's [Address]. Correct?"
           break;
           
         case "media":
-          // Pass μ-law directly to OpenAI (no conversion needed!)
-          if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady) {
-            const audioAppend = {
-              type: "input_audio_buffer.append",
-              audio: msg.media.payload  // Already base64 μ-law from Twilio!
-            };
-            openaiWs.send(JSON.stringify(audioAppend));
+          // Manual VAD: detect speech end and commit buffer for transcription
+          if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady && !awaitingVerification) {
+            const mulawData = Buffer.from(msg.media.payload, 'base64');
+            
+            // Convert to PCM16 for RMS calculation
+            const pcm16 = muLawToPcm16(mulawData);
+            const pcm16Buffer = Buffer.from(pcm16.buffer);
+            const rms = calculateRMS(pcm16Buffer);
+            
+            audioFrameCount++;
+            
+            // Detect speech vs silence
+            if (rms > SILENCE_THRESHOLD) {
+              // Speech detected
+              if (!speechDetected) {
+                console.log(`🎤 Speech start detected (RMS: ${rms.toFixed(4)})`);
+                speechDetected = true;
+              }
+              silenceFrames = 0;
+              
+              // Append to buffer
+              const audioAppend = {
+                type: "input_audio_buffer.append",
+                audio: msg.media.payload
+              };
+              openaiWs.send(JSON.stringify(audioAppend));
+            } else {
+              // Silence
+              if (speechDetected) {
+                silenceFrames++;
+                
+                // Continue appending during hangover period
+                const audioAppend = {
+                  type: "input_audio_buffer.append",
+                  audio: msg.media.payload
+                };
+                openaiWs.send(JSON.stringify(audioAppend));
+                
+                // End of speech detected
+                if (silenceFrames >= SILENCE_FRAMES_REQUIRED) {
+                  console.log(`🔇 Speech end detected after ${silenceFrames * 20}ms silence`);
+                  speechDetected = false;
+                  silenceFrames = 0;
+                  
+                  // Commit buffer to trigger transcription
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                  console.log(`📤 Committed audio buffer for transcription`);
+                }
+              }
+            }
           }
           break;
           
@@ -424,6 +638,16 @@ Then immediately confirm: "That's [Address]. Correct?"
   // Handle Twilio close
   twilioWs.on("close", () => {
     console.log("🔌 Twilio WebSocket closed");
+    
+    // Log SharePoint-ready data
+    const sharePointData = fieldValidator.getSharePointData();
+    if (sharePointData.fields.length > 0 || sharePointData.verification_events.length > 0) {
+      console.log("\n📊 Call Summary:");
+      console.log("Captured Fields:", JSON.stringify(sharePointData.fields, null, 2));
+      console.log("Verification Events:", JSON.stringify(sharePointData.verification_events, null, 2));
+      console.log("\n💾 Ready for SharePoint logging\n");
+    }
+    
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.close();
     }

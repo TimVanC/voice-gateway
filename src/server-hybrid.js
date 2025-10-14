@@ -96,6 +96,8 @@ wss.on("connection", async (twilioWs, req) => {
   let greetingSent = false;  // Prevent duplicate greetings
   let streamStarted = false;  // Track if stream has started
   let lastAIResponse = "";  // Track last AI question for context
+  let awaitingVerification = false;  // Flag to prevent OpenAI from processing during verification
+  let pendingTranscription = null;  // Store transcription awaiting validation
   
   // Field validation and verification
   const fieldValidator = new FieldValidator();
@@ -103,6 +105,13 @@ wss.on("connection", async (twilioWs, req) => {
   // Playback state for pacing
   let playBuffer = Buffer.alloc(0);
   let paceTimer = null;
+  
+  // Manual VAD state for detecting speech end
+  let speechDetected = false;
+  let silenceFrames = 0;
+  const SILENCE_THRESHOLD = 0.01;  // RMS threshold for silence
+  const SILENCE_FRAMES_REQUIRED = 25;  // ~500ms at 20ms per frame
+  let audioFrameCount = 0;
   
   // Connect to OpenAI Realtime API
   try {
@@ -118,7 +127,7 @@ wss.on("connection", async (twilioWs, req) => {
     openaiWs.on("open", () => {
       console.log("✅ Connected to OpenAI Realtime API");
       
-      // Configure session - we'll use text responses and ignore audio
+      // Configure session - MANUAL commit mode for pre-validation
       const sessionConfig = {
         type: "session.update",
         session: {
@@ -188,12 +197,7 @@ Then immediately confirm: "That's [Address]. Correct?"
           input_audio_transcription: {
             model: "whisper-1"
           },
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 700
-          },
+          turn_detection: null,  // DISABLE server VAD - we'll manually control when to generate responses
           temperature: 0.8,  // Slightly higher for more natural variation
           max_response_output_tokens: 4096
         }
@@ -301,6 +305,18 @@ Then immediately confirm: "That's [Address]. Correct?"
       }
     }
 
+    // Helper function to calculate RMS of audio buffer
+    function calculateRMS(buffer) {
+      if (buffer.length === 0) return 0;
+      const samples = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.length / 2);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const normalized = samples[i] / 32768.0;
+        sum += normalized * normalized;
+      }
+      return Math.sqrt(sum / samples.length);
+    }
+    
     // Handle OpenAI messages
     openaiWs.on("message", (data) => {
       try {
@@ -312,7 +328,7 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "session.updated":
-            console.log("✅ Session updated - hybrid mode enabled");
+            console.log("✅ Session updated - hybrid mode with manual VAD enabled");
             sessionReady = true;
             
             // Send greeting if stream has already started
@@ -359,16 +375,60 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "input_audio_buffer.speech_started":
-            console.log("🎤 User started speaking");
-            playBuffer = Buffer.alloc(0);
+            console.log("🎤 User started speaking (buffer event)");
+            speechDetected = true;
+            silenceFrames = 0;
+            playBuffer = Buffer.alloc(0);  // Stop any AI playback
             break;
             
           case "input_audio_buffer.speech_stopped":
-            console.log("🔇 User stopped speaking");
+            console.log("🔇 User stopped speaking (buffer event)");
+            speechDetected = false;
+            break;
+            
+          case "input_audio_buffer.committed":
+            console.log("✅ Audio buffer committed, waiting for transcription...");
             break;
             
           case "conversation.item.input_audio_transcription.completed":
-            const transcript = event.transcript || "";
+            if (!event || !event.transcript) break; // Safety check
+            
+            const transcript = event.transcript;
+            console.log(`📝 Raw transcription received: "${transcript}"`);
+            
+            // If we're awaiting verification, handle the verification response
+            if (awaitingVerification) {
+              console.log(`📝 Processing as verification response`);
+              
+              const verification = fieldValidator.handleVerificationResponse(transcript);
+              
+              if (verification.success) {
+                console.log(`✅ Verified: ${verification.normalizedValue}`);
+                awaitingVerification = false;
+                
+                // Inject verified value into conversation and trigger response
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: verification.normalizedValue }]
+                    }
+                  }));
+                  openaiWs.send(JSON.stringify({ type: "response.create" }));
+                }
+              } else if (verification.prompt) {
+                console.log(`🔄 Re-verification needed`);
+                speakWithElevenLabs(verification.prompt);
+                if (verification.shouldRetry) {
+                  fieldValidator.clearVerification();
+                }
+              }
+              
+              pendingTranscription = null;
+              break;
+            }
             
             // Estimate confidence since OpenAI always returns 1.0
             const fieldContext = inferFieldContext(lastAIResponse);
@@ -379,38 +439,50 @@ Then immediately confirm: "That's [Address]. Correct?"
             const indicatorStr = confidenceResult.indicators.length > 0 
               ? ` [${confidenceResult.indicators.join(', ')}]` 
               : '';
-            console.log(`📝 Transcription (est: ${estimatedConfidence.toFixed(2)}${indicatorStr}):`, transcript);
+            console.log(`📊 Confidence: ${estimatedConfidence.toFixed(2)}${indicatorStr} | Context: ${fieldContext}`);
             
-            // Check if we're awaiting verification
-            if (fieldValidator.getCurrentVerification()) {
-              const verification = fieldValidator.handleVerificationResponse(transcript);
+            // CRITICAL: Validate BEFORE OpenAI processes it
+            if (fieldContext !== 'general' && estimatedConfidence < 0.60 && transcript.trim().length > 0) {
+              console.log(`⚠️  LOW CONFIDENCE - Intercepting before OpenAI processes`);
               
-              if (verification.success) {
-                console.log(`✅ Verified: ${verification.normalizedValue}`);
-                // Continue conversation naturally - OpenAI will proceed
-              } else if (verification.prompt) {
-                console.log(`🔄 Re-verification needed`);
-                // Send verification prompt through ElevenLabs
-                speakWithElevenLabs(verification.prompt);
+              // Store pending transcription
+              pendingTranscription = { transcript, fieldContext, confidence: estimatedConfidence };
+              
+              // Get appropriate verification prompt
+              const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              
+              if (captureResult.needsVerify && captureResult.prompt) {
+                awaitingVerification = true;
                 
-                // If it's a retry, clear the verification state so they can try again
-                if (verification.shouldRetry) {
-                  fieldValidator.clearVerification();
-                }
-              }
-            } else {
-              // Not in verification mode - check if this response needs verification
-              // based on estimated confidence and field context
-              if (fieldContext !== 'general' && estimatedConfidence < 0.60) {
-                const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
-                
-                if (captureResult.needsVerify && captureResult.prompt) {
-                  console.log(`⚠️  Low confidence (${estimatedConfidence.toFixed(2)}) - requesting verification`);
-                  // Interrupt the flow to verify
+                // Speak the verification prompt WITHOUT letting OpenAI respond to original transcript
+                setTimeout(() => {
                   speakWithElevenLabs(captureResult.prompt);
-                }
+                }, 200);
               }
+              
+              // DO NOT trigger response.create - we're handling this ourselves
+              break;
             }
+            
+            // High confidence - let OpenAI process it normally
+            if (fieldContext !== 'general' && transcript.trim().length > 0) {
+              fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+            }
+            
+            // Inject transcript as user message and trigger OpenAI response
+            if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !awaitingVerification) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: transcript }]
+                }
+              }));
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
+            }
+            
+            pendingTranscription = null;
             break;
             
           case "response.audio_transcript.done":
@@ -472,13 +544,57 @@ Then immediately confirm: "That's [Address]. Correct?"
           break;
           
         case "media":
-          // Pass μ-law directly to OpenAI for STT
-          if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady) {
-            const audioAppend = {
-              type: "input_audio_buffer.append",
-              audio: msg.media.payload
-            };
-            openaiWs.send(JSON.stringify(audioAppend));
+          // Manual VAD: detect speech end and commit buffer for transcription
+          if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady && !awaitingVerification) {
+            const mulawData = Buffer.from(msg.media.payload, 'base64');
+            
+            // Convert to PCM16 for RMS calculation
+            const { muLawToPcm16 } = require('./g711');
+            const pcm16 = muLawToPcm16(mulawData);
+            const pcm16Buffer = Buffer.from(pcm16.buffer);
+            const rms = calculateRMS(pcm16Buffer);
+            
+            audioFrameCount++;
+            
+            // Detect speech vs silence
+            if (rms > SILENCE_THRESHOLD) {
+              // Speech detected
+              if (!speechDetected) {
+                console.log(`🎤 Speech start detected (RMS: ${rms.toFixed(4)})`);
+                speechDetected = true;
+              }
+              silenceFrames = 0;
+              
+              // Append to buffer
+              const audioAppend = {
+                type: "input_audio_buffer.append",
+                audio: msg.media.payload
+              };
+              openaiWs.send(JSON.stringify(audioAppend));
+            } else {
+              // Silence
+              if (speechDetected) {
+                silenceFrames++;
+                
+                // Continue appending during hangover period
+                const audioAppend = {
+                  type: "input_audio_buffer.append",
+                  audio: msg.media.payload
+                };
+                openaiWs.send(JSON.stringify(audioAppend));
+                
+                // End of speech detected
+                if (silenceFrames >= SILENCE_FRAMES_REQUIRED) {
+                  console.log(`🔇 Speech end detected after ${silenceFrames * 20}ms silence`);
+                  speechDetected = false;
+                  silenceFrames = 0;
+                  
+                  // Commit buffer to trigger transcription
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                  console.log(`📤 Committed audio buffer for transcription`);
+                }
+              }
+            }
           }
           break;
           
