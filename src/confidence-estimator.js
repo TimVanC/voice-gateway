@@ -139,6 +139,26 @@ function estimateConfidence(transcript, fieldContext = 'general') {
     indicators.push('numbers_in_name');
   }
 
+  // 11. Common farewell/dismissal phrases (not actual data)
+  const farewellPhrases = ['bye', 'goodbye', 'see you', 'thanks for your time', 'have a good day', 'no thanks'];
+  if (farewellPhrases.some(phrase => text.toLowerCase().includes(phrase))) {
+    confidence -= 0.6;  // Very low confidence for goodbye phrases
+    indicators.push('farewell_phrase');
+  }
+
+  // 12. For name fields, check if response is too short or contains common non-names
+  if ((fieldContext === 'first_name' || fieldContext === 'last_name')) {
+    if (text.length < 2) {
+      confidence -= 0.5;
+      indicators.push('name_too_short');
+    }
+    const nonNameWords = ['no', 'yes', 'okay', 'ok', 'thanks', 'bye', 'uh', 'um', 'hello', 'hi'];
+    if (nonNameWords.includes(text.toLowerCase().trim())) {
+      confidence -= 0.7;  // Very unlikely to be a name
+      indicators.push('non_name_word');
+    }
+  }
+
   // Clamp confidence to 0-1 range
   confidence = Math.max(0.0, Math.min(1.0, confidence));
 
@@ -157,10 +177,12 @@ function estimateConfidence(transcript, fieldContext = 'general') {
 function inferFieldContext(lastQuestion) {
   const lowerQuestion = lastQuestion.toLowerCase();
   
-  if (lowerQuestion.includes('email')) return 'email';
-  if (lowerQuestion.includes('phone') || lowerQuestion.includes('number')) return 'phone';
+  // Order matters - check most specific first
   if (lowerQuestion.includes('first name')) return 'first_name';
   if (lowerQuestion.includes('last name')) return 'last_name';
+  if (lowerQuestion.includes('full name') || lowerQuestion.includes('your name')) return 'first_name';  // FIX: Detect "What's your name?"
+  if (lowerQuestion.includes('email')) return 'email';
+  if (lowerQuestion.includes('phone') || lowerQuestion.includes('number to reach')) return 'phone';
   if (lowerQuestion.includes('street') || lowerQuestion.includes('address')) return 'street';
   if (lowerQuestion.includes('city')) return 'city';
   if (lowerQuestion.includes('state')) return 'state';

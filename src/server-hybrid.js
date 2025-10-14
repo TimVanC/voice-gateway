@@ -110,8 +110,10 @@ wss.on("connection", async (twilioWs, req) => {
   let speechDetected = false;
   let silenceFrames = 0;
   const SILENCE_THRESHOLD = 0.01;  // RMS threshold for silence
-  const SILENCE_FRAMES_REQUIRED = 25;  // ~500ms at 20ms per frame
+  const SILENCE_FRAMES_REQUIRED = 40;  // ~800ms at 20ms per frame (INCREASED to give users more time)
+  const MAX_SPEECH_FRAMES = 500;  // ~10 seconds max per utterance (safety timeout)
   let audioFrameCount = 0;
+  let speechFrameCount = 0;  // Track how long user has been speaking
   
   // Connect to OpenAI Realtime API
   try {
@@ -454,6 +456,18 @@ Then immediately confirm: "That's [Address]. Correct?"
               if (captureResult.needsVerify && captureResult.prompt) {
                 awaitingVerification = true;
                 
+                // Add verification prompt to conversation history
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "text", text: captureResult.prompt }]
+                    }
+                  }));
+                }
+                
                 // Speak the verification prompt WITHOUT letting OpenAI respond to original transcript
                 setTimeout(() => {
                   speakWithElevenLabs(captureResult.prompt);
@@ -562,8 +576,10 @@ Then immediately confirm: "That's [Address]. Correct?"
               if (!speechDetected) {
                 console.log(`🎤 Speech start detected (RMS: ${rms.toFixed(4)})`);
                 speechDetected = true;
+                speechFrameCount = 0;
               }
               silenceFrames = 0;
+              speechFrameCount++;
               
               // Append to buffer
               const audioAppend = {
@@ -571,6 +587,15 @@ Then immediately confirm: "That's [Address]. Correct?"
                 audio: msg.media.payload
               };
               openaiWs.send(JSON.stringify(audioAppend));
+              
+              // Safety timeout: Force commit if speech is too long
+              if (speechFrameCount >= MAX_SPEECH_FRAMES) {
+                console.log(`⏱️  Max speech duration reached (${speechFrameCount * 20}ms), forcing commit`);
+                speechDetected = false;
+                silenceFrames = 0;
+                speechFrameCount = 0;
+                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+              }
             } else {
               // Silence
               if (speechDetected) {
@@ -585,9 +610,10 @@ Then immediately confirm: "That's [Address]. Correct?"
                 
                 // End of speech detected
                 if (silenceFrames >= SILENCE_FRAMES_REQUIRED) {
-                  console.log(`🔇 Speech end detected after ${silenceFrames * 20}ms silence`);
+                  console.log(`🔇 Speech end detected after ${silenceFrames * 20}ms silence (total speech: ${speechFrameCount * 20}ms)`);
                   speechDetected = false;
                   silenceFrames = 0;
+                  speechFrameCount = 0;
                   
                   // Commit buffer to trigger transcription
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
