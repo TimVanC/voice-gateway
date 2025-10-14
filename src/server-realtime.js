@@ -77,6 +77,7 @@ wss.on("connection", async (twilioWs, req) => {
   let lastAIResponse = "";  // Track last AI question for context
   let awaitingVerification = false;  // Flag to prevent processing during verification
   let pendingTranscription = null;  // Store transcription awaiting validation
+  let activeResponseInProgress = false;  // Track if OpenAI is currently generating a response
   
   // Field validation and verification
   const fieldValidator = new FieldValidator();
@@ -520,6 +521,13 @@ Then immediately confirm: "That's [Address]. Correct?"
             
             // Inject transcript as user message and trigger OpenAI response
             if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !awaitingVerification) {
+              // Check for race condition - don't create new response if one is active
+              if (activeResponseInProgress) {
+                console.log(`⏸️  Skipping response.create - active response in progress`);
+                break;
+              }
+              
+              activeResponseInProgress = true;
               openaiWs.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -538,7 +546,9 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.done":
-            console.log("✅ Response complete");
+            // Response complete - mark as no longer active
+            activeResponseInProgress = false;
+            console.log("✅ Response complete - ready for next input");
             break;
             
           case "error":

@@ -152,8 +152,10 @@ function estimateConfidence(transcript, fieldContext = 'general') {
       confidence -= 0.5;
       indicators.push('name_too_short');
     }
-    const nonNameWords = ['no', 'yes', 'okay', 'ok', 'thanks', 'bye', 'uh', 'um', 'hello', 'hi', 'model'];
-    if (nonNameWords.includes(text.toLowerCase().trim())) {
+    const nonNameWords = ['no', 'yes', 'okay', 'ok', 'thank', 'thanks', 'thank you', 'bye', 'uh', 'um', 'hello', 'hi', 'model', 'later', 'goodbye'];
+    // Check both exact match and if text contains these words
+    const lowerText = text.toLowerCase().trim();
+    if (nonNameWords.includes(lowerText) || nonNameWords.some(word => lowerText.includes(word) && lowerText.length < 15)) {
       confidence -= 0.7;  // Very unlikely to be a name
       indicators.push('non_name_word');
     }

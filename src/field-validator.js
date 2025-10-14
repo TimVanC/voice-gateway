@@ -227,14 +227,50 @@ class FieldValidator {
    * Save field data
    */
   saveField(fieldName, rawValue, finalValue, confidence, verified) {
+    // CRITICAL: Don't mark as verified if the value is clearly invalid
+    const isActuallyValid = this.validateFieldValue(fieldName, finalValue);
+    
     this.fields[fieldName] = {
       field: fieldName,
       raw_value: rawValue,
       final_value: finalValue,
       confidence: confidence,
-      verified: verified,
-      verified_at: verified ? new Date().toISOString() : null
+      verified: verified && isActuallyValid,  // Only mark verified if actually valid
+      verified_at: (verified && isActuallyValid) ? new Date().toISOString() : null
     };
+  }
+  
+  /**
+   * Validate that a field value is actually valid (not garbage)
+   */
+  validateFieldValue(fieldName, value) {
+    if (!value || value.trim().length === 0) return false;
+    
+    const lowerValue = value.toLowerCase().trim();
+    
+    // Universal garbage words
+    const garbageWords = ['thank you', 'thanks', 'bye', 'goodbye', 'hello', 'hi', 'okay', 'ok', 'yes', 'no', 'uh', 'um'];
+    if (garbageWords.includes(lowerValue)) return false;
+    
+    // Field-specific validation
+    if (fieldName === 'first_name' || fieldName === 'last_name') {
+      // Names must be at least 2 chars, no numbers, no special symbols
+      if (value.length < 2) return false;
+      if (/\d/.test(value)) return false;
+      if (garbageWords.some(word => lowerValue.includes(word))) return false;
+    }
+    
+    if (fieldName === 'email') {
+      // Must have @ and domain
+      if (!isValidEmail(value)) return false;
+    }
+    
+    if (fieldName === 'phone') {
+      // Must have 10-11 digits
+      if (!isValidPhone(value)) return false;
+    }
+    
+    return true;
   }
 
   /**
