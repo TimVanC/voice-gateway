@@ -2,6 +2,10 @@
 
 A production-ready AI phone receptionist system for RSE Energy's HVAC service scheduling using Twilio, OpenAI, and ElevenLabs.
 
+## 🆕 Latest Update: Real-Time Transcription Pre-Validation
+
+**October 14, 2025** - Major enhancement to confidence handling! We've implemented a pre-validation system that intercepts low-confidence transcriptions **before** OpenAI processes them, preventing bad data from entering the conversation. See [SOLUTION.md](SOLUTION.md) for complete details.
+
 ## 🚀 Features
 
 - **Real-time voice conversation** over phone
@@ -172,11 +176,18 @@ The AI receptionist (Zelda) follows this structured script:
 
 ## 🔍 **Confidence Checking & Verification**
 
-The system automatically validates and verifies all collected information to ensure accuracy.
+The system automatically validates and verifies all collected information to ensure accuracy **before** OpenAI processes it.
 
 ### **How It Works:**
 
-**1. Confidence Estimation:** 
+**1. Pre-Validation Interception (NEW!):**
+- Manual VAD detects when user stops speaking
+- System requests transcription from OpenAI
+- **CRITICAL**: Transcription is validated **BEFORE** OpenAI processes it
+- Low-confidence data triggers clarification **BEFORE** model responds
+- Only verified data enters the conversation history
+
+**2. Confidence Estimation:** 
 - OpenAI Realtime API doesn't provide real confidence scores (always returns 1.0)
 - We use **heuristic estimation** based on transcription quality indicators:
   - Transcription artifacts ([inaudible], [unclear])
@@ -186,15 +197,18 @@ The system automatically validates and verifies all collected information to ens
   - Repeated words
   - Field-specific format validation
   - Very short responses to open questions
-- If estimated confidence ≤ 0.60, verification is triggered
+- If estimated confidence ≤ 0.60, verification is triggered **before** OpenAI sees it
 
-**2. Format Validation:**
+**3. Format Validation:**
 - **Email:** Regex validation (must have @, domain, TLD)
 - **Phone:** 10-11 digit validation
 - **Address:** Minimum length and letter presence
 - **Names:** Check for unlikely characters (numbers, symbols)
 
-**3. Verification Prompts:**
+**Implementation:**
+See [SOLUTION.md](SOLUTION.md) for technical details on the manual VAD and pre-validation architecture.
+
+**4. Verification Prompts:**
 
 **Personal Info (spelling required):**
 - First/Last Name: "Could you please spell your [first/last] name for me?"
@@ -206,12 +220,12 @@ The system automatically validates and verifies all collected information to ens
 - Issue/Equipment/Symptoms: "I heard: '[transcript]'. Is that correct?"
 - If NO: "No problem. Please repeat that once more, and I will confirm."
 
-**4. Once-Per-Field Rule:**
+**5. Once-Per-Field Rule:**
 - Each field is only verified ONCE
 - After successful verification, field is marked as `verified: true`
 - Won't loop unless caller explicitly requests correction
 
-**5. Data Structure:**
+**6. Data Structure:**
 
 Each captured field stores:
 ```json
@@ -236,7 +250,7 @@ Verification events log:
 }
 ```
 
-**6. SharePoint Integration:**
+**7. SharePoint Integration:**
 
 At call end, the system outputs:
 - `fields[]` - All captured and verified fields
