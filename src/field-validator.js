@@ -91,9 +91,9 @@ class FieldValidator {
    * @returns {Object} - { needsVerify: boolean, prompt: string|null, shouldHalt: boolean }
    */
   captureField(fieldName, transcript, confidence) {
-    // Check if already verified (skip re-verification)
-    if (this.fields[fieldName]?.verified) {
-      console.log(`⏭️  Field '${fieldName}' already verified, skipping`);
+    // Check if already verified AND has valid data (skip re-verification)
+    if (this.fields[fieldName]?.verified && this.fields[fieldName]?.final_value) {
+      console.log(`⏭️  Field '${fieldName}' already verified with value, skipping`);
       return { needsVerify: false, prompt: null, shouldHalt: false, alreadyVerified: true };
     }
 

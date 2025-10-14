@@ -479,9 +479,43 @@ Then immediately confirm: "That's [Address]. Correct?"
               break;
             }
             
-            // High confidence - let OpenAI process it normally
+            // High confidence - validate the field data
             if (fieldContext !== 'general' && transcript.trim().length > 0) {
-              fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              
+              // Even with high confidence, check if format validation failed
+              if (captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
+                console.log(`⚠️  Format validation failed despite high confidence - requesting verification`);
+                awaitingVerification = true;
+                
+                // Add verification prompt to conversation history immediately
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "text", text: captureResult.prompt }]
+                    }
+                  }));
+                }
+                
+                // Speak the verification prompt
+                setTimeout(() => {
+                  if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                    openaiWs.send(JSON.stringify({
+                      type: "response.create",
+                      response: {
+                        modalities: ["audio"],
+                        instructions: `Say exactly: "${captureResult.prompt}"`
+                      }
+                    }));
+                  }
+                }, 200);
+                
+                pendingTranscription = null;
+                break;
+              }
             }
             
             // Inject transcript as user message and trigger OpenAI response

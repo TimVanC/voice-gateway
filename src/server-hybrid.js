@@ -478,9 +478,35 @@ Then immediately confirm: "That's [Address]. Correct?"
               break;
             }
             
-            // High confidence - let OpenAI process it normally
+            // High confidence - validate the field data
             if (fieldContext !== 'general' && transcript.trim().length > 0) {
-              fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              
+              // Even with high confidence, check if format validation failed
+              if (captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
+                console.log(`⚠️  Format validation failed despite high confidence - requesting verification`);
+                awaitingVerification = true;
+                
+                // Add verification prompt to conversation history
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "text", text: captureResult.prompt }]
+                    }
+                  }));
+                }
+                
+                // Speak the verification prompt
+                setTimeout(() => {
+                  speakWithElevenLabs(captureResult.prompt);
+                }, 200);
+                
+                pendingTranscription = null;
+                break;
+              }
             }
             
             // Inject transcript as user message and trigger OpenAI response
@@ -503,7 +529,16 @@ Then immediately confirm: "That's [Address]. Correct?"
             // Extract transcript and send to ElevenLabs
             if (event.transcript) {
               lastAIResponse = event.transcript; // Track for context
-              speakWithElevenLabs(event.transcript);
+              
+              // IMPORTANT: Don't speak if we're about to ask for verification
+              // Wait a bit to see if transcription triggers verification
+              const shouldSpeak = !awaitingVerification;
+              
+              if (shouldSpeak) {
+                speakWithElevenLabs(event.transcript);
+              } else {
+                console.log(`⏸️  Skipping OpenAI response - verification in progress`);
+              }
             }
             break;
             

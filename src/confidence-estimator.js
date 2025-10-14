@@ -152,10 +152,23 @@ function estimateConfidence(transcript, fieldContext = 'general') {
       confidence -= 0.5;
       indicators.push('name_too_short');
     }
-    const nonNameWords = ['no', 'yes', 'okay', 'ok', 'thanks', 'bye', 'uh', 'um', 'hello', 'hi'];
+    const nonNameWords = ['no', 'yes', 'okay', 'ok', 'thanks', 'bye', 'uh', 'um', 'hello', 'hi', 'model'];
     if (nonNameWords.includes(text.toLowerCase().trim())) {
       confidence -= 0.7;  // Very unlikely to be a name
       indicators.push('non_name_word');
+    }
+    
+    // Check for unusual characters in names (–, —, special symbols)
+    if (/[–—•°©®™\[\]{}|\\<>]/.test(text)) {
+      confidence -= 0.6;
+      indicators.push('unusual_name_characters');
+    }
+    
+    // Single word that's too short for a full name
+    const words = text.trim().split(/\s+/);
+    if (words.length === 1 && text.length < 3) {
+      confidence -= 0.5;
+      indicators.push('incomplete_name');
     }
   }
 
