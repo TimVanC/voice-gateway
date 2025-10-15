@@ -380,31 +380,28 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.text.delta":
-            // Stream text as it arrives for faster TTS generation
-            if (event.delta && !awaitingVerification) {
-              // Accumulate text deltas
+            // Accumulate text deltas for streaming
+            if (event.delta) {
               if (!openaiWs.textBuffer) openaiWs.textBuffer = "";
               openaiWs.textBuffer += event.delta;
               
-              // When we have a complete sentence, start generating TTS immediately
-              if (event.delta.match(/[.!?]/) && openaiWs.textBuffer.length > 10) {
-                const sentence = openaiWs.textBuffer.trim();
-                openaiWs.textBuffer = "";
-                
-                console.log(`🚀 Streaming sentence to TTS: ${sentence.substring(0, 40)}...`);
-                speakWithElevenLabs(sentence);
-                lastAIResponse = (lastAIResponse + " " + sentence).trim();
-              }
+              console.log(`📨 Delta received: "${event.delta}" (buffer: ${openaiWs.textBuffer.length} chars)`);
             }
             break;
             
           case "response.text.done":
-            // Speak any remaining text
-            if (openaiWs.textBuffer && openaiWs.textBuffer.trim().length > 0 && !awaitingVerification) {
-              const remaining = openaiWs.textBuffer.trim();
-              console.log(`🚀 Final text chunk: ${remaining}`);
-              speakWithElevenLabs(remaining);
-              lastAIResponse = (lastAIResponse + " " + remaining).trim();
+            // Speak the complete text when done (simpler and more reliable)
+            if (openaiWs.textBuffer && openaiWs.textBuffer.trim().length > 0) {
+              const completeText = openaiWs.textBuffer.trim();
+              console.log(`🎙️ Complete response ready (${completeText.length} chars): ${completeText.substring(0, 60)}...`);
+              
+              if (!awaitingVerification) {
+                speakWithElevenLabs(completeText);
+                lastAIResponse = completeText;
+              } else {
+                console.log(`⏸️ Skipping TTS - verification in progress`);
+              }
+              
               openaiWs.textBuffer = "";
             }
             break;
