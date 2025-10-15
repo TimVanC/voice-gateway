@@ -478,16 +478,23 @@ Then immediately confirm: "That's [Address]. Correct?"
               }
             }
             
-            // If we're awaiting verification, handle the verification response
+            // If we're awaiting verification, try to handle the verification response
             if (awaitingVerification) {
-              console.log(`📝 Processing as verification response`);
+              console.log(`📝 Attempting to process as verification response`);
               
               const verification = fieldValidator.handleVerificationResponse(transcript);
               
-              if (verification.success) {
+              // If verification handler says it's not verifying anything, reset the flag
+              if (!verification.success && verification.normalizedValue === null && 
+                  verification.prompt && verification.prompt.includes("not currently verifying")) {
+                console.log(`⚠️  Verification state broken - resetting to allow normal conversation`);
+                awaitingVerification = false;
+                activeResponseInProgress = false;
+                fieldValidator.clearVerification();
+                // Fall through to normal conversation handling below
+              } else if (verification.success) {
                 console.log(`✅ Verified: ${verification.normalizedValue}`);
                 awaitingVerification = false;
-                waitingForInitialResponse = false;  // Reset wait flag
                 
                 // Inject verified value into conversation and trigger response
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -543,7 +550,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                     }
                   }
                 }
-              } else if (verification.prompt) {
+              } else if (verification.prompt && !verification.prompt.includes("not currently verifying")) {
                 console.log(`🔄 Re-verification needed`);
                 
                 // Don't immediately re-verify - reset awaiting flag so we can get fresh input
@@ -560,10 +567,20 @@ Then immediately confirm: "That's [Address]. Correct?"
                 if (verification.shouldRetry) {
                   fieldValidator.clearVerification();
                 }
+                
+                pendingTranscription = null;
+                break;
               }
-              
-              pendingTranscription = null;
-              break;
+            }
+            
+            // If we get here and awaitingVerification is still true but verification failed,
+            // treat as normal conversation (user asking questions about the process)
+            if (awaitingVerification) {
+              console.log(`⚠️  User input doesn't match verification format - treating as conversational question`);
+              awaitingVerification = false;
+              activeResponseInProgress = false;
+              fieldValidator.clearVerification();
+              // Fall through to normal conversation
             }
             
             // Estimate confidence since OpenAI always returns 1.0

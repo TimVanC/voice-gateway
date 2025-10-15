@@ -225,7 +225,8 @@ class FieldValidator {
    */
   handleVerificationResponse(verifiedValue) {
     if (!this.awaitingVerification) {
-      return { success: false, normalizedValue: null, prompt: "I'm not currently verifying anything." };
+      console.log(`⚠️  handleVerificationResponse called but awaitingVerification is null/false`);
+      return { success: false, normalizedValue: null, prompt: "I'm not currently verifying anything.", resetState: true };
     }
 
     const { fieldName, originalTranscript } = this.awaitingVerification;
