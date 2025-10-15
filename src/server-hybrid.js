@@ -665,10 +665,35 @@ Then immediately confirm: "That's [Address]. Correct?"
           case "response.audio_transcript.done":
             // Extract transcript and send to ElevenLabs
             if (event.transcript) {
-              lastAIResponse = event.transcript; // Track for context
+              const aiResponse = event.transcript;
+              
+              // CHECK: Does OpenAI's response mention data we never captured?
+              // This detects hallucinations like "James Morrison" when user said gibberish
+              const capturedNames = Object.values(fieldValidator.fields)
+                .filter(f => f.field === 'first_name' || f.field === 'last_name')
+                .map(f => f.final_value)
+                .filter(v => v);
+              
+              // Look for name-like patterns in response that we didn't capture
+              const nameInResponse = aiResponse.match(/(?:Got it|Thanks),?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
+              if (nameInResponse && capturedNames.length === 0) {
+                console.log(`⚠️  HALLUCINATION DETECTED: OpenAI mentioned name "${nameInResponse[1]}" but we never captured it!`);
+                console.log(`🚫 Blocking hallucinated response - re-asking for name properly`);
+                
+                // Don't speak the hallucinated response
+                // Instead, properly ask for the name
+                const correction = "Sorry, I didn't catch your name clearly. Could you please tell me your full name?";
+                speakWithElevenLabs(correction);
+                lastAIResponse = correction;
+                waitingForInitialResponse = true;
+                silentFramesSinceQuestion = 0;
+                break;
+              }
+              
+              lastAIResponse = aiResponse; // Track for context
               
               // Mark that we just asked a question - wait for user response
-              if (event.transcript.includes('?')) {
+              if (aiResponse.includes('?')) {
                 waitingForInitialResponse = true;
                 lastQuestionTime = Date.now();
                 silentFramesSinceQuestion = 0;
@@ -680,7 +705,7 @@ Then immediately confirm: "That's [Address]. Correct?"
               const shouldSpeak = !awaitingVerification;
               
               if (shouldSpeak) {
-                speakWithElevenLabs(event.transcript);
+                speakWithElevenLabs(aiResponse);
               } else {
                 console.log(`⏸️  Skipping OpenAI response - verification in progress`);
               }
