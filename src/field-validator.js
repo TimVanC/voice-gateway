@@ -1,6 +1,6 @@
 // field-validator.js - Confidence checking and verification for call intake fields
 
-const CONFIDENCE_THRESHOLD = 0.60;
+const CONFIDENCE_THRESHOLD = 0.40;  // Lowered for demo - less aggressive validation
 
 // Validation helpers
 function isValidEmail(email) {

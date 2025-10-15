@@ -649,7 +649,8 @@ Then immediately confirm: "That's [Address]. Correct?"
             }
             
             // CRITICAL: Validate BEFORE OpenAI processes it
-            if (fieldContext !== 'general' && estimatedConfidence < 0.60 && transcript.trim().length > 0) {
+            // For demo: Only validate if confidence is VERY low (< 0.40) to reduce interruptions
+            if (fieldContext !== 'general' && estimatedConfidence < 0.40 && transcript.trim().length > 0) {
               console.log(`⚠️  LOW CONFIDENCE - Intercepting before OpenAI processes`);
               
               // Store pending transcription
