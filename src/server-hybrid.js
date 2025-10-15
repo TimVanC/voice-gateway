@@ -742,25 +742,9 @@ Then immediately confirm: "That's [Address]. Correct?"
               break;
             }
             
-            // Inject transcript as user message and trigger OpenAI response
-            if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !awaitingVerification) {
-              // Check for race condition - don't create new response if one is active
-              if (activeResponseInProgress) {
-                console.log(`⏸️  Skipping response.create - active response in progress`);
-                break;
-              }
-              
-              activeResponseInProgress = true;
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: transcript }]
-                }
-              }));
-              openaiWs.send(JSON.stringify({ type: "response.create" }));
-            }
+            // For non-verification scenarios, let OpenAI handle naturally
+            // Don't inject or create responses - OpenAI's server VAD will trigger responses automatically
+            console.log(`✅ Passing to OpenAI for natural conversation handling`);
             
             pendingTranscription = null;
             break;
@@ -864,77 +848,13 @@ Then immediately confirm: "That's [Address]. Correct?"
           break;
           
         case "media":
-          // Manual VAD: detect speech end and commit buffer for transcription
-          // IMPORTANT: Continue processing audio even during verification (removed !awaitingVerification check)
+          // Pass audio directly to OpenAI - let server VAD handle turn detection
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady) {
-            const mulawData = Buffer.from(msg.media.payload, 'base64');
-            
-            // Convert to PCM16 for RMS calculation
-            const { muLawToPcm16 } = require('./g711');
-            const pcm16 = muLawToPcm16(mulawData);
-            const pcm16Buffer = Buffer.from(pcm16.buffer);
-            const rms = calculateRMS(pcm16Buffer);
-            
-            audioFrameCount++;
-            
-            // Detect speech vs silence
-            if (rms > SILENCE_THRESHOLD) {
-              // Speech detected
-              if (!speechDetected) {
-                console.log(`🎤 Speech start detected (RMS: ${rms.toFixed(4)})`);
-                speechDetected = true;
-                speechFrameCount = 0;
-              }
-              silenceFrames = 0;
-              speechFrameCount++;
-              
-              // Append to buffer
-              const audioAppend = {
-                type: "input_audio_buffer.append",
-                audio: msg.media.payload
-              };
-              openaiWs.send(JSON.stringify(audioAppend));
-              
-              // Safety timeout: Force commit if speech is too long
-              if (speechFrameCount >= MAX_SPEECH_FRAMES) {
-                console.log(`⏱️  Max speech duration reached (${speechFrameCount * 20}ms), forcing commit`);
-                speechDetected = false;
-                silenceFrames = 0;
-                speechFrameCount = 0;
-                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-              }
-            } else {
-              // Silence
-              if (speechDetected) {
-                silenceFrames++;
-                
-                // Continue appending during hangover period
-                const audioAppend = {
-                  type: "input_audio_buffer.append",
-                  audio: msg.media.payload
-                };
-                openaiWs.send(JSON.stringify(audioAppend));
-                
-                // End of speech detected - but only commit if we have minimum speech
-                if (silenceFrames >= SILENCE_FRAMES_REQUIRED && speechFrameCount >= MIN_SPEECH_FRAMES) {
-                  console.log(`🔇 Speech end detected after ${silenceFrames * 20}ms silence (total speech: ${speechFrameCount * 20}ms)`);
-                  speechDetected = false;
-                  silenceFrames = 0;
-                  speechFrameCount = 0;
-                  
-                  // Commit buffer to trigger transcription
-                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-                  console.log(`📤 Committed audio buffer for transcription`);
-                } else if (silenceFrames >= SILENCE_FRAMES_REQUIRED && speechFrameCount < MIN_SPEECH_FRAMES) {
-                  // Too short speech - probably a false trigger (cough, background noise)
-                  console.log(`⏭️  Ignoring short speech burst (${speechFrameCount * 20}ms) - likely noise`);
-                  speechDetected = false;
-                  silenceFrames = 0;
-                  speechFrameCount = 0;
-                }
-              }
-              // No else needed - removed auto-timeout logic
-            }
+            const audioAppend = {
+              type: "input_audio_buffer.append",
+              audio: msg.media.payload
+            };
+            openaiWs.send(JSON.stringify(audioAppend));
           }
           break;
           
