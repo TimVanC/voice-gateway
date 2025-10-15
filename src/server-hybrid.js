@@ -207,7 +207,12 @@ Then immediately confirm: "That's [Address]. Correct?"
           input_audio_transcription: {
             model: "whisper-1"
           },
-          turn_detection: null,  // DISABLE server VAD - we'll manually control when to generate responses
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 700  // Natural conversation - OpenAI handles turn-taking
+          }
           temperature: 0.8,  // Slightly higher for more natural variation
           max_response_output_tokens: 4096
         }
