@@ -428,9 +428,8 @@ Then immediately confirm: "That's [Address]. Correct?"
                 awaitingVerification = false;
                 
                 const prompt = "No problem! Let's get your name correct. What's your full name?";
-                speakWithElevenLabs(prompt);
                 
-                // Update conversation history
+                // Update conversation history FIRST
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
                   openaiWs.send(JSON.stringify({
                     type: "conversation.item.create",
@@ -442,6 +441,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                   }));
                 }
                 
+                speakWithElevenLabs(prompt);
                 lastAIResponse = prompt;
                 pendingTranscription = null;
                 break;
@@ -481,9 +481,11 @@ Then immediately confirm: "That's [Address]. Correct?"
                   } else {
                     activeResponseInProgress = true;
                     
+                    // Get field name from the verification object BEFORE it's cleared
+                    const verifiedFieldName = fieldValidator.awaitingVerification?.fieldName;
+                    
                     // Special handling for names - spell them back for confirmation
-                    if (fieldValidator.awaitingVerification?.fieldName === 'first_name' || 
-                        fieldValidator.awaitingVerification?.fieldName === 'last_name') {
+                    if (verifiedFieldName === 'first_name' || verifiedFieldName === 'last_name') {
                       const spelledName = verification.normalizedValue.split('').join('-');
                       const confirmPrompt = `Thank you. Just to confirm the spelling, that's ${spelledName}. What's the best number to reach you?`;
                       
@@ -807,10 +809,8 @@ Then immediately confirm: "That's [Address]. Correct?"
                 console.log(`🎤 Speech start detected (RMS: ${rms.toFixed(4)})`);
                 speechDetected = true;
                 speechFrameCount = 0;
-                waitingForInitialResponse = false;  // User started responding
               }
               silenceFrames = 0;
-              silentFramesSinceQuestion = 0;
               speechFrameCount++;
               
               // Append to buffer
