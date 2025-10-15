@@ -43,16 +43,34 @@ function hasUnlikelyNameCharacters(name) {
   return /[0-9@#$%^&*()+=\[\]{}|\\;:'",<>?\/]/.test(name);
 }
 
-// Verification prompt templates
+// Verification prompt templates - FIRST ask to repeat, THEN ask to spell
 const VERIFY_PROMPTS = {
-  first_name: (transcript) => `Got it. Could you please spell your first name for me?`,
-  last_name: (transcript) => `Okay, thanks. Could you please spell your last name for me?`,
-  email: (transcript) => `Thanks. Do you mind spelling out that email for me?`,
-  phone: (transcript) => `Thanks. Could you say your phone number slowly, digit by digit?`,
-  street: (transcript) => `Thanks. Could you please spell that street name for me?`,
-  city: (transcript) => `Could you please spell the city name for me?`,
-  state: (transcript) => `Could you spell the state for me?`,
-  zip: (transcript) => `Could you repeat the zip code?`,
+  first_name: (transcript, attemptCount) => {
+    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat your first name?`;
+    return `Thanks. Could you spell your first name for me, slowly?`;
+  },
+  last_name: (transcript, attemptCount) => {
+    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat your last name?`;
+    return `Thanks. Could you spell your last name for me, slowly?`;
+  },
+  email: (transcript, attemptCount) => {
+    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat your email?`;
+    return `Thanks. Could you spell that email for me, slowly?`;
+  },
+  phone: (transcript, attemptCount) => {
+    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat your phone number?`;
+    return `Thanks. Could you say your phone number slowly, one digit at a time?`;
+  },
+  street: (transcript, attemptCount) => {
+    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat that address?`;
+    return `Thanks. Could you spell that street name for me?`;
+  },
+  city: (transcript, attemptCount) => {
+    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat the city?`;
+    return `Thanks. Could you spell the city name for me?`;
+  },
+  state: (transcript, attemptCount) => `Could you spell the state for me?`,
+  zip: (transcript, attemptCount) => `Could you repeat the zip code?`,
   
   // For problem context fields - use repeat-back
   issue_description: (transcript) => `I heard: "${transcript}". Is that correct?`,
@@ -81,6 +99,7 @@ class FieldValidator {
     this.fields = {}; // Store field data
     this.verificationEvents = []; // Log all verification attempts
     this.awaitingVerification = null; // Current field awaiting verification
+    this.verificationAttempts = {}; // Track attempts per field (0 = first attempt = repeat, 1+ = spell)
   }
 
   /**
@@ -132,9 +151,19 @@ class FieldValidator {
 
       // Log verification event
       const reason = formatReason || 'low_confidence';
+      
+      // Track attempts for this field
+      if (!this.verificationAttempts[fieldName]) {
+        this.verificationAttempts[fieldName] = 0;
+      }
+      const attemptCount = this.verificationAttempts[fieldName];
+      
       const prompt = VERIFY_PROMPTS[fieldName] 
-        ? VERIFY_PROMPTS[fieldName](transcript)
+        ? VERIFY_PROMPTS[fieldName](transcript, attemptCount)
         : `Could you please confirm: "${transcript}"?`;
+      
+      // Increment attempt count for next time
+      this.verificationAttempts[fieldName]++;
 
       this.verificationEvents.push({
         field: fieldName,

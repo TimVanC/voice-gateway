@@ -111,10 +111,12 @@ wss.on("connection", async (twilioWs, req) => {
   let speechDetected = false;
   let silenceFrames = 0;
   const SILENCE_THRESHOLD = 0.01;  // RMS threshold for silence
-  const SILENCE_FRAMES_REQUIRED = 40;  // ~800ms at 20ms per frame (INCREASED to give users more time)
+  const SILENCE_FRAMES_REQUIRED = 30;  // ~600ms at 20ms per frame (REDUCED for faster responses)
   const MAX_SPEECH_FRAMES = 500;  // ~10 seconds max per utterance (safety timeout)
+  const NO_SPEECH_TIMEOUT = 150;  // ~3 seconds - if no speech detected, assume user not responding
   let audioFrameCount = 0;
   let speechFrameCount = 0;  // Track how long user has been speaking
+  let silentFramesSinceLastSpeech = 0;  // Track total silence after last speech
   
   // Connect to OpenAI Realtime API
   try {
@@ -135,7 +137,11 @@ wss.on("connection", async (twilioWs, req) => {
         type: "session.update",
         session: {
           modalities: ["text", "audio"],  // Keep both, but we'll only use text output
-          instructions: `You are Zelda, a warm, friendly, and upbeat receptionist for RSE Energy. You're helpful and cheerful without being over-the-top. Follow this exact script flow:
+          instructions: `You are Zelda, a warm, friendly, and upbeat receptionist for RSE Energy. You're helpful and cheerful without being over-the-top. 
+
+CRITICAL: You MUST speak ONLY in English at all times. Never switch to another language, even if the caller speaks in another language. Always respond in English.
+
+Follow this exact script flow:
 
 **0) GREETING:**
 "Hi there! Thanks for calling RSE Energy. This is Zelda. How can I help you today?"
@@ -456,6 +462,7 @@ Then immediately confirm: "That's [Address]. Correct?"
               
               if (captureResult.needsVerify && captureResult.prompt) {
                 awaitingVerification = true;
+                console.log(`🔄 Requesting verification (attempt ${fieldValidator.verificationAttempts[fieldContext] || 0}): ${captureResult.prompt}`);
                 
                 // Add verification prompt to conversation history
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -470,9 +477,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                 }
                 
                 // Speak the verification prompt WITHOUT letting OpenAI respond to original transcript
-                setTimeout(() => {
-                  speakWithElevenLabs(captureResult.prompt);
-                }, 200);
+                speakWithElevenLabs(captureResult.prompt);
               }
               
               // DO NOT trigger response.create - we're handling this ourselves
@@ -622,6 +627,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                 console.log(`🎤 Speech start detected (RMS: ${rms.toFixed(4)})`);
                 speechDetected = true;
                 speechFrameCount = 0;
+                silentFramesSinceLastSpeech = 0;  // Reset no-speech counter
               }
               silenceFrames = 0;
               speechFrameCount++;
@@ -639,6 +645,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                 speechDetected = false;
                 silenceFrames = 0;
                 speechFrameCount = 0;
+                silentFramesSinceLastSpeech = 0;
                 openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
               }
             } else {
@@ -659,10 +666,19 @@ Then immediately confirm: "That's [Address]. Correct?"
                   speechDetected = false;
                   silenceFrames = 0;
                   speechFrameCount = 0;
+                  silentFramesSinceLastSpeech = 0;
                   
                   // Commit buffer to trigger transcription
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
                   console.log(`📤 Committed audio buffer for transcription`);
+                }
+              } else if (awaitingVerification) {
+                // If waiting for verification response and no speech for a while, commit empty buffer
+                silentFramesSinceLastSpeech++;
+                if (silentFramesSinceLastSpeech >= NO_SPEECH_TIMEOUT) {
+                  console.log(`⏱️  No speech for ${silentFramesSinceLastSpeech * 20}ms while awaiting verification - user may not be responding`);
+                  silentFramesSinceLastSpeech = 0;
+                  // Let OpenAI handle the silence naturally
                 }
               }
             }
