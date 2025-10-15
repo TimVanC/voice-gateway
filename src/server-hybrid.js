@@ -262,6 +262,11 @@ Then immediately confirm: "That's [Address]. Correct?"
     // Stream TTS from ElevenLabs and convert to μ-law
     async function speakWithElevenLabs(text) {
       try {
+        if (!text || text.trim().length === 0) {
+          console.log("⚠️  Empty text provided to TTS, skipping");
+          return;
+        }
+        
         const displayText = text.length > 60 ? text.substring(0, 60) + "..." : text;
         console.log("🎙️ AI:", displayText);
         
@@ -752,6 +757,10 @@ Then immediately confirm: "That's [Address]. Correct?"
         }
       } catch (err) {
         console.error("❌ Error parsing OpenAI message:", err);
+        console.error("Stack trace:", err.stack);
+        // Reset states to prevent getting stuck
+        awaitingVerification = false;
+        activeResponseInProgress = false;
       }
     });
 
@@ -880,6 +889,7 @@ Then immediately confirm: "That's [Address]. Correct?"
       }
     } catch (err) {
       console.error("❌ Error parsing Twilio message:", err);
+      console.error("Stack trace:", err.stack);
     }
   });
 
