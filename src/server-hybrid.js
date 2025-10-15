@@ -685,8 +685,19 @@ Then immediately confirm: "That's [Address]. Correct?"
               break;
             }
             
-            // High confidence - validate the field data
+            // High confidence - validate the field data  
+            // BUT: Skip validation for obvious mismatches (name when expecting phone)
             if (fieldContext !== 'general' && transcript.trim().length > 0) {
+              // Check if transcript is obviously wrong type for context
+              const looksLikeName = /^[A-Za-z\s\-\.\']+$/.test(transcript.trim()) && transcript.split(/\s+/).length >= 2;
+              const isPhoneContext = fieldContext === 'phone';
+              
+              if (isPhoneContext && looksLikeName) {
+                console.log(`⚠️  Name detected when expecting phone - likely late transcription from previous question, ignoring`);
+                pendingTranscription = null;
+                break;
+              }
+              
               const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
               
               // Even with high confidence, check if format validation failed
