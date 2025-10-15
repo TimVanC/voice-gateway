@@ -580,9 +580,27 @@ Then immediately confirm: "That's [Address]. Correct?"
             // SPECIAL: Check for farewell phrases - NEVER pass to OpenAI, could end call prematurely
             const isFarewell = confidenceResult.indicators.includes('farewell_phrase') || 
                               confidenceResult.indicators.includes('casual_bye');
-            if (isFarewell) {
-              console.log(`👋 Farewell detected with low confidence (${estimatedConfidence.toFixed(2)}) - ignoring as likely false transcription`);
-              // Don't process - likely background noise transcribed incorrectly
+            
+            // ALSO block farewells in general context early in call (likely false transcriptions)
+            if (isFarewell || (fieldContext === 'general' && /^(bye|goodbye|bye-bye)\.?$/i.test(transcript.trim()))) {
+              console.log(`👋 Farewell detected (confidence: ${estimatedConfidence.toFixed(2)}) - likely false transcription, ignoring`);
+              
+              // Instead of ending call, ask user to repeat
+              const clarification = "Sorry, I didn't catch that. Could you repeat what you said?";
+              speakWithElevenLabs(clarification);
+              
+              // Add to conversation
+              if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "assistant",
+                    content: [{ type: "text", text: clarification }]
+                  }
+                }));
+              }
+              
               pendingTranscription = null;
               break;
             }

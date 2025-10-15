@@ -140,17 +140,22 @@ function estimateConfidence(transcript, fieldContext = 'general') {
   }
 
   // 11. Common farewell/dismissal phrases (not actual data)
-  // BUT: Only flag as farewell if it's a CLEAR farewell (multiple words or very explicit)
-  const farewellPhrases = ['goodbye', 'see you later', 'thanks for your time', 'have a good day', 'no thanks', 'gotta go', 'talk to you later'];
+  // Flag ALL farewells to prevent false transcriptions from ending calls
+  const farewellPhrases = ['goodbye', 'see you later', 'thanks for your time', 'have a good day', 'no thanks', 'gotta go', 'talk to you later', 'bye-bye'];
   const singleBye = /^bye\.?$/i;  // Just "bye" or "bye."
+  const byebye = /^bye-bye\.?$/i;  // "bye-bye" or "bye-bye."
   
-  // Only penalize if it's an explicit farewell phrase OR just standalone "bye"
+  // Flag farewells with high penalty to prevent false call endings
   if (farewellPhrases.some(phrase => text.toLowerCase().includes(phrase))) {
-    confidence -= 0.6;
+    confidence -= 0.8;  // Very low (was 0.6)
+    indicators.push('farewell_phrase');
+  } else if (byebye.test(text.trim())) {
+    // "bye-bye" is VERY likely false transcription at call start
+    confidence -= 0.9;
     indicators.push('farewell_phrase');
   } else if (singleBye.test(text.trim())) {
-    // Single "bye" gets less penalty - might be casual
-    confidence -= 0.3;
+    // Single "bye" gets moderate penalty
+    confidence -= 0.5;  // Increased from 0.3
     indicators.push('casual_bye');
   }
 
