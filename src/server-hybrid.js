@@ -380,29 +380,16 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.text.delta":
-            // Accumulate text deltas for streaming
+            // Log deltas for debugging
             if (event.delta) {
-              if (!openaiWs.textBuffer) openaiWs.textBuffer = "";
-              openaiWs.textBuffer += event.delta;
-              
-              console.log(`📨 Delta received: "${event.delta}" (buffer: ${openaiWs.textBuffer.length} chars)`);
+              console.log(`📨 Text delta: "${event.delta}"`);
             }
             break;
             
           case "response.text.done":
-            // Speak the complete text when done (simpler and more reliable)
-            if (openaiWs.textBuffer && openaiWs.textBuffer.trim().length > 0) {
-              const completeText = openaiWs.textBuffer.trim();
-              console.log(`🎙️ Complete response ready (${completeText.length} chars): ${completeText.substring(0, 60)}...`);
-              
-              if (!awaitingVerification) {
-                speakWithElevenLabs(completeText);
-                lastAIResponse = completeText;
-              } else {
-                console.log(`⏸️ Skipping TTS - verification in progress`);
-              }
-              
-              openaiWs.textBuffer = "";
+            // Log when text is complete
+            if (event.text) {
+              console.log(`📝 Text response done: ${event.text.substring(0, 60)}...`);
             }
             break;
             
@@ -723,58 +710,46 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.audio_transcript.done":
-            // Skip this - we now stream responses via text.delta for lower latency
-            // Only use audio_transcript for tracking context
+            // This is where we get the complete AI response text
             if (event.transcript) {
               const aiResponse = event.transcript;
               lastAIResponse = aiResponse;  // Track for context
               
-              // Don't speak here - already streamed via text.delta
-              console.log(`📝 AI response complete (already streamed): ${aiResponse.substring(0, 60)}...`);
-            }
-            break;
-            
-          case "response.audio_transcript.done_old":
-            // OLD CODE - keeping for reference but renamed to disable
-            if (event.transcript) {
-              const aiResponse = event.transcript;
+              console.log(`📝 AI response text: ${aiResponse.substring(0, 60)}...`);
               
-              // CHECK: Does OpenAI's response mention data we never captured?
-              // This detects hallucinations like "James Morrison" when user said gibberish
+              // Check for hallucinations BEFORE speaking
               const capturedNames = Object.values(fieldValidator.fields)
-                .filter(f => f.field === 'first_name' || f.field === 'last_name')
-                .map(f => f.final_value)
-                .filter(v => v);
+                .filter(f => (f.field === 'first_name' || f.field === 'last_name') && f.final_value)
+                .map(f => f.final_value);
               
-              // Look for name-like patterns in response that we didn't capture
               const nameInResponse = aiResponse.match(/(?:Got it|Thanks|Thank you|Perfect),?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
               if (nameInResponse && capturedNames.length === 0) {
-                console.log(`⚠️  HALLUCINATION DETECTED: OpenAI mentioned name "${nameInResponse[1]}" but we never captured it!`);
-                console.log(`🚫 Blocking hallucinated response - re-asking for name properly`);
-                
-                // Don't speak the hallucinated response
-                // Instead, properly ask for the name
-                const correction = "Sorry, I didn't catch your name clearly. Could you please tell me your full name?";
+                console.log(`⚠️ HALLUCINATION: Name "${nameInResponse[1]}" mentioned but never captured`);
+                console.log(`🚫 Blocking hallucinated response`);
+                const correction = "Sorry, I didn't catch your name clearly. What's your full name?";
                 speakWithElevenLabs(correction);
                 lastAIResponse = correction;
                 break;
               }
               
-              // ALSO detect "You're welcome" when user didn't say thank you
-              if (aiResponse.toLowerCase().includes("you're welcome") || aiResponse.toLowerCase().includes("you are welcome")) {
-                // Check if last user transcript was actually a thank you
-                if (!lastUserTranscript.toLowerCase().includes('thank')) {
-                  console.log(`⚠️  HALLUCINATION: OpenAI said "you're welcome" but user didn't say thank you`);
-                  console.log(`🚫 Blocking inappropriate 'you're welcome' response`);
-                  // Don't speak this, OpenAI is confused - skip to next real response
-                  activeResponseInProgress = false;  // Allow next response
-                  break;
-                }
+              // Check for "you're welcome" without thank you
+              if ((aiResponse.toLowerCase().includes("you're welcome") || aiResponse.toLowerCase().includes("you are welcome")) &&
+                  !lastUserTranscript.toLowerCase().includes('thank')) {
+                console.log(`⚠️ HALLUCINATION: "You're welcome" without thank you`);
+                console.log(`🚫 Skipping inappropriate response`);
+                activeResponseInProgress = false;
+                break;
               }
               
-              // This code path disabled - using text.delta streaming instead
+              // Speak the response via ElevenLabs
+              if (!awaitingVerification) {
+                speakWithElevenLabs(aiResponse);
+              } else {
+                console.log(`⏸️ Skipping response - verification in progress`);
+              }
             }
             break;
+            
             
           case "response.done":
             // Response complete - mark as no longer active
