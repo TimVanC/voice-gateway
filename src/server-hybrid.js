@@ -652,10 +652,18 @@ Then immediately confirm: "That's [Address]. Correct?"
             // Check for obvious type mismatches (late transcriptions from previous questions)
             const looksLikeName = /^[A-Za-z\s\-\.\']+$/.test(transcript.trim()) && 
                                   (transcript.split(/\s+/).length >= 2 || transcript.toLowerCase().includes('name'));
+            const looksLikePhone = /\d{3}[-\s]?\d{3}[-\s]?\d{4}/.test(transcript.trim());
             const isPhoneOrEmailContext = fieldContext === 'phone' || fieldContext === 'email';
+            const isEmailContext = fieldContext === 'email';
             
             if (isPhoneOrEmailContext && looksLikeName) {
               console.log(`⚠️  Name-like text detected when expecting ${fieldContext} - likely late transcription, ignoring`);
+              pendingTranscription = null;
+              break;
+            }
+            
+            if (isEmailContext && looksLikePhone) {
+              console.log(`⚠️  Phone number detected when expecting email - likely late transcription, ignoring`);
               pendingTranscription = null;
               break;
             }
