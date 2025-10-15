@@ -190,6 +190,29 @@ class FieldValidator {
   }
 
   /**
+   * Parse spelled-out text to actual format
+   * Example: "T-I-M at example dot com" -> "tim@example.com"
+   */
+  parseSpelledText(text) {
+    // Remove spaces between single characters (T I M -> TIM)
+    let parsed = text.replace(/\b([A-Z])\s+(?=[A-Z]\s|[A-Z]$)/gi, '$1');
+    
+    // Replace spelled-out symbols
+    parsed = parsed.replace(/\s+at\s+/gi, '@');
+    parsed = parsed.replace(/\s+dot\s+/gi, '.');
+    parsed = parsed.replace(/\s+dash\s+/gi, '-');
+    parsed = parsed.replace(/\s+underscore\s+/gi, '_');
+    
+    // Remove hyphens between single characters (T-I-M -> TIM)
+    parsed = parsed.replace(/([A-Z])-(?=[A-Z])/gi, '$1');
+    
+    // Remove all remaining spaces
+    parsed = parsed.replace(/\s+/g, '');
+    
+    return parsed.toLowerCase();
+  }
+
+  /**
    * Handle verification response
    * @param {string} verifiedValue - User's verification response
    * @returns {Object} - { success: boolean, normalizedValue: string, prompt: string|null }
@@ -225,9 +248,23 @@ class FieldValidator {
     let normalizedValue = verifiedValue.trim();
 
     if (fieldName === 'email') {
-      normalizedValue = normalizeEmail(verifiedValue);
+      // Parse spelled-out format (T-I-M at gmail dot com -> tim@gmail.com)
+      normalizedValue = this.parseSpelledText(verifiedValue);
+      normalizedValue = normalizeEmail(normalizedValue);
+      
+      console.log(`📧 Email parsing: "${verifiedValue}" -> "${normalizedValue}"`);
+      
       // Re-validate
       if (!isValidEmail(normalizedValue)) {
+        // Check attempt count - give up after 5 attempts
+        const attempts = this.verificationAttempts[fieldName] || 0;
+        if (attempts >= 5) {
+          console.log(`⚠️  Too many verification attempts (${attempts}), accepting as-is`);
+          this.saveField(fieldName, originalTranscript, verifiedValue, 0.5, true);
+          this.awaitingVerification = null;
+          return { success: true, normalizedValue: verifiedValue, prompt: null };
+        }
+        
         return {
           success: false,
           normalizedValue: null,
@@ -235,8 +272,22 @@ class FieldValidator {
         };
       }
     } else if (fieldName === 'phone') {
-      normalizedValue = normalizePhone(verifiedValue);
+      // Parse spelled-out digits (nine seven three -> 973)
+      normalizedValue = this.parseSpelledText(verifiedValue);
+      normalizedValue = normalizePhone(normalizedValue);
+      
+      console.log(`📞 Phone parsing: "${verifiedValue}" -> "${normalizedValue}"`);
+      
       if (!isValidPhone(normalizedValue)) {
+        // Check attempt count - give up after 5 attempts
+        const attempts = this.verificationAttempts[fieldName] || 0;
+        if (attempts >= 5) {
+          console.log(`⚠️  Too many verification attempts (${attempts}), accepting as-is`);
+          this.saveField(fieldName, originalTranscript, verifiedValue, 0.5, true);
+          this.awaitingVerification = null;
+          return { success: true, normalizedValue: verifiedValue, prompt: null };
+        }
+        
         return {
           success: false,
           normalizedValue: null,
@@ -287,6 +338,10 @@ class FieldValidator {
       if (value.length < 2) return false;
       if (/\d/.test(value)) return false;
       if (garbageWords.some(word => lowerValue.includes(word))) return false;
+      
+      // Single word names are suspicious (should be first + last)
+      const words = value.trim().split(/\s+/);
+      if (words.length < 2) return false;
     }
     
     if (fieldName === 'email') {

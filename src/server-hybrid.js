@@ -452,7 +452,21 @@ Then immediately confirm: "That's [Address]. Correct?"
                 }
               } else if (verification.prompt) {
                 console.log(`🔄 Re-verification needed`);
+                
+                // Don't immediately re-verify - reset awaiting flag so we can get fresh input
+                awaitingVerification = false;
+                waitingForInitialResponse = true;
+                silentFramesSinceQuestion = 0;
+                
                 speakWithElevenLabs(verification.prompt);
+                
+                // After speaking, wait for new input
+                setTimeout(() => {
+                  awaitingVerification = true;
+                  waitingForInitialResponse = true;
+                  console.log(`🎧 Now listening for corrected verification response...`);
+                }, 1000);
+                
                 if (verification.shouldRetry) {
                   fieldValidator.clearVerification();
                 }
