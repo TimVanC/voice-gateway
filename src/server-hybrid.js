@@ -11,6 +11,9 @@ const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const { Readable } = require("stream");
 const { FieldValidator } = require("./field-validator");
 const { estimateConfidence, inferFieldContext } = require("./confidence-estimator");
+const { TTSSentenceStreamer } = require("../lib/ttsSentenceStreamer");
+const { LatencyStats, round } = require("../lib/latency");
+const { MiniRAG, summarize } = require("../lib/rag");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -75,6 +78,18 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Initialize RAG system
+const rag = new MiniRAG({ kbDir: "./kb", threshold: 0.82 });
+rag.load().catch(err => console.error("❌ RAG load failed:", err));
+
+// Global latency stats
+const latencyStats = {
+  totalTurn: new LatencyStats(100),
+  asrLatency: new LatencyStats(100),
+  llmLatency: new LatencyStats(100),
+  ttsLatency: new LatencyStats(100)
+};
+
 // Start HTTP server
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server listening on port ${PORT}`);
@@ -106,6 +121,15 @@ wss.on("connection", async (twilioWs, req) => {
   // Playback state for pacing
   let playBuffer = Buffer.alloc(0);
   let paceTimer = null;
+  
+  // TTS management
+  let currentTTS = null;
+  
+  // Latency tracking for this call
+  let turnStartTime = 0;
+  let asrStartTime = 0;
+  let llmStartTime = 0;
+  let ttsStartTime = 0;
   
   // Manual VAD state for detecting speech end
   let speechDetected = false;
@@ -264,66 +288,76 @@ Then immediately confirm: "That's [Address]. Correct?"
       paceTimer = setTimeout(sendNextFrame, 20);
     }
 
-    // Stream TTS from ElevenLabs and convert to μ-law
+    // Stream TTS from ElevenLabs with sentence-first optimization
     async function speakWithElevenLabs(text) {
       try {
         if (!text || text.trim().length === 0) {
           console.log("⚠️  Empty text provided to TTS, skipping");
-          return;
+          return { firstAudioTime: null };
         }
         
+        ttsStartTime = Date.now();
         const displayText = text.length > 60 ? text.substring(0, 60) + "..." : text;
         console.log("🎙️ AI:", displayText);
         
-        // ElevenLabs streaming API
-        const response = await axios({
-          method: 'post',
-          url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
-          headers: {
-            'Accept': 'audio/mpeg',
-            'xi-api-key': ELEVENLABS_API_KEY,
-            'Content-Type': 'application/json'
-          },
-          data: {
-            text: text,
-            model_id: "eleven_turbo_v2_5",  // Fastest, lowest latency
-            voice_settings: {
-              stability: 0.3,              // Lower = more expressive/varied (more animated)
-              similarity_boost: 0.75,       // Voice clarity
-              style: 0.5,                   // Moderate style (less dramatic, more natural)
-              use_speaker_boost: true       // Enhance clarity
-            },
-            optimize_streaming_latency: 4,  // Maximum optimization (0-4)
-            output_format: "mp3_22050_32"   // Lower bitrate = faster streaming
-          },
-          responseType: 'stream'
-        });
-
-        // Stream MP3 -> μ-law conversion in real-time
-        const mp3Stream = response.data;
+        // Stop any ongoing TTS (barge-in prevention)
+        if (currentTTS) {
+          console.log("🛑 Aborting previous TTS for new response");
+          currentTTS.abort();
+        }
         
-        ffmpeg(mp3Stream)
-          .inputFormat('mp3')
-          .audioCodec('pcm_mulaw')
-          .audioFrequency(8000)
-          .audioChannels(1)
-          .format('mulaw')
-          .on('error', (err) => {
-            console.error('❌ FFmpeg error:', err.message);
-          })
-          .on('end', () => {
-            console.log("✅ TTS playback complete");
-          })
-          .pipe()
-          .on('data', (chunk) => {
-            // Stream μ-law chunks directly to playback buffer
-            playBuffer = Buffer.concat([playBuffer, chunk]);
-          });
+        // Create sentence streamer
+        currentTTS = new TTSSentenceStreamer({
+          apiKey: ELEVENLABS_API_KEY,
+          voiceId: ELEVENLABS_VOICE_ID,
+          model: "eleven_turbo_v2_5"
+        });
+        
+        let firstAudioTime = null;
+        
+        currentTTS.once("first_audio_out", () => {
+          firstAudioTime = Date.now();
+          const ttsLatency = firstAudioTime - ttsStartTime;
+          latencyStats.ttsLatency.add(ttsLatency);
+          console.log(`⚡ First audio out in ${ttsLatency}ms`);
+        });
+        
+        currentTTS.on("error", (err) => {
+          console.error("❌ TTS Streamer error:", err.message);
+        });
+        
+        // Stream audio chunks to playback buffer (converted to μ-law via ffmpeg)
+        await currentTTS.speak(text, (mp3Chunk) => {
+          // Convert MP3 chunk to μ-law on the fly
+          const stream = require('stream');
+          const bufferStream = new stream.PassThrough();
+          bufferStream.end(mp3Chunk);
+          
+          ffmpeg(bufferStream)
+            .inputFormat('mp3')
+            .audioCodec('pcm_mulaw')
+            .audioFrequency(8000)
+            .audioChannels(1)
+            .format('mulaw')
+            .on('error', (err) => {
+              console.error('❌ FFmpeg chunk error:', err.message);
+            })
+            .pipe()
+            .on('data', (mulawChunk) => {
+              playBuffer = Buffer.concat([playBuffer, mulawChunk]);
+            });
+        });
+        
+        console.log("✅ TTS playback complete");
+        currentTTS = null;
+        
+        return { firstAudioTime };
         
       } catch (error) {
         console.error("❌ ElevenLabs error:", error.message);
         console.error("Stack trace:", error.stack);
-        // Continue gracefully - don't crash the call
+        currentTTS = null;
+        return { firstAudioTime: null };
       }
     }
 
@@ -407,6 +441,16 @@ Then immediately confirm: "That's [Address]. Correct?"
             speechDetected = true;
             silenceFrames = 0;
             playBuffer = Buffer.alloc(0);  // Stop any AI playback
+            
+            // Barge-in: Stop current TTS immediately
+            if (currentTTS) {
+              console.log("🛑 Barge-in detected - aborting TTS");
+              currentTTS.abort();
+              currentTTS = null;
+            }
+            
+            // Mark turn start for latency tracking
+            turnStartTime = Date.now();
             break;
             
           case "input_audio_buffer.speech_stopped":
@@ -416,16 +460,22 @@ Then immediately confirm: "That's [Address]. Correct?"
             
           case "input_audio_buffer.committed":
             console.log("✅ Audio buffer committed, waiting for transcription...");
+            asrStartTime = Date.now();
             break;
             
           case "conversation.item.input_audio_transcription.completed":
             if (!event || !event.transcript) break; // Safety check
             
             const transcript = event.transcript;
-            console.log(`📝 Raw transcription received: "${transcript}"`);
+            const asrLatency = Date.now() - asrStartTime;
+            latencyStats.asrLatency.add(asrLatency);
+            console.log(`📝 Raw transcription received: "${transcript}" (ASR: ${asrLatency}ms)`);
             
             // Store last user transcript for hallucination detection
             lastUserTranscript = transcript;
+            
+            // Mark LLM start time
+            llmStartTime = Date.now();
             
             // Check if user wants to CORRECT a previous field (go back)
             // THIS TAKES PRIORITY - check even during verification
@@ -760,7 +810,9 @@ Then immediately confirm: "That's [Address]. Correct?"
               const aiResponse = event.transcript;
               lastAIResponse = aiResponse;  // Track for context
               
-              console.log(`📝 AI response text: ${aiResponse.substring(0, 60)}...`);
+              const llmLatency = Date.now() - llmStartTime;
+              latencyStats.llmLatency.add(llmLatency);
+              console.log(`📝 AI response text: ${aiResponse.substring(0, 60)}... (LLM: ${llmLatency}ms)`);
               
               // Check for hallucinations BEFORE speaking
               const capturedNames = Object.values(fieldValidator.fields)
