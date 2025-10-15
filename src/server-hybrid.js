@@ -866,7 +866,8 @@ Then immediately confirm: "That's [Address]. Correct?"
                   silenceFrames = 0;
                   speechFrameCount = 0;
                 }
-              // Remove auto-timeout - let user respond at their own pace
+              }
+              // No else needed - removed auto-timeout logic
             }
           }
           break;
