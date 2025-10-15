@@ -114,7 +114,7 @@ wss.on("connection", async (twilioWs, req) => {
   const SILENCE_FRAMES_REQUIRED = 35;  // ~700ms at 20ms per frame (balanced for natural pauses)
   const MIN_SPEECH_FRAMES = 25;  // ~500ms minimum speech before commit (INCREASED - prevent false triggers from noise)
   const MAX_SPEECH_FRAMES = 500;  // ~10 seconds max per utterance (safety timeout)
-  const WAIT_FOR_INITIAL_RESPONSE = 200;  // ~4 seconds - wait this long before assuming no response
+  const WAIT_FOR_INITIAL_RESPONSE = 100;  // ~2 seconds - wait this long before assuming no response (REDUCED from 4s to prevent long silences)
   let audioFrameCount = 0;
   let speechFrameCount = 0;  // Track how long user has been speaking
   let silentFramesSinceQuestion = 0;  // Track silence since system asked question
@@ -407,6 +407,45 @@ Then immediately confirm: "That's [Address]. Correct?"
             
             const transcript = event.transcript;
             console.log(`📝 Raw transcription received: "${transcript}"`);
+            
+            // Check if user wants to CORRECT a previous field (go back)
+            const correctionPhrases = [
+              'that\'s not my name', 'not my name', 'change my name', 'go back', 
+              'that\'s wrong', 'that\'s not right', 'no that\'s not',
+              'i want to change', 'fix my', 'correct my'
+            ];
+            const isCorrection = correctionPhrases.some(phrase => transcript.toLowerCase().includes(phrase));
+            
+            if (isCorrection) {
+              console.log(`🔄 User wants to correct previous data: "${transcript}"`);
+              
+              // Determine what field they want to correct
+              if (transcript.toLowerCase().includes('name')) {
+                console.log(`📝 Resetting first_name for correction`);
+                fieldValidator.fields.first_name = null;
+                fieldValidator.verificationAttempts.first_name = 0;
+                awaitingVerification = false;
+                
+                const prompt = "No problem! Let's get your name correct. What's your full name?";
+                speakWithElevenLabs(prompt);
+                
+                // Update conversation history
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "text", text: prompt }]
+                    }
+                  }));
+                }
+                
+                lastAIResponse = prompt;
+                pendingTranscription = null;
+                break;
+              }
+            }
             
             // If we're awaiting verification, handle the verification response
             if (awaitingVerification) {

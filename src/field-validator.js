@@ -329,8 +329,12 @@ class FieldValidator {
     const lowerValue = value.toLowerCase().trim();
     
     // Universal garbage words
-    const garbageWords = ['thank you', 'thanks', 'bye', 'goodbye', 'hello', 'hi', 'okay', 'ok', 'yes', 'no', 'uh', 'um'];
+    const garbageWords = ['thank you', 'thanks', 'bye', 'goodbye', 'hello', 'hi', 'okay', 'ok', 'yes', 'no', 'uh', 'um', 'watching'];
     if (garbageWords.includes(lowerValue)) return false;
+    
+    // Also check if value CONTAINS these words (for phrases like "thanks for watching")
+    const garbagePhrases = ['thank', 'watching', 'for watching'];
+    if (garbagePhrases.some(phrase => lowerValue.includes(phrase))) return false;
     
     // Field-specific validation
     if (fieldName === 'first_name' || fieldName === 'last_name') {
