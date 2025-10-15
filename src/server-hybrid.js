@@ -117,9 +117,7 @@ wss.on("connection", async (twilioWs, req) => {
   const WAIT_FOR_INITIAL_RESPONSE = 0;  // DISABLED - Don't auto-timeout, let user respond naturally
   let audioFrameCount = 0;
   let speechFrameCount = 0;  // Track how long user has been speaking
-  let silentFramesSinceQuestion = 0;  // Track silence since system asked question
-  let waitingForInitialResponse = false;  // Flag when system just asked a question
-  let lastQuestionTime = 0;  // Track when last question was asked
+  let lastUserTranscript = "";  // Track last thing user said for hallucination detection
   
   // Connect to OpenAI Realtime API
   try {
@@ -408,6 +406,9 @@ Then immediately confirm: "That's [Address]. Correct?"
             const transcript = event.transcript;
             console.log(`📝 Raw transcription received: "${transcript}"`);
             
+            // Store last user transcript for hallucination detection
+            lastUserTranscript = transcript;
+            
             // Check if user wants to CORRECT a previous field (go back)
             const correctionPhrases = [
               'that\'s not my name', 'not my name', 'change my name', 'go back', 
@@ -479,15 +480,35 @@ Then immediately confirm: "That's [Address]. Correct?"
                     }, 500);
                   } else {
                     activeResponseInProgress = true;
-                    openaiWs.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "user",
-                        content: [{ type: "input_text", text: verification.normalizedValue }]
-                      }
-                    }));
-                    openaiWs.send(JSON.stringify({ type: "response.create" }));
+                    
+                    // Special handling for names - spell them back for confirmation
+                    if (fieldValidator.awaitingVerification?.fieldName === 'first_name' || 
+                        fieldValidator.awaitingVerification?.fieldName === 'last_name') {
+                      const spelledName = verification.normalizedValue.split('').join('-');
+                      const confirmPrompt = `Thank you. Just to confirm the spelling, that's ${spelledName}. What's the best number to reach you?`;
+                      
+                      openaiWs.send(JSON.stringify({
+                        type: "conversation.item.create",
+                        item: {
+                          type: "message",
+                          role: "assistant",
+                          content: [{ type: "text", text: confirmPrompt }]
+                        }
+                      }));
+                      
+                      speakWithElevenLabs(confirmPrompt);
+                      lastAIResponse = confirmPrompt;
+                    } else {
+                      openaiWs.send(JSON.stringify({
+                        type: "conversation.item.create",
+                        item: {
+                          type: "message",
+                          role: "user",
+                          content: [{ type: "input_text", text: verification.normalizedValue }]
+                        }
+                      }));
+                      openaiWs.send(JSON.stringify({ type: "response.create" }));
+                    }
                   }
                 }
               } else if (verification.prompt) {
@@ -495,17 +516,14 @@ Then immediately confirm: "That's [Address]. Correct?"
                 
                 // Don't immediately re-verify - reset awaiting flag so we can get fresh input
                 awaitingVerification = false;
-                waitingForInitialResponse = true;
-                silentFramesSinceQuestion = 0;
                 
                 speakWithElevenLabs(verification.prompt);
                 
-                // After speaking, wait for new input
+                // After speaking, wait briefly then re-enable verification listening
                 setTimeout(() => {
                   awaitingVerification = true;
-                  waitingForInitialResponse = true;
                   console.log(`🎧 Now listening for corrected verification response...`);
-                }, 1000);
+                }, 800);
                 
                 if (verification.shouldRetry) {
                   fieldValidator.clearVerification();
@@ -549,8 +567,6 @@ Then immediately confirm: "That's [Address]. Correct?"
               
               if (captureResult.needsVerify && captureResult.prompt) {
                 awaitingVerification = true;
-                waitingForInitialResponse = true;  // Also set this to wait for verification response
-                silentFramesSinceQuestion = 0;
                 console.log(`🔄 Requesting verification (attempt ${fieldValidator.verificationAttempts[fieldContext] || 0}): ${captureResult.prompt}`);
                 
                 // Add verification prompt to conversation history
@@ -582,8 +598,6 @@ Then immediately confirm: "That's [Address]. Correct?"
               if (captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
                 console.log(`⚠️  Format validation failed despite high confidence - requesting verification`);
                 awaitingVerification = true;
-                waitingForInitialResponse = true;  // Wait for verification response
-                silentFramesSinceQuestion = 0;
                 
                 // Add verification prompt to conversation history
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -686,31 +700,26 @@ Then immediately confirm: "That's [Address]. Correct?"
                 const correction = "Sorry, I didn't catch your name clearly. Could you please tell me your full name?";
                 speakWithElevenLabs(correction);
                 lastAIResponse = correction;
-                waitingForInitialResponse = true;
-                silentFramesSinceQuestion = 0;
                 break;
               }
               
               // ALSO detect "You're welcome" when user didn't say thank you
               if (aiResponse.toLowerCase().includes("you're welcome") || aiResponse.toLowerCase().includes("you are welcome")) {
-                // Check if previous user input was actually a thank you
-                const lastTranscript = pendingTranscription?.transcript || '';
-                if (!lastTranscript.toLowerCase().includes('thank')) {
+                // Check if last user transcript was actually a thank you
+                if (!lastUserTranscript.toLowerCase().includes('thank')) {
                   console.log(`⚠️  HALLUCINATION: OpenAI said "you're welcome" but user didn't say thank you`);
-                  console.log(`🚫 Blocking inappropriate response`);
-                  // Don't speak this, OpenAI is confused
+                  console.log(`🚫 Blocking inappropriate 'you're welcome' response`);
+                  // Don't speak this, OpenAI is confused - skip to next real response
+                  activeResponseInProgress = false;  // Allow next response
                   break;
                 }
               }
               
               lastAIResponse = aiResponse; // Track for context
               
-              // Mark that we just asked a question - wait for user response
+              // Mark that we just asked a question
               if (aiResponse.includes('?')) {
-                waitingForInitialResponse = true;
-                lastQuestionTime = Date.now();
-                silentFramesSinceQuestion = 0;
-                console.log(`❓ Question asked - waiting for user response`);
+                console.log(`❓ Question asked`);
               }
               
               // IMPORTANT: Don't speak if we're about to ask for verification
