@@ -705,7 +705,7 @@ Then immediately confirm: "That's [Address]. Correct?"
             }
             
             // High confidence - validate the field data  
-            // BUT: Skip validation for obvious mismatches (name when expecting phone)
+            // For demo: ONLY validate phone/email, accept names as-is
             if (fieldContext !== 'general' && transcript.trim().length > 0) {
               // Check if transcript is obviously wrong type for context
               const looksLikeName = /^[A-Za-z\s\-\.\']+$/.test(transcript.trim()) && transcript.split(/\s+/).length >= 2;
@@ -719,8 +719,11 @@ Then immediately confirm: "That's [Address]. Correct?"
               
               const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
               
-              // Even with high confidence, check if format validation failed
-              if (captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
+              // For demo: ONLY validate phone/email format, not names
+              const isNameField = fieldContext.includes('name');
+              
+              // Even with high confidence, check if format validation failed (but skip for names)
+              if (!isNameField && captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
                 console.log(`⚠️  Format validation failed despite high confidence - requesting verification`);
                 awaitingVerification = true;
                 
