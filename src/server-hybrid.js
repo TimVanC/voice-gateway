@@ -719,11 +719,12 @@ Then immediately confirm: "That's [Address]. Correct?"
               
               const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
               
-              // For demo: ONLY validate phone/email format, not names
+              // For demo: ONLY validate phone numbers, accept names and emails as-is
               const isNameField = fieldContext.includes('name');
+              const isEmailField = fieldContext === 'email';
               
-              // Even with high confidence, check if format validation failed (but skip for names)
-              if (!isNameField && captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
+              // Even with high confidence, check if format validation failed (but skip for names and emails)
+              if (!isNameField && !isEmailField && captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
                 console.log(`⚠️  Format validation failed despite high confidence - requesting verification`);
                 awaitingVerification = true;
                 
