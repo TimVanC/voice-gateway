@@ -485,6 +485,8 @@ Then immediately confirm: "That's [Address]. Correct?"
               
               if (captureResult.needsVerify && captureResult.prompt) {
                 awaitingVerification = true;
+                waitingForInitialResponse = true;  // Also set this to wait for verification response
+                silentFramesSinceQuestion = 0;
                 console.log(`🔄 Requesting verification (attempt ${fieldValidator.verificationAttempts[fieldContext] || 0}): ${captureResult.prompt}`);
                 
                 // Add verification prompt to conversation history
@@ -501,6 +503,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                 
                 // Speak the verification prompt WITHOUT letting OpenAI respond to original transcript
                 speakWithElevenLabs(captureResult.prompt);
+                console.log(`🎧 Now listening for verification response...`);
               }
               
               // DO NOT trigger response.create - we're handling this ourselves
@@ -515,6 +518,8 @@ Then immediately confirm: "That's [Address]. Correct?"
               if (captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
                 console.log(`⚠️  Format validation failed despite high confidence - requesting verification`);
                 awaitingVerification = true;
+                waitingForInitialResponse = true;  // Wait for verification response
+                silentFramesSinceQuestion = 0;
                 
                 // Add verification prompt to conversation history
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -529,9 +534,8 @@ Then immediately confirm: "That's [Address]. Correct?"
                 }
                 
                 // Speak the verification prompt
-                setTimeout(() => {
-                  speakWithElevenLabs(captureResult.prompt);
-                }, 200);
+                speakWithElevenLabs(captureResult.prompt);
+                console.log(`🎧 Now listening for verification response...`);
                 
                 pendingTranscription = null;
                 break;
@@ -640,7 +644,8 @@ Then immediately confirm: "That's [Address]. Correct?"
           
         case "media":
           // Manual VAD: detect speech end and commit buffer for transcription
-          if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady && !awaitingVerification) {
+          // IMPORTANT: Continue processing audio even during verification (removed !awaitingVerification check)
+          if (openaiWs && openaiWs.readyState === WebSocket.OPEN && sessionReady) {
             const mulawData = Buffer.from(msg.media.payload, 'base64');
             
             // Convert to PCM16 for RMS calculation
