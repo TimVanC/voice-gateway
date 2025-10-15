@@ -90,10 +90,12 @@ wss.on("connection", async (twilioWs, req) => {
   let speechDetected = false;
   let silenceFrames = 0;
   const SILENCE_THRESHOLD = 0.01;  // RMS threshold for silence
-  const SILENCE_FRAMES_REQUIRED = 40;  // ~800ms at 20ms per frame (INCREASED to give users more time)
+  const SILENCE_FRAMES_REQUIRED = 30;  // ~600ms at 20ms per frame (REDUCED for faster responses)
   const MAX_SPEECH_FRAMES = 500;  // ~10 seconds max per utterance (safety timeout)
+  const NO_SPEECH_TIMEOUT = 150;  // ~3 seconds - if no speech detected, assume user not responding
   let audioFrameCount = 0;
   let speechFrameCount = 0;  // Track how long user has been speaking
+  let silentFramesSinceLastSpeech = 0;  // Track total silence after last speech
   
   // Connect to OpenAI Realtime API
   try {
@@ -114,7 +116,11 @@ wss.on("connection", async (twilioWs, req) => {
         type: "session.update",
         session: {
           modalities: ["text", "audio"],
-          instructions: `You are Zelda, a warm and professional receptionist for RSE Energy. Follow this exact script flow:
+          instructions: `You are Zelda, a warm and professional receptionist for RSE Energy.
+
+CRITICAL: You MUST speak ONLY in English at all times. Never switch to another language, even if the caller speaks in another language. Always respond in English.
+
+Follow this exact script flow:
 
 **0) GREETING:**
 "Thanks for calling RSE Energy. This is Zelda. How can I help today?"
