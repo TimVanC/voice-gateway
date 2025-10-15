@@ -717,14 +717,12 @@ Then immediately confirm: "That's [Address]. Correct?"
                 break;
               }
               
+              // DEMO MODE: Capture fields but skip ALL validation - let OpenAI handle naturally
               const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              console.log(`✅ Field captured for tracking: ${fieldContext}`);
               
-              // For demo: ONLY validate phone numbers, accept names and emails as-is
-              const isNameField = fieldContext.includes('name');
-              const isEmailField = fieldContext === 'email';
-              
-              // Even with high confidence, check if format validation failed (but skip for names and emails)
-              if (!isNameField && !isEmailField && captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
+              // Skip all validation - OpenAI will confirm naturally via its script
+              if (false) {  // Disabled for demo
                 console.log(`⚠️  Format validation failed despite high confidence - requesting verification`);
                 awaitingVerification = true;
                 
