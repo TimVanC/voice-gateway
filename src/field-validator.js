@@ -197,7 +197,8 @@ class FieldValidator {
     // Remove spaces between single characters (T I M -> TIM)
     let parsed = text.replace(/\b([A-Z])\s+(?=[A-Z]\s|[A-Z]$)/gi, '$1');
     
-    // Replace spelled-out symbols
+    // Replace spelled-out symbols - be more flexible
+    parsed = parsed.replace(/\s*@\s*/gi, '@');  // Handle existing @
     parsed = parsed.replace(/\s+at\s+/gi, '@');
     parsed = parsed.replace(/\s+dot\s+/gi, '.');
     parsed = parsed.replace(/\s+dash\s+/gi, '-');
@@ -205,6 +206,11 @@ class FieldValidator {
     
     // Remove hyphens between single characters (T-I-M -> TIM)
     parsed = parsed.replace(/([A-Z])-(?=[A-Z])/gi, '$1');
+    
+    // Handle "gmail" without ".com"
+    if (parsed.toLowerCase().includes('gmail') && !parsed.toLowerCase().includes('gmail.com')) {
+      parsed = parsed.replace(/gmail/gi, 'gmail.com');
+    }
     
     // Remove all remaining spaces
     parsed = parsed.replace(/\s+/g, '');
@@ -256,10 +262,11 @@ class FieldValidator {
       
       // Re-validate
       if (!isValidEmail(normalizedValue)) {
-        // Check attempt count - give up after 5 attempts
+        // Check attempt count - give up after 3 attempts (reduced from 5)
         const attempts = this.verificationAttempts[fieldName] || 0;
-        if (attempts >= 5) {
-          console.log(`⚠️  Too many verification attempts (${attempts}), accepting as-is`);
+        if (attempts >= 3) {
+          console.log(`⚠️  Too many verification attempts (${attempts}), accepting raw value and continuing`);
+          // Accept the original spoken value (best we have)
           this.saveField(fieldName, originalTranscript, verifiedValue, 0.5, true);
           this.awaitingVerification = null;
           return { success: true, normalizedValue: verifiedValue, prompt: null };
@@ -268,7 +275,7 @@ class FieldValidator {
         return {
           success: false,
           normalizedValue: null,
-          prompt: "I'm sorry, that still doesn't look like a valid email. Could you spell it again, slowly?"
+          prompt: `I'm having trouble with the email. Could you try saying it like: john at gmail dot com?`
         };
       }
     } else if (fieldName === 'phone') {

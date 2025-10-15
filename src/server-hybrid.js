@@ -114,7 +114,7 @@ wss.on("connection", async (twilioWs, req) => {
   const SILENCE_FRAMES_REQUIRED = 35;  // ~700ms at 20ms per frame (balanced for natural pauses)
   const MIN_SPEECH_FRAMES = 25;  // ~500ms minimum speech before commit (INCREASED - prevent false triggers from noise)
   const MAX_SPEECH_FRAMES = 500;  // ~10 seconds max per utterance (safety timeout)
-  const WAIT_FOR_INITIAL_RESPONSE = 100;  // ~2 seconds - wait this long before assuming no response (REDUCED from 4s to prevent long silences)
+  const WAIT_FOR_INITIAL_RESPONSE = 0;  // DISABLED - Don't auto-timeout, let user respond naturally
   let audioFrameCount = 0;
   let speechFrameCount = 0;  // Track how long user has been speaking
   let silentFramesSinceQuestion = 0;  // Track silence since system asked question
@@ -456,6 +456,7 @@ Then immediately confirm: "That's [Address]. Correct?"
               if (verification.success) {
                 console.log(`✅ Verified: ${verification.normalizedValue}`);
                 awaitingVerification = false;
+                waitingForInitialResponse = false;  // Reset wait flag
                 
                 // Inject verified value into conversation and trigger response
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -675,7 +676,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                 .filter(v => v);
               
               // Look for name-like patterns in response that we didn't capture
-              const nameInResponse = aiResponse.match(/(?:Got it|Thanks),?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
+              const nameInResponse = aiResponse.match(/(?:Got it|Thanks|Thank you|Perfect),?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
               if (nameInResponse && capturedNames.length === 0) {
                 console.log(`⚠️  HALLUCINATION DETECTED: OpenAI mentioned name "${nameInResponse[1]}" but we never captured it!`);
                 console.log(`🚫 Blocking hallucinated response - re-asking for name properly`);
@@ -688,6 +689,18 @@ Then immediately confirm: "That's [Address]. Correct?"
                 waitingForInitialResponse = true;
                 silentFramesSinceQuestion = 0;
                 break;
+              }
+              
+              // ALSO detect "You're welcome" when user didn't say thank you
+              if (aiResponse.toLowerCase().includes("you're welcome") || aiResponse.toLowerCase().includes("you are welcome")) {
+                // Check if previous user input was actually a thank you
+                const lastTranscript = pendingTranscription?.transcript || '';
+                if (!lastTranscript.toLowerCase().includes('thank')) {
+                  console.log(`⚠️  HALLUCINATION: OpenAI said "you're welcome" but user didn't say thank you`);
+                  console.log(`🚫 Blocking inappropriate response`);
+                  // Don't speak this, OpenAI is confused
+                  break;
+                }
               }
               
               lastAIResponse = aiResponse; // Track for context
@@ -835,18 +848,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                   silenceFrames = 0;
                   speechFrameCount = 0;
                 }
-              } else if (waitingForInitialResponse) {
-                // Waiting for user to start responding to our question
-                silentFramesSinceQuestion++;
-                
-                // If user hasn't started speaking after waiting period, they might not have heard or understood
-                if (silentFramesSinceQuestion >= WAIT_FOR_INITIAL_RESPONSE) {
-                  console.log(`⏱️  No response after ${silentFramesSinceQuestion * 20}ms - user may need clarification`);
-                  waitingForInitialResponse = false;
-                  silentFramesSinceQuestion = 0;
-                  // Don't auto-trigger anything - let natural flow continue
-                }
-              }
+              // Remove auto-timeout - let user respond at their own pace
             }
           }
           break;
