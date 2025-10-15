@@ -212,7 +212,7 @@ Then immediately confirm: "That's [Address]. Correct?"
             threshold: 0.5,
             prefix_padding_ms: 300,
             silence_duration_ms: 700  // Natural conversation - OpenAI handles turn-taking
-          }
+          },
           temperature: 0.8,  // Slightly higher for more natural variation
           max_response_output_tokens: 4096
         }
