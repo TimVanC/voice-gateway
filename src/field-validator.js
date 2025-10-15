@@ -253,6 +253,32 @@ class FieldValidator {
 
     // For personal info fields, normalize the spelled/confirmed value
     let normalizedValue = verifiedValue.trim();
+    
+    // Check if this is obviously garbage before accepting
+    if (fieldName === 'first_name' || fieldName === 'last_name') {
+      // Reject obvious garbage patterns
+      const garbagePatterns = [
+        /^[a-z]{1,3}$/i,  // Single short word (a, ok, um)
+        /-bit-/i,  // Shmitty-bit-shmitty
+        /-do-/i,   // Sha-do-sha
+        /^(shmit|schmit|shmoot|bit|boop)/i,  // Nonsense syllables
+      ];
+      
+      if (garbagePatterns.some(pattern => pattern.test(normalizedValue))) {
+        console.log(`⚠️  Garbage pattern detected in name: "${normalizedValue}"`);
+        const attempts = this.verificationAttempts[fieldName] || 0;
+        if (attempts >= 3) {
+          console.log(`⚠️  Too many attempts, giving up on this field`);
+          this.awaitingVerification = null;
+          return { success: false, normalizedValue: null, prompt: null, giveUp: true };
+        }
+        return {
+          success: false,
+          normalizedValue: null,
+          prompt: "I'm having trouble understanding. Could you spell your name using letters, like: J-O-H-N?"
+        };
+      }
+    }
 
     if (fieldName === 'email') {
       // Parse spelled-out format (T-I-M at gmail dot com -> tim@gmail.com)

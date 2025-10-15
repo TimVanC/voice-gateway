@@ -550,6 +550,27 @@ Then immediately confirm: "That's [Address]. Correct?"
                     }
                   }
                 }
+              } else if (verification.giveUp) {
+                console.log(`⚠️  Giving up on this field after too many attempts - continuing with conversation`);
+                awaitingVerification = false;
+                activeResponseInProgress = false;
+                
+                // Let OpenAI handle naturally
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !activeResponseInProgress) {
+                  activeResponseInProgress = true;
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: "Let's skip that for now" }]
+                    }
+                  }));
+                  openaiWs.send(JSON.stringify({ type: "response.create" }));
+                }
+                
+                pendingTranscription = null;
+                break;
               } else if (verification.prompt && !verification.prompt.includes("not currently verifying")) {
                 console.log(`🔄 Re-verification needed`);
                 
