@@ -649,6 +649,17 @@ Then immediately confirm: "That's [Address]. Correct?"
               break;
             }
             
+            // Check for obvious type mismatches (late transcriptions from previous questions)
+            const looksLikeName = /^[A-Za-z\s\-\.\']+$/.test(transcript.trim()) && 
+                                  (transcript.split(/\s+/).length >= 2 || transcript.toLowerCase().includes('name'));
+            const isPhoneOrEmailContext = fieldContext === 'phone' || fieldContext === 'email';
+            
+            if (isPhoneOrEmailContext && looksLikeName) {
+              console.log(`⚠️  Name-like text detected when expecting ${fieldContext} - likely late transcription, ignoring`);
+              pendingTranscription = null;
+              break;
+            }
+            
             // CRITICAL: Validate BEFORE OpenAI processes it
             // For demo: Only validate if confidence is VERY low (< 0.40) to reduce interruptions
             if (fieldContext !== 'general' && estimatedConfidence < 0.40 && transcript.trim().length > 0) {
