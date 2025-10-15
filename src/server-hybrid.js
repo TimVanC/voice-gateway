@@ -111,12 +111,15 @@ wss.on("connection", async (twilioWs, req) => {
   let speechDetected = false;
   let silenceFrames = 0;
   const SILENCE_THRESHOLD = 0.01;  // RMS threshold for silence
-  const SILENCE_FRAMES_REQUIRED = 30;  // ~600ms at 20ms per frame (REDUCED for faster responses)
+  const SILENCE_FRAMES_REQUIRED = 35;  // ~700ms at 20ms per frame (balanced for natural pauses)
+  const MIN_SPEECH_FRAMES = 10;  // ~200ms minimum speech before commit (prevent false triggers)
   const MAX_SPEECH_FRAMES = 500;  // ~10 seconds max per utterance (safety timeout)
-  const NO_SPEECH_TIMEOUT = 150;  // ~3 seconds - if no speech detected, assume user not responding
+  const WAIT_FOR_INITIAL_RESPONSE = 200;  // ~4 seconds - wait this long before assuming no response
   let audioFrameCount = 0;
   let speechFrameCount = 0;  // Track how long user has been speaking
-  let silentFramesSinceLastSpeech = 0;  // Track total silence after last speech
+  let silentFramesSinceQuestion = 0;  // Track silence since system asked question
+  let waitingForInitialResponse = false;  // Flag when system just asked a question
+  let lastQuestionTime = 0;  // Track when last question was asked
   
   // Connect to OpenAI Realtime API
   try {
@@ -417,15 +420,35 @@ Then immediately confirm: "That's [Address]. Correct?"
                 
                 // Inject verified value into conversation and trigger response
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [{ type: "input_text", text: verification.normalizedValue }]
-                    }
-                  }));
-                  openaiWs.send(JSON.stringify({ type: "response.create" }));
+                  // Check for race condition
+                  if (activeResponseInProgress) {
+                    console.log(`⏸️  Waiting for active response to complete before creating new one`);
+                    setTimeout(() => {
+                      if (!activeResponseInProgress && openaiWs.readyState === WebSocket.OPEN) {
+                        activeResponseInProgress = true;
+                        openaiWs.send(JSON.stringify({
+                          type: "conversation.item.create",
+                          item: {
+                            type: "message",
+                            role: "user",
+                            content: [{ type: "input_text", text: verification.normalizedValue }]
+                          }
+                        }));
+                        openaiWs.send(JSON.stringify({ type: "response.create" }));
+                      }
+                    }, 500);
+                  } else {
+                    activeResponseInProgress = true;
+                    openaiWs.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [{ type: "input_text", text: verification.normalizedValue }]
+                      }
+                    }));
+                    openaiWs.send(JSON.stringify({ type: "response.create" }));
+                  }
                 }
               } else if (verification.prompt) {
                 console.log(`🔄 Re-verification needed`);
@@ -543,6 +566,14 @@ Then immediately confirm: "That's [Address]. Correct?"
             if (event.transcript) {
               lastAIResponse = event.transcript; // Track for context
               
+              // Mark that we just asked a question - wait for user response
+              if (event.transcript.includes('?')) {
+                waitingForInitialResponse = true;
+                lastQuestionTime = Date.now();
+                silentFramesSinceQuestion = 0;
+                console.log(`❓ Question asked - waiting for user response`);
+              }
+              
               // IMPORTANT: Don't speak if we're about to ask for verification
               // Wait a bit to see if transcription triggers verification
               const shouldSpeak = !awaitingVerification;
@@ -627,9 +658,10 @@ Then immediately confirm: "That's [Address]. Correct?"
                 console.log(`🎤 Speech start detected (RMS: ${rms.toFixed(4)})`);
                 speechDetected = true;
                 speechFrameCount = 0;
-                silentFramesSinceLastSpeech = 0;  // Reset no-speech counter
+                waitingForInitialResponse = false;  // User started responding
               }
               silenceFrames = 0;
+              silentFramesSinceQuestion = 0;
               speechFrameCount++;
               
               // Append to buffer
@@ -645,7 +677,6 @@ Then immediately confirm: "That's [Address]. Correct?"
                 speechDetected = false;
                 silenceFrames = 0;
                 speechFrameCount = 0;
-                silentFramesSinceLastSpeech = 0;
                 openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
               }
             } else {
@@ -660,25 +691,33 @@ Then immediately confirm: "That's [Address]. Correct?"
                 };
                 openaiWs.send(JSON.stringify(audioAppend));
                 
-                // End of speech detected
-                if (silenceFrames >= SILENCE_FRAMES_REQUIRED) {
+                // End of speech detected - but only commit if we have minimum speech
+                if (silenceFrames >= SILENCE_FRAMES_REQUIRED && speechFrameCount >= MIN_SPEECH_FRAMES) {
                   console.log(`🔇 Speech end detected after ${silenceFrames * 20}ms silence (total speech: ${speechFrameCount * 20}ms)`);
                   speechDetected = false;
                   silenceFrames = 0;
                   speechFrameCount = 0;
-                  silentFramesSinceLastSpeech = 0;
                   
                   // Commit buffer to trigger transcription
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
                   console.log(`📤 Committed audio buffer for transcription`);
+                } else if (silenceFrames >= SILENCE_FRAMES_REQUIRED && speechFrameCount < MIN_SPEECH_FRAMES) {
+                  // Too short speech - probably a false trigger (cough, background noise)
+                  console.log(`⏭️  Ignoring short speech burst (${speechFrameCount * 20}ms) - likely noise`);
+                  speechDetected = false;
+                  silenceFrames = 0;
+                  speechFrameCount = 0;
                 }
-              } else if (awaitingVerification) {
-                // If waiting for verification response and no speech for a while, commit empty buffer
-                silentFramesSinceLastSpeech++;
-                if (silentFramesSinceLastSpeech >= NO_SPEECH_TIMEOUT) {
-                  console.log(`⏱️  No speech for ${silentFramesSinceLastSpeech * 20}ms while awaiting verification - user may not be responding`);
-                  silentFramesSinceLastSpeech = 0;
-                  // Let OpenAI handle the silence naturally
+              } else if (waitingForInitialResponse) {
+                // Waiting for user to start responding to our question
+                silentFramesSinceQuestion++;
+                
+                // If user hasn't started speaking after waiting period, they might not have heard or understood
+                if (silentFramesSinceQuestion >= WAIT_FOR_INITIAL_RESPONSE) {
+                  console.log(`⏱️  No response after ${silentFramesSinceQuestion * 20}ms - user may need clarification`);
+                  waitingForInitialResponse = false;
+                  silentFramesSinceQuestion = 0;
+                  // Don't auto-trigger anything - let natural flow continue
                 }
               }
             }
