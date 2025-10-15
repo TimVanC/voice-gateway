@@ -317,6 +317,8 @@ Then immediately confirm: "That's [Address]. Correct?"
         
       } catch (error) {
         console.error("❌ ElevenLabs error:", error.message);
+        console.error("Stack trace:", error.stack);
+        // Continue gracefully - don't crash the call
       }
     }
 
