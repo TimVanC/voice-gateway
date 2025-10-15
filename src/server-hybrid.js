@@ -380,11 +380,33 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.text.delta":
-            // Silent - we'll get the full text later
+            // Stream text as it arrives for faster TTS generation
+            if (event.delta && !awaitingVerification) {
+              // Accumulate text deltas
+              if (!openaiWs.textBuffer) openaiWs.textBuffer = "";
+              openaiWs.textBuffer += event.delta;
+              
+              // When we have a complete sentence, start generating TTS immediately
+              if (event.delta.match(/[.!?]/) && openaiWs.textBuffer.length > 10) {
+                const sentence = openaiWs.textBuffer.trim();
+                openaiWs.textBuffer = "";
+                
+                console.log(`🚀 Streaming sentence to TTS: ${sentence.substring(0, 40)}...`);
+                speakWithElevenLabs(sentence);
+                lastAIResponse = (lastAIResponse + " " + sentence).trim();
+              }
+            }
             break;
             
           case "response.text.done":
-            // Silent - we use audio_transcript.done instead
+            // Speak any remaining text
+            if (openaiWs.textBuffer && openaiWs.textBuffer.trim().length > 0 && !awaitingVerification) {
+              const remaining = openaiWs.textBuffer.trim();
+              console.log(`🚀 Final text chunk: ${remaining}`);
+              speakWithElevenLabs(remaining);
+              lastAIResponse = (lastAIResponse + " " + remaining).trim();
+              openaiWs.textBuffer = "";
+            }
             break;
             
           case "response.output_item.done":
@@ -417,24 +439,34 @@ Then immediately confirm: "That's [Address]. Correct?"
             lastUserTranscript = transcript;
             
             // Check if user wants to CORRECT a previous field (go back)
+            // THIS TAKES PRIORITY - check even during verification
             const correctionPhrases = [
-              'that\'s not my name', 'not my name', 'change my name', 'go back', 
-              'that\'s wrong', 'that\'s not right', 'no that\'s not',
-              'i want to change', 'fix my', 'correct my'
+              'that\'s not', 'that\'s wrong', 'that is wrong', 'no that\'s', 
+              'change my', 'fix my', 'correct my', 'go back',
+              'i said', 'i didn\'t say', 'not my name', 'wrong name'
             ];
             const isCorrection = correctionPhrases.some(phrase => transcript.toLowerCase().includes(phrase));
             
             if (isCorrection) {
-              console.log(`🔄 User wants to correct previous data: "${transcript}"`);
+              console.log(`🔄 CORRECTION DETECTED: "${transcript}"`);
               
               // Determine what field they want to correct
-              if (transcript.toLowerCase().includes('name')) {
-                console.log(`📝 Resetting first_name for correction`);
-                fieldValidator.fields.first_name = null;
-                fieldValidator.verificationAttempts.first_name = 0;
-                awaitingVerification = false;
+              if (transcript.toLowerCase().includes('name') || transcript.toLowerCase().includes('last')) {
+                console.log(`📝 Resetting name fields for correction`);
                 
-                const prompt = "No problem! Let's get your name correct. What's your full name?";
+                // Reset BOTH first and last name if either mentioned
+                if (transcript.toLowerCase().includes('last')) {
+                  fieldValidator.fields.last_name = null;
+                  fieldValidator.verificationAttempts.last_name = 0;
+                } else {
+                  fieldValidator.fields.first_name = null;
+                  fieldValidator.verificationAttempts.first_name = 0;
+                }
+                
+                awaitingVerification = false;  // EXIT verification mode
+                activeResponseInProgress = false;  // Allow new response
+                
+                const prompt = "No problem! Let's get that spelling right. Could you spell your last name slowly for me?";
                 
                 // Update conversation history FIRST
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -450,6 +482,13 @@ Then immediately confirm: "That's [Address]. Correct?"
                 
                 speakWithElevenLabs(prompt);
                 lastAIResponse = prompt;
+                
+                // Re-enter verification mode for the correction
+                setTimeout(() => {
+                  awaitingVerification = true;
+                  console.log(`🎧 Now listening for corrected name spelling...`);
+                }, 800);
+                
                 pendingTranscription = null;
                 break;
               }
@@ -687,7 +726,19 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.audio_transcript.done":
-            // Extract transcript and send to ElevenLabs
+            // Skip this - we now stream responses via text.delta for lower latency
+            // Only use audio_transcript for tracking context
+            if (event.transcript) {
+              const aiResponse = event.transcript;
+              lastAIResponse = aiResponse;  // Track for context
+              
+              // Don't speak here - already streamed via text.delta
+              console.log(`📝 AI response complete (already streamed): ${aiResponse.substring(0, 60)}...`);
+            }
+            break;
+            
+          case "response.audio_transcript.done_old":
+            // OLD CODE - keeping for reference but renamed to disable
             if (event.transcript) {
               const aiResponse = event.transcript;
               
@@ -724,22 +775,7 @@ Then immediately confirm: "That's [Address]. Correct?"
                 }
               }
               
-              lastAIResponse = aiResponse; // Track for context
-              
-              // Mark that we just asked a question
-              if (aiResponse.includes('?')) {
-                console.log(`❓ Question asked`);
-              }
-              
-              // IMPORTANT: Don't speak if we're about to ask for verification
-              // Wait a bit to see if transcription triggers verification
-              const shouldSpeak = !awaitingVerification;
-              
-              if (shouldSpeak) {
-                speakWithElevenLabs(aiResponse);
-              } else {
-                console.log(`⏸️  Skipping OpenAI response - verification in progress`);
-              }
+              // This code path disabled - using text.delta streaming instead
             }
             break;
             
