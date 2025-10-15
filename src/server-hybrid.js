@@ -110,9 +110,9 @@ wss.on("connection", async (twilioWs, req) => {
   // Manual VAD state for detecting speech end
   let speechDetected = false;
   let silenceFrames = 0;
-  const SILENCE_THRESHOLD = 0.01;  // RMS threshold for silence
+  const SILENCE_THRESHOLD = 0.015;  // RMS threshold for silence (INCREASED to reduce false triggers)
   const SILENCE_FRAMES_REQUIRED = 35;  // ~700ms at 20ms per frame (balanced for natural pauses)
-  const MIN_SPEECH_FRAMES = 10;  // ~200ms minimum speech before commit (prevent false triggers)
+  const MIN_SPEECH_FRAMES = 25;  // ~500ms minimum speech before commit (INCREASED - prevent false triggers from noise)
   const MAX_SPEECH_FRAMES = 500;  // ~10 seconds max per utterance (safety timeout)
   const WAIT_FOR_INITIAL_RESPONSE = 200;  // ~4 seconds - wait this long before assuming no response
   let audioFrameCount = 0;
@@ -487,6 +487,16 @@ Then immediately confirm: "That's [Address]. Correct?"
               : '';
             console.log(`📊 Confidence: ${estimatedConfidence.toFixed(2)}${indicatorStr} | Context: ${fieldContext}`);
             
+            // SPECIAL: Check for farewell phrases - NEVER pass to OpenAI, could end call prematurely
+            const isFarewell = confidenceResult.indicators.includes('farewell_phrase') || 
+                              confidenceResult.indicators.includes('casual_bye');
+            if (isFarewell) {
+              console.log(`👋 Farewell detected with low confidence (${estimatedConfidence.toFixed(2)}) - ignoring as likely false transcription`);
+              // Don't process - likely background noise transcribed incorrectly
+              pendingTranscription = null;
+              break;
+            }
+            
             // CRITICAL: Validate BEFORE OpenAI processes it
             if (fieldContext !== 'general' && estimatedConfidence < 0.60 && transcript.trim().length > 0) {
               console.log(`⚠️  LOW CONFIDENCE - Intercepting before OpenAI processes`);
@@ -554,6 +564,40 @@ Then immediately confirm: "That's [Address]. Correct?"
                 pendingTranscription = null;
                 break;
               }
+            }
+            
+            // Check if this is a meta-question about the system itself
+            const metaQuestions = ['what are you doing', 'why are you', 'what is this', 'who are you', 'what is going on', 'stop', 'what do you want'];
+            const isMetaQuestion = metaQuestions.some(q => transcript.toLowerCase().includes(q));
+            
+            if (isMetaQuestion) {
+              console.log(`🤔 Meta-question detected - providing clarification`);
+              const clarification = "I'm Zelda, the RSE Energy receptionist. I'm just collecting some basic information so our team can help with your HVAC issue. Let's continue - is anyone in danger or do you smell gas?";
+              
+              speakWithElevenLabs(clarification);
+              
+              // Add to conversation history
+              if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: transcript }]
+                  }
+                }));
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "assistant",
+                    content: [{ type: "text", text: clarification }]
+                  }
+                }));
+              }
+              
+              pendingTranscription = null;
+              break;
             }
             
             // Inject transcript as user message and trigger OpenAI response

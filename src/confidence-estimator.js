@@ -140,10 +140,18 @@ function estimateConfidence(transcript, fieldContext = 'general') {
   }
 
   // 11. Common farewell/dismissal phrases (not actual data)
-  const farewellPhrases = ['bye', 'goodbye', 'see you', 'thanks for your time', 'have a good day', 'no thanks'];
+  // BUT: Only flag as farewell if it's a CLEAR farewell (multiple words or very explicit)
+  const farewellPhrases = ['goodbye', 'see you later', 'thanks for your time', 'have a good day', 'no thanks', 'gotta go', 'talk to you later'];
+  const singleBye = /^bye\.?$/i;  // Just "bye" or "bye."
+  
+  // Only penalize if it's an explicit farewell phrase OR just standalone "bye"
   if (farewellPhrases.some(phrase => text.toLowerCase().includes(phrase))) {
-    confidence -= 0.6;  // Very low confidence for goodbye phrases
+    confidence -= 0.6;
     indicators.push('farewell_phrase');
+  } else if (singleBye.test(text.trim())) {
+    // Single "bye" gets less penalty - might be casual
+    confidence -= 0.3;
+    indicators.push('casual_bye');
   }
 
   // 12. For name fields, check if response is too short or contains common non-names
