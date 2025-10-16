@@ -5,6 +5,7 @@ const { WebSocketServer } = require("ws");
 const bodyParser = require("body-parser");
 const twilio = require("twilio");
 const { AdaptiveVAD } = require("./vad");
+const { BASE_URL, isProd } = require("./config/baseUrl");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -386,44 +387,43 @@ async function ttsElevenLabsUlaw8k(text) {
   return mulawAudio;
 }
 
-const PORT = process.env.PORT || 8081;
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL; // set after ngrok
+const PORT = process.env.PORT || 8080;
 const MEDIA_STREAM_PATH = "/media-stream";
 
 // 1) Twilio Voice webhook: return TwiML that starts a Media Stream to our WS
 app.post("/twilio/voice", (req, res) => {
+  const webhookStart = Date.now();
+  console.log("\n📞 Incoming call to /twilio/voice");
+  console.log("From:", req.body.From ? req.body.From.replace(/(\d{3})\d{3}(\d{4})/, '$1***$2') : 'Unknown');
+  console.log("To:", req.body.To);
+  
   try {
-    const base = process.env.PUBLIC_BASE_URL;
-
-    if (!base || !/^https:\/\/.+/i.test(base)) {
-      console.error("PUBLIC_BASE_URL missing/invalid:", base);
-      return res.status(500).send("PUBLIC_BASE_URL missing or invalid");
+    if (!BASE_URL || !/^https?:\/\/.+/i.test(BASE_URL)) {
+      console.error("❌ BASE_URL missing/invalid:", BASE_URL);
+      const errorResponse = new twilio.twiml.VoiceResponse();
+      errorResponse.say("We're sorry, the system is not configured properly.");
+      return res.type("text/xml").send(errorResponse.toString());
     }
 
-    const host = new URL(base).host; // e.g. e4ae1d6ab985.ngrok-free.app
+    const host = new URL(BASE_URL).host;
     const response = new twilio.twiml.VoiceResponse();
-
-    // TEMP: Test if Twilio audio works at all (uncomment to test)
-    // response.say("Testing one two three. Can you hear me?");
-    // return res.type("text/xml").send(response.toString());
-
     const connect = response.connect();
-    const stream = connect.stream({ 
-      url: `wss://${host}/media-stream`
-    });
-    // Enable bidirectional audio
+    const stream = connect.stream({ url: `wss://${host}/media-stream` });
     stream.parameter({ name: 'track', value: 'both_tracks' });
 
+    console.log(`⏱️  Webhook processed in ${Date.now() - webhookStart}ms`);
     return res.type("text/xml").send(response.toString());
   } catch (err) {
-    console.error("Error in /twilio/voice:", err);
-    return res.status(500).send("Internal Server Error");
+    console.error("❌ Error in /twilio/voice:", err);
+    const errorResponse = new twilio.twiml.VoiceResponse();
+    errorResponse.say("We're sorry, an error occurred.");
+    return res.type("text/xml").send(errorResponse.toString());
   }
 });
 
 // 2) Health check
 app.get("/health", (_req, res) => {
-  res.send({ ok: true });
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
 // Catch-all route for debugging
@@ -437,29 +437,32 @@ app.use((req, res) => {
   });
 });
 
-// 3) Start HTTP server first
-const server = app.listen(PORT, () => {
-  console.log(`HTTP listening on :${PORT}`);
+// 3) Start HTTP server first with production hardening
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log("\n✨ Legacy Voice Gateway Ready!");
+  console.log(`📍 Webhook URL: ${BASE_URL}/twilio/voice`);
+  console.log(`🎧 Waiting for calls...\n`);
+  console.log(`🚀 Server listening on port ${PORT}`);
+  console.log(`✅ Public URL: ${BASE_URL}`);
+  console.log(`🌍 Environment: ${isProd ? 'PRODUCTION' : 'DEVELOPMENT'}`);
   
   // Validate environment variables
   if (!process.env.OPENAI_API_KEY) {
-    console.error("❌ OPENAI_API_KEY is not set in .env file");
-  } else {
-    console.log("✅ OPENAI_API_KEY is set");
+    console.error("❌ OPENAI_API_KEY is not set");
+    process.exit(1);
   }
-  
   if (!process.env.ELEVENLABS_API_KEY) {
-    console.error("❌ ELEVENLABS_API_KEY is not set in .env file");
-  } else {
-    console.log("✅ ELEVENLABS_API_KEY is set");
+    console.error("❌ ELEVENLABS_API_KEY is not set");
+    process.exit(1);
   }
   
-  if (!process.env.PUBLIC_BASE_URL) {
-    console.error("❌ PUBLIC_BASE_URL is not set in .env file");
-  } else {
-    console.log("✅ PUBLIC_BASE_URL is set:", process.env.PUBLIC_BASE_URL);
-  }
+  console.log(`✅ OpenAI API key configured`);
+  console.log(`✅ ElevenLabs API key configured`);
 });
+
+// Production-grade timeouts for Railway
+server.keepAliveTimeout = 70000;
+server.headersTimeout = 75000;
 
 // 4) WebSocket server to receive Twilio Media Streams
 const wss = new WebSocketServer({ server, path: MEDIA_STREAM_PATH });
