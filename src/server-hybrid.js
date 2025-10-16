@@ -14,6 +14,7 @@ const { estimateConfidence, inferFieldContext } = require("./confidence-estimato
 const { TTSSentenceStreamer } = require("../lib/ttsSentenceStreamer");
 const { LatencyStats, round } = require("../lib/latency");
 const { MiniRAG, summarize } = require("../lib/rag");
+const { BASE_URL, isProd } = require("./config/baseUrl");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -44,27 +45,26 @@ app.use((req, res, next) => {
 
 // Twilio webhook - returns TwiML to start media stream
 app.post("/twilio/voice", (req, res) => {
+  const webhookStart = Date.now();
   console.log("\n📞 Incoming call to /twilio/voice");
-  console.log("From:", req.body.From);
+  console.log("From:", req.body.From ? req.body.From.replace(/(\d{3})\d{3}(\d{4})/, '$1***$2') : 'Unknown');
   console.log("To:", req.body.To);
   
   try {
-    const base = process.env.PUBLIC_BASE_URL;
-    if (!base || !/^https:\/\/.+/i.test(base)) {
-      console.error("❌ PUBLIC_BASE_URL missing/invalid:", base);
+    if (!BASE_URL || !/^https?:\/\/.+/i.test(BASE_URL)) {
+      console.error("❌ BASE_URL missing/invalid:", BASE_URL);
       const errorResponse = new twilio.twiml.VoiceResponse();
       errorResponse.say("We're sorry, the system is not configured properly. Please try again later.");
       return res.type("text/xml").send(errorResponse.toString());
     }
 
-    const host = new URL(base).host;
+    const host = new URL(BASE_URL).host;
     const response = new twilio.twiml.VoiceResponse();
     const connect = response.connect();
     connect.stream({ url: `wss://${host}/hybrid/twilio` });
 
-    const twiml = response.toString();
-    console.log("✅ Sending TwiML:", twiml);
-    return res.type("text/xml").send(twiml);
+    console.log(`⏱️  Webhook processed in ${Date.now() - webhookStart}ms`);
+    return res.type("text/xml").send(response.toString());
   } catch (err) {
     console.error("❌ Error in /twilio/voice:", err);
     const errorResponse = new twilio.twiml.VoiceResponse();
@@ -78,6 +78,7 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+<<<<<<< HEAD
 // Initialize RAG system
 const rag = new MiniRAG({ kbDir: "./kb", threshold: 0.82 });
 rag.load().catch(err => console.error("❌ RAG load failed:", err));
@@ -92,17 +93,38 @@ const latencyStats = {
 
 // Start HTTP server
 const server = app.listen(PORT, () => {
+=======
+// Start HTTP server with production hardening
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log("\n✨ Hybrid Voice Gateway Ready!");
+  console.log(`📍 Webhook URL: ${BASE_URL}/twilio/voice`);
+  console.log(`🎙️ Using ElevenLabs for ultra-natural TTS`);
+  console.log(`🤖 Using OpenAI Realtime for conversation`);
+  console.log(`🎧 Waiting for calls...\n`);
+>>>>>>> chore/railway-prod-cutover
   console.log(`🚀 Server listening on port ${PORT}`);
   console.log(`✅ OpenAI API key configured`);
   console.log(`✅ ElevenLabs API key configured`);
-  console.log(`✅ Public URL: ${process.env.PUBLIC_BASE_URL}`);
+  console.log(`✅ Public URL: ${BASE_URL}`);
+  console.log(`🌍 Environment: ${isProd ? 'PRODUCTION' : 'DEVELOPMENT'}`);
 });
+
+// Production-grade timeouts for Railway
+server.keepAliveTimeout = 70000;  // 70s (longer than typical load balancer timeout)
+server.headersTimeout = 75000;    // 75s (slightly longer than keepAlive)
 
 // WebSocket server for Twilio Media Streams
 const wss = new WebSocketServer({ server, path: "/hybrid/twilio" });
 
 wss.on("connection", async (twilioWs, req) => {
+  const connectionStart = Date.now();
   console.log("\n📞 New Twilio connection from:", req.socket.remoteAddress);
+  
+  // Latency tracking
+  let wsOpenTime = null;
+  let sessionReadyTime = null;
+  let firstLLMTokenTime = null;
+  let firstTTSAudioTime = null;
   
   let openaiWs = null;
   let streamSid = null;
@@ -155,7 +177,9 @@ wss.on("connection", async (twilioWs, req) => {
 
     // Handle OpenAI connection open
     openaiWs.on("open", () => {
+      wsOpenTime = Date.now();
       console.log("✅ Connected to OpenAI Realtime API");
+      console.log(`⏱️  Webhook → OpenAI connection: ${wsOpenTime - connectionStart}ms`);
       
       // Configure session - MANUAL commit mode for pre-validation
       const sessionConfig = {
@@ -291,6 +315,9 @@ Then immediately confirm: "That's [Address]. Correct?"
 
     // Stream TTS from ElevenLabs with sentence-first optimization
     async function speakWithElevenLabs(text) {
+      const ttsStart = Date.now();
+      let firstAudioReceived = false;
+      
       try {
         if (!text || text.trim().length === 0) {
           console.log("⚠️  Empty text provided to TTS, skipping");
@@ -307,6 +334,7 @@ Then immediately confirm: "That's [Address]. Correct?"
           currentTTS.abort();
         }
         
+<<<<<<< HEAD
         // Create sentence streamer
         currentTTS = new TTSSentenceStreamer({
           apiKey: ELEVENLABS_API_KEY,
@@ -353,6 +381,33 @@ Then immediately confirm: "That's [Address]. Correct?"
         currentTTS = null;
         
         return { firstAudioTime };
+=======
+        ffmpeg(mp3Stream)
+          .inputFormat('mp3')
+          .audioCodec('pcm_mulaw')
+          .audioFrequency(8000)
+          .audioChannels(1)
+          .format('mulaw')
+          .on('error', (err) => {
+            console.error('❌ FFmpeg error:', err.message);
+          })
+          .on('end', () => {
+            console.log("✅ TTS playback complete");
+          })
+          .pipe()
+          .on('data', (chunk) => {
+            // Track first audio chunk for latency
+            if (!firstAudioReceived) {
+              firstAudioReceived = true;
+              if (!firstTTSAudioTime) {
+                firstTTSAudioTime = Date.now();
+                console.log(`⏱️  First TTS audio chunk: ${firstTTSAudioTime - ttsStart}ms`);
+              }
+            }
+            // Stream μ-law chunks directly to playback buffer
+            playBuffer = Buffer.concat([playBuffer, chunk]);
+          });
+>>>>>>> chore/railway-prod-cutover
         
       } catch (error) {
         console.error("❌ ElevenLabs error:", error.message);
@@ -381,7 +436,9 @@ Then immediately confirm: "That's [Address]. Correct?"
         
         switch (event.type) {
           case "session.created":
+            sessionReadyTime = Date.now();
             console.log("🎯 OpenAI session created:", event.session.id);
+            console.log(`⏱️  Session ready in ${sessionReadyTime - wsOpenTime}ms`);
             break;
             
           case "session.updated":
@@ -420,9 +477,10 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.text.delta":
-            // Log deltas for debugging
-            if (event.delta) {
-              console.log(`📨 Text delta: "${event.delta}"`);
+            // Track first LLM token for latency
+            if (!firstLLMTokenTime && event.delta) {
+              firstLLMTokenTime = Date.now();
+              console.log(`⏱️  First LLM token: ${firstLLMTokenTime - (sessionReadyTime || connectionStart)}ms`);
             }
             break;
             

@@ -9,6 +9,7 @@ const { pcm16ToMuLaw, muLawToPcm16, pcm16leBufferToInt16, int16ToPcm16leBuffer }
 const { downsampleTo8k, upsample8kTo24k } = require("./resample");
 const { FieldValidator } = require("./field-validator");
 const { estimateConfidence, inferFieldContext } = require("./confidence-estimator");
+const { BASE_URL, isProd } = require("./config/baseUrl");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -31,22 +32,31 @@ app.use((req, res, next) => {
 
 // Twilio webhook - returns TwiML to start media stream
 app.post("/twilio/voice", (req, res) => {
+  const webhookStart = Date.now();
+  console.log("\n📞 Incoming call to /twilio/voice");
+  console.log("From:", req.body.From ? req.body.From.replace(/(\d{3})\d{3}(\d{4})/, '$1***$2') : 'Unknown');
+  console.log("To:", req.body.To);
+  
   try {
-    const base = process.env.PUBLIC_BASE_URL;
-    if (!base || !/^https:\/\/.+/i.test(base)) {
-      console.error("PUBLIC_BASE_URL missing/invalid:", base);
-      return res.status(500).send("PUBLIC_BASE_URL missing or invalid");
+    if (!BASE_URL || !/^https?:\/\/.+/i.test(BASE_URL)) {
+      console.error("❌ BASE_URL missing/invalid:", BASE_URL);
+      const errorResponse = new twilio.twiml.VoiceResponse();
+      errorResponse.say("We're sorry, the system is not configured properly.");
+      return res.type("text/xml").send(errorResponse.toString());
     }
 
-    const host = new URL(base).host;
+    const host = new URL(BASE_URL).host;
     const response = new twilio.twiml.VoiceResponse();
     const connect = response.connect();
     connect.stream({ url: `wss://${host}/realtime/twilio` });
 
+    console.log(`⏱️  Webhook processed in ${Date.now() - webhookStart}ms`);
     return res.type("text/xml").send(response.toString());
   } catch (err) {
-    console.error("Error in /twilio/voice:", err);
-    return res.status(500).send("Internal Server Error");
+    console.error("❌ Error in /twilio/voice:", err);
+    const errorResponse = new twilio.twiml.VoiceResponse();
+    errorResponse.say("We're sorry, an error occurred.");
+    return res.type("text/xml").send(errorResponse.toString());
   }
 });
 
@@ -55,12 +65,21 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Start HTTP server
-const server = app.listen(PORT, () => {
+// Start HTTP server with production hardening
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log("\n✨ Realtime Voice Gateway Ready!");
+  console.log(`📍 Webhook URL: ${BASE_URL}/twilio/voice`);
+  console.log(`🤖 Using OpenAI Realtime (full duplex)`);
+  console.log(`🎧 Waiting for calls...\n`);
   console.log(`🚀 Server listening on port ${PORT}`);
   console.log(`✅ OpenAI API key configured`);
-  console.log(`✅ Public URL: ${process.env.PUBLIC_BASE_URL}`);
+  console.log(`✅ Public URL: ${BASE_URL}`);
+  console.log(`🌍 Environment: ${isProd ? 'PRODUCTION' : 'DEVELOPMENT'}`);
 });
+
+// Production-grade timeouts for Railway
+server.keepAliveTimeout = 70000;
+server.headersTimeout = 75000;
 
 // WebSocket server for Twilio Media Streams
 const wss = new WebSocketServer({ server, path: "/realtime/twilio" });
