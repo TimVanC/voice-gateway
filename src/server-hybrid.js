@@ -355,27 +355,36 @@ Then immediately confirm: "That's [Address]. Correct?"
           console.error("❌ TTS Streamer error:", err.message);
         });
         
-        // Stream audio chunks to playback buffer (converted to μ-law via ffmpeg)
-        await currentTTS.speak(text, (mp3Chunk) => {
-          // Convert MP3 chunk to μ-law on the fly
-          const stream = require('stream');
-          const bufferStream = new stream.PassThrough();
-          bufferStream.end(mp3Chunk);
+        // Collect all MP3 data from TTSSentenceStreamer, then convert
+        const mp3Chunks = [];
+        
+        await currentTTS.speak(text, (audioChunk) => {
+          mp3Chunks.push(audioChunk);
+        });
+        
+        // Convert complete MP3 to μ-law in one pass (more reliable than chunk-by-chunk)
+        if (mp3Chunks.length > 0) {
+          const completeMp3 = Buffer.concat(mp3Chunks);
+          const Readable = require('stream').Readable;
+          const mp3Stream = Readable.from(completeMp3);
           
-          ffmpeg(bufferStream)
+          ffmpeg(mp3Stream)
             .inputFormat('mp3')
             .audioCodec('pcm_mulaw')
             .audioFrequency(8000)
             .audioChannels(1)
             .format('mulaw')
             .on('error', (err) => {
-              console.error('❌ FFmpeg chunk error:', err.message);
+              console.error('❌ FFmpeg error:', err.message);
+            })
+            .on('end', () => {
+              console.log("✅ FFmpeg conversion complete");
             })
             .pipe()
             .on('data', (mulawChunk) => {
               playBuffer = Buffer.concat([playBuffer, mulawChunk]);
             });
-        });
+        }
         
         console.log("✅ TTS playback complete");
         currentTTS = null;
