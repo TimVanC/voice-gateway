@@ -78,7 +78,6 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-<<<<<<< HEAD
 // Initialize RAG system
 const rag = new MiniRAG({ kbDir: "./kb", threshold: 0.82 });
 rag.load().catch(err => console.error("❌ RAG load failed:", err));
@@ -91,9 +90,6 @@ const latencyStats = {
   ttsLatency: new LatencyStats(100)
 };
 
-// Start HTTP server
-const server = app.listen(PORT, () => {
-=======
 // Start HTTP server with production hardening
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log("\n✨ Hybrid Voice Gateway Ready!");
@@ -101,7 +97,6 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`🎙️ Using ElevenLabs for ultra-natural TTS`);
   console.log(`🤖 Using OpenAI Realtime for conversation`);
   console.log(`🎧 Waiting for calls...\n`);
->>>>>>> chore/railway-prod-cutover
   console.log(`🚀 Server listening on port ${PORT}`);
   console.log(`✅ OpenAI API key configured`);
   console.log(`✅ ElevenLabs API key configured`);
@@ -334,8 +329,7 @@ Then immediately confirm: "That's [Address]. Correct?"
           currentTTS.abort();
         }
         
-<<<<<<< HEAD
-        // Create sentence streamer
+        // Create sentence streamer with latency tracking
         currentTTS = new TTSSentenceStreamer({
           apiKey: ELEVENLABS_API_KEY,
           voiceId: ELEVENLABS_VOICE_ID,
@@ -349,6 +343,12 @@ Then immediately confirm: "That's [Address]. Correct?"
           const ttsLatency = firstAudioTime - ttsStartTime;
           latencyStats.ttsLatency.add(ttsLatency);
           console.log(`⚡ First audio out in ${ttsLatency}ms`);
+          
+          // Also track global first TTS audio for Railway monitoring
+          if (!firstTTSAudioTime) {
+            firstTTSAudioTime = firstAudioTime;
+            console.log(`⏱️  First TTS audio chunk: ${firstTTSAudioTime - ttsStartTime}ms`);
+          }
         });
         
         currentTTS.on("error", (err) => {
@@ -381,33 +381,6 @@ Then immediately confirm: "That's [Address]. Correct?"
         currentTTS = null;
         
         return { firstAudioTime };
-=======
-        ffmpeg(mp3Stream)
-          .inputFormat('mp3')
-          .audioCodec('pcm_mulaw')
-          .audioFrequency(8000)
-          .audioChannels(1)
-          .format('mulaw')
-          .on('error', (err) => {
-            console.error('❌ FFmpeg error:', err.message);
-          })
-          .on('end', () => {
-            console.log("✅ TTS playback complete");
-          })
-          .pipe()
-          .on('data', (chunk) => {
-            // Track first audio chunk for latency
-            if (!firstAudioReceived) {
-              firstAudioReceived = true;
-              if (!firstTTSAudioTime) {
-                firstTTSAudioTime = Date.now();
-                console.log(`⏱️  First TTS audio chunk: ${firstTTSAudioTime - ttsStart}ms`);
-              }
-            }
-            // Stream μ-law chunks directly to playback buffer
-            playBuffer = Buffer.concat([playBuffer, chunk]);
-          });
->>>>>>> chore/railway-prod-cutover
         
       } catch (error) {
         console.error("❌ ElevenLabs error:", error.message);
