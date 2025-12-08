@@ -892,9 +892,40 @@ Then immediately confirm: "That's [Address]. Correct?"
               break;
             }
             
-            // For non-verification scenarios, let OpenAI handle naturally
-            // Don't inject or create responses - OpenAI's server VAD will trigger responses automatically
+            // For non-verification scenarios, add user message and trigger OpenAI response
             console.log(`✅ Passing to OpenAI for natural conversation handling`);
+            
+            // Add user message to conversation and trigger response
+            if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+              // Check for race condition
+              if (activeResponseInProgress) {
+                console.log(`⏸️  Waiting for active response to complete before creating new one`);
+                // Store transcript to process after current response completes
+                pendingTranscription = { transcript, fieldContext: 'general', confidence: estimatedConfidence };
+                break;
+              }
+              
+              activeResponseInProgress = true;
+              llmStartTime = Date.now();
+              
+              // Add user message to conversation
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: transcript }]
+                }
+              }));
+              
+              // Trigger OpenAI to generate response
+              openaiWs.send(JSON.stringify({ 
+                type: "response.create",
+                response: { modalities: ["text"] }  // Text-only, we'll use ElevenLabs for TTS
+              }));
+              
+              console.log(`📤 Sent user message and triggered response.create`);
+            }
             
             pendingTranscription = null;
             break;
