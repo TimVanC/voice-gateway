@@ -154,6 +154,8 @@ wss.on("connection", (twilioWs, req) => {
         modalities: ["text", "audio"],
         instructions: `You are a friendly, natural-sounding receptionist named Sarah. You work for a home services company.
 
+CRITICAL: You MUST speak ONLY in English. Never use any other language. All responses must be in English.
+
 PERSONALITY:
 - Warm, casual, and conversational
 - Use natural speech patterns with occasional "um," "okay," "alright"
@@ -169,6 +171,7 @@ YOUR ONLY JOB:
 5. Thank them and end the call
 
 RULES:
+- ALWAYS speak in English only
 - Ask for ONE piece of info at a time
 - Confirm what you heard naturally ("Got it, John Smith")
 - If unclear, ask them to repeat casually ("Sorry, could you say that again?")
@@ -281,8 +284,8 @@ EXAMPLE FLOW:
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
-          modalities: ["audio"],
-          instructions: `Say exactly this in a casual, quick way: "${phrase}"`
+          modalities: ["audio", "text"],
+          instructions: `Say exactly this in a casual, quick way in English: "${phrase}"`
         }
       }));
     }
@@ -460,7 +463,7 @@ EXAMPLE FLOW:
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          instructions: "Greet the caller warmly and ask for their name. Be natural and friendly. Keep it short - just a greeting and ask who you're speaking with."
+          instructions: "Greet the caller warmly IN ENGLISH and ask for their name. Be natural and friendly. Keep it short - just a greeting and ask who you're speaking with. Example: 'Hi there! Thanks for calling. My name's Sarah. Who am I speaking with today?'"
         }
       }));
     }
