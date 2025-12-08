@@ -11,7 +11,7 @@ const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const { Readable } = require("stream");
 const { FieldValidator } = require("./field-validator");
 const { estimateConfidence, inferFieldContext } = require("./confidence-estimator");
-const { TTSSentenceStreamer } = require("../lib/ttsSentenceStreamer");
+// TTSSentenceStreamer removed - using REST API instead
 const { LatencyStats, round } = require("../lib/latency");
 const { MiniRAG, summarize } = require("../lib/rag");
 const { BASE_URL, isProd } = require("./config/baseUrl");
@@ -139,8 +139,8 @@ wss.on("connection", async (twilioWs, req) => {
   let playBuffer = Buffer.alloc(0);
   let paceTimer = null;
   
-  // TTS management
-  let currentTTS = null;
+  // TTS management (flag for barge-in detection)
+  let ttsInProgress = false;
   
   // Latency tracking for this call
   let turnStartTime = 0;
@@ -308,10 +308,9 @@ Then immediately confirm: "That's [Address]. Correct?"
       paceTimer = setTimeout(sendNextFrame, 20);
     }
 
-    // Stream TTS from ElevenLabs with sentence-first optimization
+    // TTS from ElevenLabs using REST API (more reliable than WebSocket)
     async function speakWithElevenLabs(text) {
       const ttsStart = Date.now();
-      let firstAudioReceived = false;
       
       try {
         if (!text || text.trim().length === 0) {
@@ -324,50 +323,50 @@ Then immediately confirm: "That's [Address]. Correct?"
         console.log("🎙️ AI:", displayText);
         
         // Stop any ongoing TTS (barge-in prevention)
-        if (currentTTS) {
+        if (ttsInProgress) {
           console.log("🛑 Aborting previous TTS for new response");
-          currentTTS.abort();
+          playBuffer = Buffer.alloc(0); // Clear playback buffer
+          ttsInProgress = false;
         }
         
-        // Create sentence streamer with latency tracking
-        currentTTS = new TTSSentenceStreamer({
-          apiKey: ELEVENLABS_API_KEY,
-          voiceId: ELEVENLABS_VOICE_ID,
-          model: "eleven_turbo_v2_5"
+        ttsInProgress = true;
+        
+        // Use REST API for reliable MP3 generation
+        const response = await axios({
+          method: 'POST',
+          url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+          headers: {
+            'Accept': 'audio/mpeg',
+            'Content-Type': 'application/json',
+            'xi-api-key': ELEVENLABS_API_KEY
+          },
+          data: {
+            text: text,
+            model_id: 'eleven_turbo_v2_5',
+            voice_settings: {
+              stability: 0.4,
+              similarity_boost: 0.7
+            }
+          },
+          responseType: 'arraybuffer' // Get binary MP3 data
         });
         
-        let firstAudioTime = null;
+        const firstAudioTime = Date.now();
+        const ttsLatency = firstAudioTime - ttsStartTime;
+        latencyStats.ttsLatency.add(ttsLatency);
+        console.log(`⚡ First audio received in ${ttsLatency}ms`);
         
-        currentTTS.once("first_audio_out", () => {
-          firstAudioTime = Date.now();
-          const ttsLatency = firstAudioTime - ttsStartTime;
-          latencyStats.ttsLatency.add(ttsLatency);
-          console.log(`⚡ First audio out in ${ttsLatency}ms`);
-          
-          // Also track global first TTS audio for Railway monitoring
-          if (!firstTTSAudioTime) {
-            firstTTSAudioTime = firstAudioTime;
-            console.log(`⏱️  First TTS audio chunk: ${firstTTSAudioTime - ttsStartTime}ms`);
-          }
-        });
+        if (!firstTTSAudioTime) {
+          firstTTSAudioTime = firstAudioTime;
+          console.log(`⏱️  First TTS audio chunk: ${firstTTSAudioTime - ttsStartTime}ms`);
+        }
         
-        currentTTS.on("error", (err) => {
-          console.error("❌ TTS Streamer error:", err.message);
-        });
+        // Convert MP3 to μ-law
+        const mp3Buffer = Buffer.from(response.data);
+        const Readable = require('stream').Readable;
+        const mp3Stream = Readable.from(mp3Buffer);
         
-        // Collect all MP3 data from TTSSentenceStreamer, then convert
-        const mp3Chunks = [];
-        
-        await currentTTS.speak(text, (audioChunk) => {
-          mp3Chunks.push(audioChunk);
-        });
-        
-        // Convert complete MP3 to μ-law in one pass (more reliable than chunk-by-chunk)
-        if (mp3Chunks.length > 0) {
-          const completeMp3 = Buffer.concat(mp3Chunks);
-          const Readable = require('stream').Readable;
-          const mp3Stream = Readable.from(completeMp3);
-          
+        await new Promise((resolve, reject) => {
           ffmpeg(mp3Stream)
             .inputFormat('mp3')
             .audioCodec('pcm_mulaw')
@@ -376,25 +375,30 @@ Then immediately confirm: "That's [Address]. Correct?"
             .format('mulaw')
             .on('error', (err) => {
               console.error('❌ FFmpeg error:', err.message);
+              reject(err);
             })
             .on('end', () => {
               console.log("✅ FFmpeg conversion complete");
+              resolve();
             })
             .pipe()
             .on('data', (mulawChunk) => {
               playBuffer = Buffer.concat([playBuffer, mulawChunk]);
             });
-        }
+        });
         
         console.log("✅ TTS playback complete");
-        currentTTS = null;
+        ttsInProgress = false;
         
         return { firstAudioTime };
         
       } catch (error) {
         console.error("❌ ElevenLabs error:", error.message);
-        console.error("Stack trace:", error.stack);
-        currentTTS = null;
+        if (error.response) {
+          console.error("Response status:", error.response.status);
+          console.error("Response data:", error.response.data?.toString?.() || error.response.data);
+        }
+        ttsInProgress = false;
         return { firstAudioTime: null };
       }
     }
@@ -484,10 +488,10 @@ Then immediately confirm: "That's [Address]. Correct?"
             playBuffer = Buffer.alloc(0);  // Stop any AI playback
             
             // Barge-in: Stop current TTS immediately
-            if (currentTTS) {
+            if (ttsInProgress) {
               console.log("🛑 Barge-in detected - aborting TTS");
-              currentTTS.abort();
-              currentTTS = null;
+              playBuffer = Buffer.alloc(0); // Clear playback buffer
+              ttsInProgress = false;
             }
             
             // Mark turn start for latency tracking
