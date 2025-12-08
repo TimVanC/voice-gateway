@@ -5,12 +5,13 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon src/server.js",
-    "start": "node src/server-hybrid.js",
-    "realtime": "node src/server-realtime.js",
-    "realtime:dev": "nodemon src/server-realtime.js",
+    "start": "node src/server-simple.js",
+    "simple": "node src/server-simple.js",
+    "simple:dev": "nodemon src/server-simple.js",
     "hybrid": "node src/server-hybrid.js",
-    "hybrid:dev": "nodemon src/server-hybrid.js"
+    "hybrid:dev": "nodemon src/server-hybrid.js",
+    "realtime": "node src/server-realtime.js",
+    "legacy": "node src/server.js"
   },
   "keywords": [],
   "author": "",
