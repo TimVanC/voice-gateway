@@ -398,8 +398,14 @@ Then immediately confirm: "That's [Address]. Correct?"
             });
         });
         
-        console.log("✅ TTS playback complete");
+        console.log(`✅ TTS playback complete - playBuffer now has ${playBuffer.length} bytes`);
         ttsInProgress = false;
+        
+        // Ensure pumpFrames is running to send audio
+        if (!paceTimer && playBuffer.length > 0) {
+          console.log("🔄 Restarting pumpFrames to send buffered audio");
+          pumpFrames();
+        }
         
         return { firstAudioTime };
         
@@ -929,7 +935,10 @@ Then immediately confirm: "That's [Address]. Correct?"
               
               // Speak the response via ElevenLabs
               if (!awaitingVerification) {
-                speakWithElevenLabs(aiResponse);
+                console.log(`🎤 Calling speakWithElevenLabs with: "${aiResponse.substring(0, 50)}..."`);
+                speakWithElevenLabs(aiResponse).catch(err => {
+                  console.error("❌ speakWithElevenLabs error:", err);
+                });
               } else {
                 console.log(`⏸️ Skipping response - verification in progress`);
               }
