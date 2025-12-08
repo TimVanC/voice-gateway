@@ -25,27 +25,6 @@ if (!OPENAI_API_KEY) {
 }
 
 // ============================================================================
-// MICRO-RESPONSE LIBRARY - Pre-encoded μ-law audio for instant backchanneling
-// These are ~0.5-1 second phrases that play while waiting for OpenAI
-// ============================================================================
-const MICRO_RESPONSES = [
-  "Okay, one moment.",
-  "Got it, one sec.",
-  "Alright, let me see.",
-  "Mm-hmm, okay.",
-  "Sure thing.",
-];
-
-// Track which micro-response to use next (round-robin)
-let microResponseIndex = 0;
-
-function getNextMicroResponse() {
-  const phrase = MICRO_RESPONSES[microResponseIndex];
-  microResponseIndex = (microResponseIndex + 1) % MICRO_RESPONSES.length;
-  return phrase;
-}
-
-// ============================================================================
 // STATE MACHINE - Simple 5-step flow
 // ============================================================================
 const STATES = {
@@ -116,12 +95,7 @@ wss.on("connection", (twilioWs, req) => {
   let streamSid = null;
   let callState = STATES.GREETING;
   let sessionReady = false;
-  
-  // Backchanneling state
-  let speechEndTime = null;
-  let backchannelTimer = null;
-  let backchannelPlayed = false;
-  let audioStreaming = false;
+  let responseInProgress = false;  // Track if OpenAI is generating a response
   
   // Audio pacing
   let playBuffer = Buffer.alloc(0);
@@ -157,37 +131,35 @@ wss.on("connection", (twilioWs, req) => {
 CRITICAL: You MUST speak ONLY in English. Never use any other language. All responses must be in English.
 
 PERSONALITY:
-- Warm, casual, and conversational
-- Use natural speech patterns with occasional "um," "okay," "alright"
+- Warm, friendly, and genuinely conversational
+- Speak naturally with varied intonation - not monotone
+- Use contractions naturally (I'm, you're, we'll, that's)
+- Add warmth with phrases like "Oh great!", "Perfect!", "Awesome!"
+- Occasionally use light fillers like "So...", "Alright...", "Okay so..."
 - Keep responses SHORT - one or two sentences max
-- Sound like a real person, not a robot
-- Add small acknowledgments like "Great!" or "Perfect!"
+- Sound genuinely interested and helpful
 
 YOUR ONLY JOB:
-1. Greet the caller warmly
-2. Get their first and last name
-3. Get their phone number  
-4. Get their email address
-5. Thank them and end the call
+1. Greet the caller warmly and ask their name
+2. Get their phone number  
+3. Get their email address
+4. Thank them warmly and end the call
 
 RULES:
 - ALWAYS speak in English only
 - Ask for ONE piece of info at a time
-- Confirm what you heard naturally ("Got it, John Smith")
-- If unclear, ask them to repeat casually ("Sorry, could you say that again?")
-- Keep it simple and friendly
-- No technical jargon, no complex sentences
-- Sound natural, like you're having a real conversation
+- Confirm what you heard with enthusiasm ("Got it, John Smith - nice to meet you!")
+- If something is unclear, ask naturally ("Sorry, I didn't quite catch that - could you say it one more time?")
+- Keep it simple, warm, and friendly
+- Sound like a real person having a pleasant conversation
+- Don't be overly formal - be casual and personable
 
-EXAMPLE FLOW:
-"Hi there! Thanks for calling. My name's Sarah. Who am I speaking with today?"
-[User: John Smith]
-"Great, nice to meet you John! And what's the best number to reach you?"
-[User: 555-123-4567]
-"Got it. And your email address?"
-[User: john@email.com]
-"Perfect! Thanks so much John. We'll be in touch soon. Have a great day!"`,
-        voice: "shimmer",  // Natural female voice
+EXAMPLE PHRASES:
+- "Hi there! Thanks so much for calling. I'm Sarah - who do I have the pleasure of speaking with?"
+- "Oh awesome, nice to meet you [name]! So what's the best number to reach you at?"
+- "Perfect, got it! And what's your email?"
+- "Great, thanks so much [name]! We'll be in touch real soon. You have a wonderful day!"`,
+        voice: "nova",  // Try nova - often sounds more natural
         input_audio_format: "g711_ulaw",
         output_audio_format: "g711_ulaw",
         input_audio_transcription: {
@@ -195,12 +167,12 @@ EXAMPLE FLOW:
         },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500  // Faster response
+          threshold: 0.6,           // Higher = less sensitive to background noise
+          prefix_padding_ms: 400,   // More padding before speech
+          silence_duration_ms: 700  // Wait longer to confirm speech ended
         },
-        temperature: 0.8,
-        max_response_output_tokens: 150  // Keep responses short
+        temperature: 0.9,           // More variation = more natural
+        max_response_output_tokens: 200
       }
     };
     
@@ -252,54 +224,6 @@ EXAMPLE FLOW:
   }
 
   // ============================================================================
-  // BACKCHANNELING - Play quick filler while waiting for OpenAI
-  // ============================================================================
-  function startBackchannelTimer() {
-    // Clear any existing timer
-    if (backchannelTimer) {
-      clearTimeout(backchannelTimer);
-    }
-    
-    backchannelPlayed = false;
-    audioStreaming = false;
-    
-    // Start timer - if no audio in 200ms, play micro-response
-    backchannelTimer = setTimeout(() => {
-      if (!audioStreaming && !backchannelPlayed) {
-        playMicroResponse();
-      }
-    }, 200);  // 200ms delay before backchanneling
-  }
-  
-  function playMicroResponse() {
-    if (backchannelPlayed || audioStreaming) return;
-    
-    backchannelPlayed = true;
-    const phrase = getNextMicroResponse();
-    console.log(`💬 Backchannel: "${phrase}"`);
-    
-    // Send micro-response to OpenAI for quick TTS
-    // This uses the same voice for consistency
-    if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          instructions: `Say exactly this in a casual, quick way in English: "${phrase}"`
-        }
-      }));
-    }
-  }
-  
-  function cancelBackchannel() {
-    if (backchannelTimer) {
-      clearTimeout(backchannelTimer);
-      backchannelTimer = null;
-    }
-    audioStreaming = true;
-  }
-
-  // ============================================================================
   // HANDLE OPENAI MESSAGES
   // ============================================================================
   openaiWs.on("message", (data) => {
@@ -317,9 +241,6 @@ EXAMPLE FLOW:
           break;
           
         case "response.audio.delta":
-          // Audio streaming from OpenAI - cancel backchannel timer
-          cancelBackchannel();
-          
           if (event.delta) {
             const audioData = Buffer.from(event.delta, 'base64');
             playBuffer = Buffer.concat([playBuffer, audioData]);
@@ -328,18 +249,20 @@ EXAMPLE FLOW:
           
         case "response.audio.done":
           console.log("🔊 Audio complete");
+          responseInProgress = false;
           break;
           
         case "input_audio_buffer.speech_started":
           console.log("🎤 User speaking...");
           // Clear any pending audio when user starts speaking (barge-in)
           playBuffer = Buffer.alloc(0);
+          responseInProgress = false;  // Cancel any pending response
           break;
           
         case "input_audio_buffer.speech_stopped":
           console.log("🔇 User stopped speaking");
-          // Start backchannel timer
-          startBackchannelTimer();
+          // OpenAI will automatically generate a response via server VAD
+          responseInProgress = true;
           break;
           
         case "conversation.item.input_audio_transcription.completed":
@@ -366,6 +289,7 @@ EXAMPLE FLOW:
           
         case "response.done":
           console.log("✅ Response complete");
+          responseInProgress = false;
           
           // Advance state after greeting
           if (callState === STATES.GREETING) {
@@ -456,6 +380,7 @@ EXAMPLE FLOW:
   
   function triggerGreeting() {
     console.log("👋 Sending greeting");
+    responseInProgress = true;
     
     // Let OpenAI generate the greeting naturally
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -463,7 +388,7 @@ EXAMPLE FLOW:
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          instructions: "Greet the caller warmly IN ENGLISH and ask for their name. Be natural and friendly. Keep it short - just a greeting and ask who you're speaking with. Example: 'Hi there! Thanks for calling. My name's Sarah. Who am I speaking with today?'"
+          instructions: "Greet the caller warmly and enthusiastically IN ENGLISH. Ask for their name. Be natural, warm and friendly. Example: 'Hi there! Thanks so much for calling. I'm Sarah - who do I have the pleasure of speaking with today?'"
         }
       }));
     }
@@ -477,10 +402,6 @@ EXAMPLE FLOW:
     if (paceTimer) {
       clearTimeout(paceTimer);
       paceTimer = null;
-    }
-    if (backchannelTimer) {
-      clearTimeout(backchannelTimer);
-      backchannelTimer = null;
     }
   });
 
