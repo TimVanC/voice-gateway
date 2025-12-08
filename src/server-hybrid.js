@@ -132,6 +132,7 @@ wss.on("connection", async (twilioWs, req) => {
   let pendingTranscription = null;  // Store transcription awaiting validation
   let activeResponseInProgress = false;  // Track if OpenAI is currently generating a response
   let currentResponseText = "";  // Accumulate text from deltas
+  let responseSpoken = false;  // Track if we've already spoken this response (prevent duplicates)
   
   // Field validation and verification
   const fieldValidator = new FieldValidator();
@@ -528,12 +529,15 @@ Then immediately confirm: "That's [Address]. Correct?"
                 break;
               }
               
-              // Speak the response via ElevenLabs
-              if (!awaitingVerification) {
+              // Speak the response via ElevenLabs (only if not already spoken)
+              if (!awaitingVerification && !responseSpoken) {
+                responseSpoken = true;  // Mark as spoken
                 console.log(`🎤 Calling speakWithElevenLabs with: "${aiResponse.substring(0, 50)}..."`);
                 speakWithElevenLabs(aiResponse).catch(err => {
                   console.error("❌ speakWithElevenLabs error:", err);
                 });
+              } else if (responseSpoken) {
+                console.log(`⏸️ Skipping - response already spoken`);
               } else {
                 console.log(`⏸️ Skipping response - verification in progress`);
               }
@@ -553,11 +557,15 @@ Then immediately confirm: "That's [Address]. Correct?"
                 const llmLatency = Date.now() - llmStartTime;
                 latencyStats.llmLatency.add(llmLatency);
                 
-                if (!awaitingVerification) {
-                  console.log(`🎤 Calling speakWithElevenLabs from output_item.done`);
+                // Only speak if not already spoken from text.done
+                if (!awaitingVerification && !responseSpoken) {
+                  responseSpoken = true;  // Mark as spoken
+                  console.log(`🎤 Calling speakWithElevenLabs from output_item.done (fallback)`);
                   speakWithElevenLabs(aiResponse).catch(err => {
                     console.error("❌ speakWithElevenLabs error:", err);
                   });
+                } else if (responseSpoken) {
+                  console.log(`⏸️ Skipping output_item.done - response already spoken`);
                 }
               }
             }
@@ -976,6 +984,7 @@ Then immediately confirm: "That's [Address]. Correct?"
               activeResponseInProgress = true;
               llmStartTime = Date.now();
               currentResponseText = "";  // Reset accumulator for new response
+              responseSpoken = false;  // Reset flag for new response
               
               // Add user message to conversation
               openaiWs.send(JSON.stringify({
@@ -1022,8 +1031,9 @@ Then immediately confirm: "That's [Address]. Correct?"
             console.log(`🔍 DEBUG: response.done received, event:`, JSON.stringify(event, null, 2));
             
             // If we have accumulated text from deltas but didn't get text.done, use it now
-            if (currentResponseText && currentResponseText.trim().length > 0) {
-              console.log(`📝 Using accumulated text from deltas: "${currentResponseText.substring(0, 60)}..."`);
+            // Only as a last resort fallback if response wasn't already spoken
+            if (currentResponseText && currentResponseText.trim().length > 0 && !responseSpoken) {
+              console.log(`📝 Using accumulated text from deltas (fallback): "${currentResponseText.substring(0, 60)}..."`);
               const aiResponse = currentResponseText.trim();
               lastAIResponse = aiResponse;
               
@@ -1031,12 +1041,16 @@ Then immediately confirm: "That's [Address]. Correct?"
               latencyStats.llmLatency.add(llmLatency);
               
               if (!awaitingVerification) {
-                console.log(`🎤 Calling speakWithElevenLabs from response.done with accumulated text`);
+                responseSpoken = true;  // Mark as spoken
+                console.log(`🎤 Calling speakWithElevenLabs from response.done with accumulated text (fallback)`);
                 speakWithElevenLabs(aiResponse).catch(err => {
                   console.error("❌ speakWithElevenLabs error:", err);
                 });
               }
               currentResponseText = "";  // Clear accumulator
+            } else if (responseSpoken) {
+              console.log(`⏸️ Skipping response.done fallback - response already spoken`);
+              currentResponseText = "";  // Clear accumulator anyway
             }
             
             activeResponseInProgress = false;
