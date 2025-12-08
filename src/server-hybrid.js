@@ -488,9 +488,48 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.text.done":
-            // Log when text is complete
+            // This is where we get the complete AI response text (text-only modality)
             if (event.text) {
-              console.log(`📝 Text response done: ${event.text.substring(0, 60)}...`);
+              const aiResponse = event.text;
+              lastAIResponse = aiResponse;  // Track for context
+              
+              const llmLatency = Date.now() - llmStartTime;
+              latencyStats.llmLatency.add(llmLatency);
+              console.log(`📝 AI response text: ${aiResponse.substring(0, 60)}... (LLM: ${llmLatency}ms)`);
+              
+              // Check for hallucinations BEFORE speaking
+              const capturedNames = Object.values(fieldValidator.fields)
+                .filter(f => (f.field === 'first_name' || f.field === 'last_name') && f.final_value)
+                .map(f => f.final_value);
+              
+              const nameInResponse = aiResponse.match(/(?:Got it|Thanks|Thank you|Perfect),?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
+              if (nameInResponse && capturedNames.length === 0) {
+                console.log(`⚠️ HALLUCINATION: Name "${nameInResponse[1]}" mentioned but never captured`);
+                console.log(`🚫 Blocking hallucinated response`);
+                const correction = "Sorry, I didn't catch your name clearly. What's your full name?";
+                speakWithElevenLabs(correction);
+                lastAIResponse = correction;
+                break;
+              }
+              
+              // Check for "you're welcome" without thank you
+              if ((aiResponse.toLowerCase().includes("you're welcome") || aiResponse.toLowerCase().includes("you are welcome")) &&
+                  !lastUserTranscript.toLowerCase().includes('thank')) {
+                console.log(`⚠️ HALLUCINATION: "You're welcome" without thank you`);
+                console.log(`🚫 Skipping inappropriate response`);
+                activeResponseInProgress = false;
+                break;
+              }
+              
+              // Speak the response via ElevenLabs
+              if (!awaitingVerification) {
+                console.log(`🎤 Calling speakWithElevenLabs with: "${aiResponse.substring(0, 50)}..."`);
+                speakWithElevenLabs(aiResponse).catch(err => {
+                  console.error("❌ speakWithElevenLabs error:", err);
+                });
+              } else {
+                console.log(`⏸️ Skipping response - verification in progress`);
+              }
             }
             break;
             
@@ -629,7 +668,10 @@ Then immediately confirm: "That's [Address]. Correct?"
                             content: [{ type: "input_text", text: verification.normalizedValue }]
                           }
                         }));
-                        openaiWs.send(JSON.stringify({ type: "response.create" }));
+                        openaiWs.send(JSON.stringify({ 
+                          type: "response.create",
+                          response: { modalities: ["text"] }
+                        }));
                       }
                     }, 500);
                   } else {
@@ -931,47 +973,18 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.audio_transcript.done":
-            // This is where we get the complete AI response text
+            // NOTE: This event only fires when using audio modality, not text-only
+            // Since we use modalities: ["text"], this handler is kept as fallback only
+            // Main TTS logic is now in response.text.done above
             if (event.transcript) {
+              console.log(`📝 Audio transcript received (fallback - should use text.done): ${event.transcript.substring(0, 60)}...`);
+              // For safety, still handle it if it somehow fires
               const aiResponse = event.transcript;
-              lastAIResponse = aiResponse;  // Track for context
-              
-              const llmLatency = Date.now() - llmStartTime;
-              latencyStats.llmLatency.add(llmLatency);
-              console.log(`📝 AI response text: ${aiResponse.substring(0, 60)}... (LLM: ${llmLatency}ms)`);
-              
-              // Check for hallucinations BEFORE speaking
-              const capturedNames = Object.values(fieldValidator.fields)
-                .filter(f => (f.field === 'first_name' || f.field === 'last_name') && f.final_value)
-                .map(f => f.final_value);
-              
-              const nameInResponse = aiResponse.match(/(?:Got it|Thanks|Thank you|Perfect),?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
-              if (nameInResponse && capturedNames.length === 0) {
-                console.log(`⚠️ HALLUCINATION: Name "${nameInResponse[1]}" mentioned but never captured`);
-                console.log(`🚫 Blocking hallucinated response`);
-                const correction = "Sorry, I didn't catch your name clearly. What's your full name?";
-                speakWithElevenLabs(correction);
-                lastAIResponse = correction;
-                break;
-              }
-              
-              // Check for "you're welcome" without thank you
-              if ((aiResponse.toLowerCase().includes("you're welcome") || aiResponse.toLowerCase().includes("you are welcome")) &&
-                  !lastUserTranscript.toLowerCase().includes('thank')) {
-                console.log(`⚠️ HALLUCINATION: "You're welcome" without thank you`);
-                console.log(`🚫 Skipping inappropriate response`);
-                activeResponseInProgress = false;
-                break;
-              }
-              
-              // Speak the response via ElevenLabs
+              lastAIResponse = aiResponse;
               if (!awaitingVerification) {
-                console.log(`🎤 Calling speakWithElevenLabs with: "${aiResponse.substring(0, 50)}..."`);
                 speakWithElevenLabs(aiResponse).catch(err => {
                   console.error("❌ speakWithElevenLabs error:", err);
                 });
-              } else {
-                console.log(`⏸️ Skipping response - verification in progress`);
               }
             }
             break;
