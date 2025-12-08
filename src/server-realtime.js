@@ -16,7 +16,7 @@ app.use(bodyParser.urlencoded({ extended: false }));
 
 const PORT = process.env.PORT || 8080;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01";
+const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
 
 // Validate environment
 if (!OPENAI_API_KEY) {
