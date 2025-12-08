@@ -131,6 +131,7 @@ wss.on("connection", async (twilioWs, req) => {
   let awaitingVerification = false;  // Flag to prevent OpenAI from processing during verification
   let pendingTranscription = null;  // Store transcription awaiting validation
   let activeResponseInProgress = false;  // Track if OpenAI is currently generating a response
+  let currentResponseText = "";  // Accumulate text from deltas
   
   // Field validation and verification
   const fieldValidator = new FieldValidator();
@@ -485,10 +486,16 @@ Then immediately confirm: "That's [Address]. Correct?"
               firstLLMTokenTime = Date.now();
               console.log(`⏱️  First LLM token: ${firstLLMTokenTime - (sessionReadyTime || connectionStart)}ms`);
             }
+            // Accumulate text from deltas
+            if (event.delta) {
+              currentResponseText += event.delta;
+              process.stdout.write(event.delta);
+            }
             break;
             
           case "response.text.done":
             // This is where we get the complete AI response text (text-only modality)
+            console.log(`🔍 DEBUG: response.text.done received, event:`, JSON.stringify(event, null, 2));
             if (event.text) {
               const aiResponse = event.text;
               lastAIResponse = aiResponse;  // Track for context
@@ -534,7 +541,26 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.output_item.done":
-            // Silent - handled by audio_transcript.done
+            // Debug: check if text is here instead
+            console.log(`🔍 DEBUG: response.output_item.done received, event:`, JSON.stringify(event, null, 2));
+            if (event.item && event.item.type === "message" && event.item.content) {
+              const textContent = event.item.content.find(c => c.type === "text");
+              if (textContent && textContent.text) {
+                console.log(`📝 Found text in output_item.done: "${textContent.text.substring(0, 60)}..."`);
+                // Handle it here as fallback
+                const aiResponse = textContent.text;
+                lastAIResponse = aiResponse;
+                const llmLatency = Date.now() - llmStartTime;
+                latencyStats.llmLatency.add(llmLatency);
+                
+                if (!awaitingVerification) {
+                  console.log(`🎤 Calling speakWithElevenLabs from output_item.done`);
+                  speakWithElevenLabs(aiResponse).catch(err => {
+                    console.error("❌ speakWithElevenLabs error:", err);
+                  });
+                }
+              }
+            }
             break;
             
           case "input_audio_buffer.speech_started":
@@ -949,6 +975,7 @@ Then immediately confirm: "That's [Address]. Correct?"
               
               activeResponseInProgress = true;
               llmStartTime = Date.now();
+              currentResponseText = "";  // Reset accumulator for new response
               
               // Add user message to conversation
               openaiWs.send(JSON.stringify({
@@ -992,6 +1019,26 @@ Then immediately confirm: "That's [Address]. Correct?"
             
           case "response.done":
             // Response complete - mark as no longer active
+            console.log(`🔍 DEBUG: response.done received, event:`, JSON.stringify(event, null, 2));
+            
+            // If we have accumulated text from deltas but didn't get text.done, use it now
+            if (currentResponseText && currentResponseText.trim().length > 0) {
+              console.log(`📝 Using accumulated text from deltas: "${currentResponseText.substring(0, 60)}..."`);
+              const aiResponse = currentResponseText.trim();
+              lastAIResponse = aiResponse;
+              
+              const llmLatency = Date.now() - llmStartTime;
+              latencyStats.llmLatency.add(llmLatency);
+              
+              if (!awaitingVerification) {
+                console.log(`🎤 Calling speakWithElevenLabs from response.done with accumulated text`);
+                speakWithElevenLabs(aiResponse).catch(err => {
+                  console.error("❌ speakWithElevenLabs error:", err);
+                });
+              }
+              currentResponseText = "";  // Clear accumulator
+            }
+            
             activeResponseInProgress = false;
             console.log(`✅ Response complete - ready for next input`);
             break;
@@ -1001,7 +1048,8 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           default:
-            // Silent - only log important events above
+            // Debug: log all unhandled events to see what we're missing
+            console.log(`🔍 DEBUG: Unhandled event type: ${event.type}`, JSON.stringify(event, null, 2));
             break;
         }
       } catch (err) {
