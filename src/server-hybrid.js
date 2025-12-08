@@ -367,6 +367,8 @@ Then immediately confirm: "That's [Address]. Correct?"
         const mp3Stream = Readable.from(mp3Buffer);
         
         await new Promise((resolve, reject) => {
+          const mulawChunks = [];
+          
           ffmpeg(mp3Stream)
             .inputFormat('mp3')
             .audioCodec('pcm_mulaw')
@@ -375,15 +377,24 @@ Then immediately confirm: "That's [Address]. Correct?"
             .format('mulaw')
             .on('error', (err) => {
               console.error('❌ FFmpeg error:', err.message);
+              console.error('FFmpeg stderr:', err.stderr);
               reject(err);
             })
             .on('end', () => {
-              console.log("✅ FFmpeg conversion complete");
+              // Add all chunks to playBuffer at once
+              if (mulawChunks.length > 0) {
+                playBuffer = Buffer.concat([playBuffer, ...mulawChunks]);
+                console.log(`✅ FFmpeg conversion complete - ${playBuffer.length} bytes in buffer`);
+              }
               resolve();
             })
             .pipe()
             .on('data', (mulawChunk) => {
-              playBuffer = Buffer.concat([playBuffer, mulawChunk]);
+              mulawChunks.push(mulawChunk);
+            })
+            .on('error', (err) => {
+              console.error('❌ FFmpeg pipe error:', err.message);
+              reject(err);
             });
         });
         
