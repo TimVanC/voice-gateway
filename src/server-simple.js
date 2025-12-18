@@ -203,9 +203,9 @@ EXAMPLE PHRASES:
         },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.6,           // Higher = less sensitive to background noise
-          prefix_padding_ms: 400,   // More padding before speech
-          silence_duration_ms: 700  // Wait longer to confirm speech ended
+          threshold: 0.7,           // Higher = less sensitive to background noise (was 0.6)
+          prefix_padding_ms: 500,   // More padding before speech (was 400)
+          silence_duration_ms: 800  // Wait longer to confirm speech ended (was 700)
         },
         temperature: 0.9,           // More variation = more natural
         max_response_output_tokens: 200
@@ -358,9 +358,9 @@ EXAMPLE PHRASES:
           
         case "input_audio_buffer.speech_started":
           console.log("🎤 User speaking...");
-          // Clear any pending audio when user starts speaking (barge-in)
-          playBuffer = Buffer.alloc(0);
-          responseInProgress = false;  // Cancel any pending response
+          // DON'T immediately clear buffer - this causes "ghost sound" interruptions
+          // Let the AI audio keep playing. When OpenAI sends a new response,
+          // the response.created event will clear the buffer.
           break;
           
         case "input_audio_buffer.speech_stopped":
@@ -383,7 +383,8 @@ EXAMPLE PHRASES:
               collectedData.phone = transcript;
               console.log(`📋 Phone: ${transcript}`);
               callState = getNextState(callState);
-            } else if (callState === STATES.ASK_EMAIL && transcript.includes('@')) {
+            } else if (callState === STATES.ASK_EMAIL && (transcript.includes('@') || /\bat\b/i.test(transcript))) {
+              // Handle both "@" symbol and spoken "at" (e.g., "tim at gmail.com")
               collectedData.email = transcript;
               console.log(`📋 Email: ${transcript}`);
               callState = getNextState(callState);
@@ -413,6 +414,10 @@ EXAMPLE PHRASES:
           
         case "response.created":
           console.log(`🚀 Response started (id: ${event.response?.id})`);
+          // Clear buffer here - this is when we KNOW a new response is coming
+          // (instead of clearing on speech_started which can be triggered by ghost sounds)
+          playBuffer = Buffer.alloc(0);
+          responseInProgress = true;
           break;
           
         default:
