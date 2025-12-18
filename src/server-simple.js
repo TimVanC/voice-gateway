@@ -208,7 +208,7 @@ EXAMPLE PHRASES:
           silence_duration_ms: 800  // Wait to confirm speech ended
         },
         temperature: 0.9,           // More variation = more natural
-        max_response_output_tokens: 500  // Increased from 200 - was causing mid-sentence cutoffs
+        max_response_output_tokens: 1000  // High ceiling, only pay for what's actually used
       }
     };
     
