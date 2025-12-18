@@ -8,6 +8,26 @@ const { WebSocketServer } = require("ws");
 const WebSocket = require("ws");
 const twilio = require("twilio");
 
+// ============================================================================
+// PROCESS-LEVEL ERROR HANDLERS - Catch crashes
+// ============================================================================
+process.on('uncaughtException', (err) => {
+  console.error('💀 UNCAUGHT EXCEPTION:', err);
+  console.error(err.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💀 UNHANDLED REJECTION:', reason);
+});
+
+process.on('SIGTERM', () => {
+  console.log('🛑 SIGTERM received - shutting down');
+});
+
+process.on('SIGINT', () => {
+  console.log('🛑 SIGINT received - shutting down');
+});
+
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
@@ -83,6 +103,16 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`🎙️ Using OpenAI Realtime API (voice: ${OPENAI_VOICE})`);
   console.log(`🎧 Waiting for calls...\n`);
 });
+
+// Process heartbeat - proves the event loop is still running
+let heartbeatCount = 0;
+setInterval(() => {
+  heartbeatCount++;
+  // Only log every minute to avoid spam
+  if (heartbeatCount % 6 === 0) {
+    console.log(`💗 Process heartbeat #${heartbeatCount} - event loop alive`);
+  }
+}, 10000);
 
 server.keepAliveTimeout = 70000;
 server.headersTimeout = 75000;
@@ -255,12 +285,13 @@ EXAMPLE PHRASES:
         }));
         audioFramesSent++;
         
-        // Log every 250 frames (~5 seconds)
+        // Log every 250 frames (~5 seconds) OR when buffer has audio
         if (audioFramesSent % 250 === 0) {
           console.log(`🔈 Audio frames sent: ${audioFramesSent}, buffer: ${playBuffer.length} bytes`);
         }
       } catch (e) {
         console.error("❌ Error sending audio to Twilio:", e.message);
+        console.error("❌ Error details:", e.stack);
         paceTimer = null;
         return;
       }
@@ -270,10 +301,19 @@ EXAMPLE PHRASES:
       const currentTime = process.hrtime.bigint();
       const drift = Number(expectedTime - currentTime) / 1_000_000;
       const nextDelay = Math.max(1, Math.min(40, Math.round(20 + drift)));
-      paceTimer = setTimeout(sendNextFrame, nextDelay);
+      
+      try {
+        paceTimer = setTimeout(sendNextFrame, nextDelay);
+      } catch (e) {
+        console.error("❌ setTimeout failed:", e.message);
+      }
     }
     
-    paceTimer = setTimeout(sendNextFrame, 20);
+    try {
+      paceTimer = setTimeout(sendNextFrame, 20);
+    } catch (e) {
+      console.error("❌ Initial setTimeout failed:", e.message);
+    }
   }
 
   // ============================================================================
