@@ -24,8 +24,12 @@ const { createBackchannelManager, createMicroResponsePayload } = require('./util
 // ============================================================================
 const PORT = process.env.PORT || 8080;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_VOICE = process.env.OPENAI_REALTIME_VOICE || "shimmer";
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+
+// Voice configuration
+// Primary: coral, Fallback: shimmer
+const OPENAI_VOICE_PRIMARY = process.env.OPENAI_REALTIME_VOICE || "coral";
+const OPENAI_VOICE_FALLBACK = "shimmer";
 
 // Validate API key
 if (!OPENAI_API_KEY) {
@@ -50,7 +54,8 @@ app.get("/health", (req, res) => {
   res.json({ 
     status: "healthy", 
     service: "RSE Voice Gateway",
-    voice: OPENAI_VOICE
+    voice: OPENAI_VOICE_PRIMARY,
+    fallback_voice: OPENAI_VOICE_FALLBACK
   });
 });
 
@@ -108,6 +113,12 @@ wss.on("connection", (twilioWs, req) => {
   let longSpeechTimer = null;         // Timer for long-speech backchanneling
   let longSpeechBackchannelSent = false;  // Only one backchannel per turn
   let assistantTurnCount = 0;         // Track turns for filler spacing
+  
+  // ============================================================================
+  // VOICE SELECTION (one voice per call, no changes mid-call)
+  // ============================================================================
+  let callVoice = OPENAI_VOICE_PRIMARY;  // Start with primary, fallback on error
+  let voiceInitialized = false;          // Prevent re-initialization
   let currentSilenceDuration = VAD_CONFIG.silence_default;  // Dynamic silence
   
   // ============================================================================
@@ -145,13 +156,25 @@ wss.on("connection", (twilioWs, req) => {
     openaiWs.on("open", () => {
       console.log("✅ Connected to OpenAI Realtime");
       
-      // Configure session
+      // Configure session with selected voice (set once, no changes mid-call)
+      configureSession(callVoice);
+    });
+    
+    // Configure the Realtime session with the specified voice
+    function configureSession(voice) {
+      if (voiceInitialized) {
+        console.log("⚠️ Voice already initialized, skipping reconfiguration");
+        return;
+      }
+      
+      console.log(`🎙️ Using OpenAI Realtime voice: ${voice}${voice === OPENAI_VOICE_FALLBACK ? ' (fallback)' : ''}`);
+      
       const sessionConfig = {
         type: "session.update",
         session: {
           modalities: ["text", "audio"],
           instructions: SYSTEM_PROMPT,
-          voice: OPENAI_VOICE,
+          voice: voice,  // Set exactly once
           input_audio_format: "g711_ulaw",
           output_audio_format: "g711_ulaw",
           input_audio_transcription: {
@@ -169,7 +192,7 @@ wss.on("connection", (twilioWs, req) => {
       };
       
       openaiWs.send(JSON.stringify(sessionConfig));
-    });
+    }
     
     openaiWs.on("message", (data) => {
       try {
@@ -216,6 +239,7 @@ wss.on("connection", (twilioWs, req) => {
         
       case "session.updated":
         console.log("✅ Session configured");
+        voiceInitialized = true;  // Voice is now locked for this call
         // Send greeting
         sendGreeting();
         break;
@@ -349,7 +373,17 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "error":
-        console.error(`❌ OpenAI error: ${event.error?.message || JSON.stringify(event.error)}`);
+        const errorMsg = event.error?.message || JSON.stringify(event.error);
+        console.error(`❌ OpenAI error: ${errorMsg}`);
+        
+        // Check for voice-related errors and fall back
+        if (!voiceInitialized && errorMsg.toLowerCase().includes('voice')) {
+          if (callVoice !== OPENAI_VOICE_FALLBACK) {
+            console.log(`⚠️ Voice "${callVoice}" failed, falling back to "${OPENAI_VOICE_FALLBACK}"`);
+            callVoice = OPENAI_VOICE_FALLBACK;
+            configureSession(callVoice);
+          }
+        }
         break;
         
       case "rate_limits.updated":
@@ -660,7 +694,7 @@ server.listen(PORT, () => {
   console.log();
   console.log(`✨ RSE Energy Group Receptionist Ready!`);
   console.log(`📍 Webhook: https://<your-domain>/twilio/voice`);
-  console.log(`🎙️ Using OpenAI Realtime API (voice: ${OPENAI_VOICE})`);
+  console.log(`🎙️ Voice: ${OPENAI_VOICE_PRIMARY} (fallback: ${OPENAI_VOICE_FALLBACK})`);
   console.log(`⚙️ VAD: threshold=${VAD_CONFIG.threshold}, silence=${VAD_CONFIG.silence_duration_ms}ms`);
   console.log(`🎧 Waiting for calls...`);
   console.log();
