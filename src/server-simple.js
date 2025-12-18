@@ -203,12 +203,12 @@ EXAMPLE PHRASES:
         },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.85,          // Much higher = ignore breathing/background noise (was 0.7)
-          prefix_padding_ms: 600,   // More padding before speech detection (was 500)
-          silence_duration_ms: 900  // Wait longer to confirm speech ended (was 800)
+          threshold: 0.75,          // Balanced - ignore noise but allow real interruptions
+          prefix_padding_ms: 500,   // Padding before speech detection
+          silence_duration_ms: 800  // Wait to confirm speech ended
         },
         temperature: 0.9,           // More variation = more natural
-        max_response_output_tokens: 200
+        max_response_output_tokens: 500  // Increased from 200 - was causing mid-sentence cutoffs
       }
     };
     
