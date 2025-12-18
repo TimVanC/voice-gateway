@@ -15,7 +15,7 @@ const http = require("http");
 // IMPORTS
 // ============================================================================
 const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES } = require('./scripts/rse-script');
-const { VAD_CONFIG, BACKCHANNEL_CONFIG, SILENCE_CONFIG } = require('./config/vad-config');
+const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG, SILENCE_CONFIG } = require('./config/vad-config');
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 
@@ -100,6 +100,15 @@ wss.on("connection", (twilioWs, req) => {
   
   // Backchannel manager for this call
   const backchannel = createBackchannelManager();
+  
+  // ============================================================================
+  // CHATGPT-STYLE TURN-TAKING STATE
+  // ============================================================================
+  let speechStartTime = null;         // When caller started speaking
+  let longSpeechTimer = null;         // Timer for long-speech backchanneling
+  let longSpeechBackchannelSent = false;  // Only one backchannel per turn
+  let assistantTurnCount = 0;         // Track turns for filler spacing
+  let currentSilenceDuration = VAD_CONFIG.silence_default;  // Dynamic silence
   
   // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
@@ -254,19 +263,73 @@ wss.on("connection", (twilioWs, req) => {
           console.log(`⚠️ Response INCOMPLETE`);
         } else {
           console.log(`✅ Response complete (state: ${stateMachine.getState()})`);
+          assistantTurnCount++;  // Track for filler spacing
         }
         responseInProgress = false;
+        
+        // Reset dynamic silence to default after turn completes
+        currentSilenceDuration = VAD_CONFIG.silence_default;
         break;
         
       case "input_audio_buffer.speech_started":
         console.log("🎤 User speaking...");
+        speechStartTime = Date.now();
+        longSpeechBackchannelSent = false;
+        
+        // AGGRESSIVE BARGE-IN: Immediately stop assistant audio
+        if (playBuffer.length > 0 || responseInProgress) {
+          console.log("🛑 Barge-in: stopping assistant audio");
+          playBuffer = Buffer.alloc(0);  // Clear audio buffer immediately
+          responseInProgress = false;
+        }
+        
+        // Start long-speech backchannel timer (4-6 seconds)
+        if (LONG_SPEECH_CONFIG.enabled && !longSpeechTimer) {
+          longSpeechTimer = setTimeout(() => {
+            if (!longSpeechBackchannelSent && speechStartTime) {
+              const speechDuration = Date.now() - speechStartTime;
+              if (speechDuration >= LONG_SPEECH_CONFIG.trigger_after_ms && 
+                  speechDuration <= LONG_SPEECH_CONFIG.max_trigger_ms) {
+                const phrase = LONG_SPEECH_CONFIG.phrases[
+                  Math.floor(Math.random() * LONG_SPEECH_CONFIG.phrases.length)
+                ];
+                console.log(`💬 Long-speech backchannel: "${phrase}" (${speechDuration}ms)`);
+                longSpeechBackchannelSent = true;
+                // Note: We don't actually speak this - just log it
+                // OpenAI will naturally handle turn-taking
+              }
+            }
+          }, LONG_SPEECH_CONFIG.trigger_after_ms);
+        }
         break;
         
       case "input_audio_buffer.speech_stopped":
-        console.log("🔇 User stopped speaking");
+        const speechDuration = speechStartTime ? Date.now() - speechStartTime : 0;
+        console.log(`🔇 User stopped speaking (${speechDuration}ms)`);
         
-        // Start backchannel timer
-        if (BACKCHANNEL_CONFIG.enabled) {
+        // Clear long-speech timer
+        if (longSpeechTimer) {
+          clearTimeout(longSpeechTimer);
+          longSpeechTimer = null;
+        }
+        speechStartTime = null;
+        
+        // DYNAMIC SILENCE ADJUSTMENT
+        // Short clear answers get faster response, long rambling gets more patience
+        if (speechDuration < 2000) {
+          // Short answer - caller finished thought quickly
+          currentSilenceDuration = VAD_CONFIG.silence_short;
+          console.log(`⚡ Dynamic silence: ${currentSilenceDuration}ms (short answer)`);
+        } else if (speechDuration > 5000) {
+          // Long speech - might pause mid-thought
+          currentSilenceDuration = VAD_CONFIG.silence_long;
+          console.log(`⏳ Dynamic silence: ${currentSilenceDuration}ms (long speech)`);
+        } else {
+          currentSilenceDuration = VAD_CONFIG.silence_default;
+        }
+        
+        // Start post-speech backchannel timer (only if not already backchanneled)
+        if (BACKCHANNEL_CONFIG.enabled && !longSpeechBackchannelSent) {
           const context = getBackchannelContext();
           backchannel.start((microResponse) => {
             console.log(`💬 Backchannel: "${microResponse}"`);
@@ -294,11 +357,15 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       default:
-        // Log unknown events for debugging
-        if (!['response.text.delta', 'response.output_item.added', 
-              'response.output_item.done', 'response.content_part.added',
-              'response.content_part.done', 'input_audio_buffer.committed',
-              'conversation.item.created'].includes(event.type)) {
+        // Ignore frequent/spammy events
+        const ignoredEvents = [
+          'response.text.delta', 'response.audio_transcript.delta',
+          'response.output_item.added', 'response.output_item.done', 
+          'response.content_part.added', 'response.content_part.done', 
+          'input_audio_buffer.committed', 'conversation.item.created',
+          'conversation.item.input_audio_transcription.delta'
+        ];
+        if (!ignoredEvents.includes(event.type)) {
           console.log(`📨 OpenAI event: ${event.type}`);
         }
     }
@@ -314,14 +381,12 @@ wss.on("connection", (twilioWs, req) => {
       type: "response.create",
       response: {
         modalities: ["audio", "text"],
-        instructions: `Greet the caller warmly. Say: "${GREETING.primary}"`,
-        max_output_tokens: 150
+        instructions: `Greet the caller. Say exactly: "${GREETING.primary}"
+
+Speak at a normal conversational pace - not slow or formal. Use contractions. Sound natural and friendly, like a real person answering the phone.`,
+        max_output_tokens: 100
       }
     }));
-    
-    // Note: We removed the silence fallback timer - it was firing while greeting 
-    // was still playing and cancelling it. OpenAI's VAD will detect when user speaks.
-    // If caller doesn't respond, they can just speak whenever ready.
   }
   
   // ============================================================================
@@ -428,12 +493,24 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   function sendStatePrompt(prompt) {
     if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
+      // Determine if we should use a filler based on turn count
+      const useFiller = assistantTurnCount > 0 && 
+                        assistantTurnCount % FILLER_CONFIG.min_turns_between_fillers === 0;
+      const fillerHint = useFiller ? 
+        `Start with a brief acknowledgement like "Got it" or "Okay", then ` : '';
+      
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          instructions: `Respond naturally and briefly. Say something like: "${prompt}" - but make it sound natural, not robotic. Keep it SHORT - one or two sentences max.`,
-          max_output_tokens: 200
+          instructions: `${fillerHint}Say: "${prompt}"
+
+CRITICAL RULES:
+- Speak at normal conversational speed, not slow
+- Use contractions (what's, I'm, you're)  
+- Keep it to TWO sentences max: brief acknowledgement + the question
+- Sound natural, not robotic or scripted`,
+          max_output_tokens: 150
         }
       }));
     } else if (responseInProgress) {
@@ -454,32 +531,36 @@ wss.on("connection", (twilioWs, req) => {
     const state = stateMachine.getState();
     const data = stateMachine.getData();
     
+    // ChatGPT-style response rules
+    const styleRules = `
+RESPONSE STYLE - FOLLOW EXACTLY:
+- Start with brief acknowledgement (one short sentence)
+- Then ask ONE question (one sentence)
+- Use contractions. Speak naturally.
+- Never explain what you're doing
+- Never repeat back full info unless confirming at the end`;
+    
     let instruction = '';
     
     if (action === 'classify_intent') {
-      instruction = `The caller just said: "${userInput}". 
-Determine what they need help with and respond appropriately:
-- If it's about HVAC service/repair, ask clarifying questions
-- If it's about generators, ask if it's existing or new installation
-- If it's about membership/plans, acknowledge and ask about coverage
-- If it's about an existing project, ask which site/job
+      instruction = `Caller said: "${userInput}"
 
-Keep your response SHORT - one sentence, then ask ONE question to clarify.`;
+Figure out what they need. Respond with:
+1. Brief acknowledgement
+2. One clarifying question
+${styleRules}`;
     } else if (action === 'answer_question') {
-      instruction = `The caller asked: "${userInput}".
-Answer their question briefly and helpfully based on what you know about RSE Energy Group.
-Keep it SHORT - one or two sentences.
-If you don't know something specific, say "I can take your info and someone will follow up with those details."`;
-    } else if (action === 'handle_correction') {
-      instruction = `The caller is correcting something. They said: "${userInput}".
-Current info we have:
-- Name: ${data.name || 'not yet collected'}
-- Phone: ${data.phone || 'not yet collected'}
-- Email: ${data.email || 'not yet collected'}
-- Address: ${data.address || 'not yet collected'}
+      instruction = `Caller asked: "${userInput}"
 
-Ask them what needs to be corrected, update it, then read back the corrected info.
-Keep it brief and natural.`;
+Answer briefly. If you don't know specifics, say "I can take your info and have someone follow up."
+${styleRules}`;
+    } else if (action === 'handle_correction') {
+      instruction = `Caller is correcting something: "${userInput}"
+
+Current info: Name: ${data.name || 'none'}, Phone: ${data.phone || 'none'}, Email: ${data.email || 'none'}, Address: ${data.address || 'none'}
+
+Ask what needs fixing, confirm briefly, move on.
+${styleRules}`;
     }
     
     openaiWs.send(JSON.stringify({
@@ -487,7 +568,7 @@ Keep it brief and natural.`;
       response: {
         modalities: ["audio", "text"],
         instructions: instruction,
-        max_output_tokens: 300
+        max_output_tokens: 200
       }
     }));
   }
@@ -562,6 +643,7 @@ Keep it brief and natural.`;
     if (paceTimer) clearInterval(paceTimer);
     if (keepAliveTimer) clearInterval(keepAliveTimer);
     if (silenceTimer) clearTimeout(silenceTimer);
+    if (longSpeechTimer) clearTimeout(longSpeechTimer);
     backchannel.cancel();
     
     if (openaiWs?.readyState === WebSocket.OPEN) {
