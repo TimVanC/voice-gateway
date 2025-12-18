@@ -203,9 +203,9 @@ EXAMPLE PHRASES:
         },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.7,           // Higher = less sensitive to background noise (was 0.6)
-          prefix_padding_ms: 500,   // More padding before speech (was 400)
-          silence_duration_ms: 800  // Wait longer to confirm speech ended (was 700)
+          threshold: 0.85,          // Much higher = ignore breathing/background noise (was 0.7)
+          prefix_padding_ms: 600,   // More padding before speech detection (was 500)
+          silence_duration_ms: 900  // Wait longer to confirm speech ended (was 800)
         },
         temperature: 0.9,           // More variation = more natural
         max_response_output_tokens: 200
@@ -393,7 +393,15 @@ EXAMPLE PHRASES:
           break;
           
         case "response.done":
-          console.log(`✅ Response complete (state: ${callState})`);
+          // Check if response was cancelled/interrupted
+          const status = event.response?.status;
+          if (status === "cancelled") {
+            console.log(`⚠️ Response CANCELLED (interrupted by speech detection)`);
+          } else if (status === "incomplete") {
+            console.log(`⚠️ Response INCOMPLETE (may have been cut off)`);
+          } else {
+            console.log(`✅ Response complete (state: ${callState})`);
+          }
           responseInProgress = false;
           lastActivityTime = Date.now();
           
