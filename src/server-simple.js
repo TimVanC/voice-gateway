@@ -190,10 +190,18 @@ EXAMPLE PHRASES:
         // Send a ping to keep connection alive
         try {
           openaiWs.ping();
-          console.log("💓 Keep-alive ping sent");
+          const stallTime = Date.now() - lastActivityTime;
+          console.log(`💓 Keep-alive ping (last activity: ${stallTime}ms ago, state: ${callState})`);
+          
+          // Warn if no activity for a while
+          if (stallTime > 10000) {
+            console.warn(`⚠️ No OpenAI activity for ${stallTime}ms!`);
+          }
         } catch (e) {
           console.error("❌ Keep-alive ping failed:", e.message);
         }
+      } else {
+        console.warn("⚠️ Keep-alive: OpenAI WS not open");
       }
     }, 20000);
   });
@@ -290,12 +298,22 @@ EXAMPLE PHRASES:
           if (event.delta) {
             const audioData = Buffer.from(event.delta, 'base64');
             playBuffer = Buffer.concat([playBuffer, audioData]);
+            // Log occasionally to show audio is streaming
+            if (playBuffer.length % 5000 < 200) {
+              console.log(`🎵 Audio streaming: ${playBuffer.length} bytes buffered`);
+            }
           }
           break;
           
         case "response.audio.done":
-          console.log("🔊 Audio complete");
+          console.log(`🔊 Audio complete (buffer: ${playBuffer.length} bytes)`);
           responseInProgress = false;
+          break;
+          
+        case "response.audio_transcript.done":
+          if (event.transcript) {
+            console.log(`📜 AI said: "${event.transcript}"`);
+          }
           break;
           
         case "input_audio_buffer.speech_started":
@@ -353,12 +371,16 @@ EXAMPLE PHRASES:
           console.error("❌ OpenAI error:", event.error);
           break;
           
+        case "response.created":
+          console.log(`🚀 Response started (id: ${event.response?.id})`);
+          break;
+          
         default:
           // Log unhandled events for debugging
           if (!['response.audio.delta', 'response.text.delta', 'response.content_part.added', 
-                'response.output_item.added', 'response.created', 'conversation.item.created',
+                'response.output_item.added', 'conversation.item.created',
                 'input_audio_buffer.committed', 'response.content_part.done', 'response.output_item.done',
-                'conversation.item.input_audio_transcription.delta'].includes(event.type)) {
+                'conversation.item.input_audio_transcription.delta', 'response.audio_transcript.delta'].includes(event.type)) {
             console.log(`📨 Event: ${event.type}`);
           }
           break;
