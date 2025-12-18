@@ -104,6 +104,8 @@ wss.on("connection", (twilioWs, req) => {
   // Audio pacing
   let playBuffer = Buffer.alloc(0);
   let paceTimer = null;
+  let keepAliveTimer = null;
+  let lastActivityTime = Date.now();
   
   // Collected data (just for logging, no export)
   const collectedData = {
@@ -181,6 +183,23 @@ EXAMPLE PHRASES:
     };
     
     openaiWs.send(JSON.stringify(sessionConfig));
+    
+    // Start keep-alive ping every 20 seconds
+    keepAliveTimer = setInterval(() => {
+      if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+        // Send a ping to keep connection alive
+        try {
+          openaiWs.ping();
+          console.log("💓 Keep-alive ping sent");
+        } catch (e) {
+          console.error("❌ Keep-alive ping failed:", e.message);
+        }
+      }
+    }, 20000);
+  });
+  
+  openaiWs.on("pong", () => {
+    lastActivityTime = Date.now();
   });
 
   // ============================================================================
@@ -245,6 +264,7 @@ EXAMPLE PHRASES:
           break;
           
         case "response.audio.delta":
+          lastActivityTime = Date.now();
           if (event.delta) {
             const audioData = Buffer.from(event.delta, 'base64');
             playBuffer = Buffer.concat([playBuffer, audioData]);
@@ -292,8 +312,9 @@ EXAMPLE PHRASES:
           break;
           
         case "response.done":
-          console.log("✅ Response complete");
+          console.log(`✅ Response complete (state: ${callState})`);
           responseInProgress = false;
+          lastActivityTime = Date.now();
           
           // Advance state after greeting
           if (callState === STATES.GREETING) {
@@ -302,8 +323,22 @@ EXAMPLE PHRASES:
           }
           break;
           
+        case "rate_limits.updated":
+          // Ignore rate limit updates
+          break;
+          
         case "error":
           console.error("❌ OpenAI error:", event.error);
+          break;
+          
+        default:
+          // Log unhandled events for debugging
+          if (!['response.audio.delta', 'response.text.delta', 'response.content_part.added', 
+                'response.output_item.added', 'response.created', 'conversation.item.created',
+                'input_audio_buffer.committed', 'response.content_part.done', 'response.output_item.done',
+                'conversation.item.input_audio_transcription.delta'].includes(event.type)) {
+            console.log(`📨 Event: ${event.type}`);
+          }
           break;
       }
     } catch (err) {
@@ -315,11 +350,15 @@ EXAMPLE PHRASES:
     console.error("❌ OpenAI WebSocket error:", error);
   });
 
-  openaiWs.on("close", () => {
-    console.log("🔌 OpenAI disconnected");
+  openaiWs.on("close", (code, reason) => {
+    console.log(`🔌 OpenAI disconnected (code: ${code}, reason: ${reason || 'none'})`);
     if (paceTimer) {
       clearTimeout(paceTimer);
       paceTimer = null;
+    }
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
     }
   });
 
@@ -366,6 +405,7 @@ EXAMPLE PHRASES:
           console.log("  Name:", collectedData.name || "(not collected)");
           console.log("  Phone:", collectedData.phone || "(not collected)");
           console.log("  Email:", collectedData.email || "(not collected)");
+          console.log("  Final state:", callState);
           console.log("");
           
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
@@ -375,6 +415,18 @@ EXAMPLE PHRASES:
             clearTimeout(paceTimer);
             paceTimer = null;
           }
+          if (keepAliveTimer) {
+            clearInterval(keepAliveTimer);
+            keepAliveTimer = null;
+          }
+          break;
+          
+        case "mark":
+          // Twilio mark event - ignore
+          break;
+          
+        default:
+          console.log(`📨 Twilio event: ${msg.event}`);
           break;
       }
     } catch (err) {
@@ -398,14 +450,21 @@ EXAMPLE PHRASES:
     }
   }
 
-  twilioWs.on("close", () => {
-    console.log("🔌 Twilio disconnected");
+  twilioWs.on("close", (code, reason) => {
+    console.log(`🔌 Twilio disconnected (code: ${code}, reason: ${reason || 'none'})`);
+    console.log("  Final state:", callState);
+    console.log("  Data collected:", JSON.stringify(collectedData));
+    
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.close();
     }
     if (paceTimer) {
       clearTimeout(paceTimer);
       paceTimer = null;
+    }
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
     }
   });
 
