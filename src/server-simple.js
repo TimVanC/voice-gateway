@@ -205,35 +205,57 @@ EXAMPLE PHRASES:
   // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
   // ============================================================================
+  let audioFramesSent = 0;
+  
   function pumpFrames() {
-    if (paceTimer) return;
+    if (paceTimer) {
+      console.log("⚠️ pumpFrames already running");
+      return;
+    }
     
+    console.log("🎵 Starting audio pump");
     const silenceFrame = Buffer.alloc(160, 0xFF);  // μ-law silence
     let startTime = process.hrtime.bigint();
     let frameCount = 0;
     
     function sendNextFrame() {
       if (twilioWs.readyState !== WebSocket.OPEN) {
+        console.log("⚠️ Twilio WS not open, stopping pump");
         paceTimer = null;
         return;
       }
       
       let chunk;
+      let hasAudio = false;
       if (playBuffer.length >= 160) {
         chunk = playBuffer.subarray(0, 160);
         playBuffer = playBuffer.subarray(160);
+        hasAudio = true;
       } else if (playBuffer.length > 0) {
         chunk = Buffer.concat([playBuffer, silenceFrame.subarray(0, 160 - playBuffer.length)]);
         playBuffer = Buffer.alloc(0);
+        hasAudio = true;
       } else {
         chunk = silenceFrame;
       }
       
-      twilioWs.send(JSON.stringify({
-        event: 'media',
-        streamSid: streamSid,
-        media: { payload: chunk.toString('base64') }
-      }));
+      try {
+        twilioWs.send(JSON.stringify({
+          event: 'media',
+          streamSid: streamSid,
+          media: { payload: chunk.toString('base64') }
+        }));
+        audioFramesSent++;
+        
+        // Log every 250 frames (~5 seconds)
+        if (audioFramesSent % 250 === 0) {
+          console.log(`🔈 Audio frames sent: ${audioFramesSent}, buffer: ${playBuffer.length} bytes`);
+        }
+      } catch (e) {
+        console.error("❌ Error sending audio to Twilio:", e.message);
+        paceTimer = null;
+        return;
+      }
       
       frameCount++;
       const expectedTime = startTime + BigInt(frameCount * 20_000_000);
@@ -373,6 +395,7 @@ EXAMPLE PHRASES:
         case "start":
           streamSid = msg.start.streamSid;
           console.log("📞 Stream started:", streamSid);
+          console.log("📞 Stream config:", JSON.stringify(msg.start, null, 2));
           pumpFrames();
           
           // Trigger greeting once stream is ready
