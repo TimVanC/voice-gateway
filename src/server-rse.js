@@ -314,34 +314,21 @@ wss.on("connection", (twilioWs, req) => {
       type: "response.create",
       response: {
         modalities: ["audio", "text"],
-        instructions: `Greet the caller with EXACTLY this greeting (speak naturally, warmly): "${GREETING.primary}"`,
-        max_output_tokens: 100
+        instructions: `Greet the caller warmly. Say: "${GREETING.primary}"`,
+        max_output_tokens: 150
       }
     }));
     
-    // Start silence timer for greeting fallback
-    silenceTimer = setTimeout(() => {
-      if (stateMachine.getState() === STATES.GREETING) {
-        console.log("⏰ Silence after greeting - sending fallback");
-        stateMachine.setSilenceAfterGreeting();
-        
-        openaiWs.send(JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            instructions: `The caller hasn't responded. Say EXACTLY: "${GREETING.silence_fallback}"`,
-            max_output_tokens: 100
-          }
-        }));
-      }
-    }, SILENCE_CONFIG.greeting_fallback_seconds * 1000);
+    // Note: We removed the silence fallback timer - it was firing while greeting 
+    // was still playing and cancelling it. OpenAI's VAD will detect when user speaks.
+    // If caller doesn't respond, they can just speak whenever ready.
   }
   
   // ============================================================================
   // SEND MICRO-RESPONSE (backchannel)
   // ============================================================================
   function sendMicroResponse(phrase) {
-    if (openaiWs?.readyState === WebSocket.OPEN) {
+    if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
       openaiWs.send(JSON.stringify(createMicroResponsePayload(phrase)));
     }
   }
@@ -365,6 +352,12 @@ wss.on("connection", (twilioWs, req) => {
   // PROCESS USER INPUT THROUGH STATE MACHINE
   // ============================================================================
   function processUserInput(transcript) {
+    // Don't process if a response is already in progress
+    if (responseInProgress) {
+      console.log(`⏳ Skipping input processing - response in progress`);
+      return;
+    }
+    
     // Clear silence timer if still active
     if (silenceTimer) {
       clearTimeout(silenceTimer);
@@ -434,7 +427,7 @@ wss.on("connection", (twilioWs, req) => {
   // SEND STATE PROMPT
   // ============================================================================
   function sendStatePrompt(prompt) {
-    if (openaiWs?.readyState === WebSocket.OPEN) {
+    if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
@@ -443,6 +436,8 @@ wss.on("connection", (twilioWs, req) => {
           max_output_tokens: 200
         }
       }));
+    } else if (responseInProgress) {
+      console.log(`⏳ Skipping prompt - response in progress`);
     }
   }
   
@@ -451,6 +446,10 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   function sendNaturalResponse(userInput, action) {
     if (openaiWs?.readyState !== WebSocket.OPEN) return;
+    if (responseInProgress) {
+      console.log(`⏳ Skipping natural response - response in progress`);
+      return;
+    }
     
     const state = stateMachine.getState();
     const data = stateMachine.getData();
