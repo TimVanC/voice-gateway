@@ -141,7 +141,7 @@ npm run dev
 ### OpenAI Realtime
 Edit `src/server-realtime.js`:
 ```javascript
-voice: "alloy"  // Options: alloy, echo, fable, onyx, nova, shimmer
+voice: "shimmer"  // Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
 ```
 
 ### ElevenLabs (Hybrid)

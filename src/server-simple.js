@@ -18,6 +18,10 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || process.env.RAILWAY_PUBLI
 // OpenAI Realtime API - uses native G.711 μ-law, no conversion needed
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
 
+// Voice configuration - SINGLE SOURCE OF TRUTH
+// Valid voices: alloy, ash, ballad, coral, echo, sage, shimmer, verse
+const OPENAI_VOICE = process.env.OPENAI_REALTIME_VOICE || "shimmer";
+
 // Validate environment
 if (!OPENAI_API_KEY) {
   console.error("❌ OPENAI_API_KEY is required");
@@ -76,7 +80,7 @@ app.get("/health", (_req, res) => {
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log("\n✨ Simple Voice Gateway Ready!");
   console.log(`📍 Webhook: ${PUBLIC_BASE_URL}/twilio/voice`);
-  console.log(`🎙️ Using OpenAI Realtime API (voice: shimmer)`);
+  console.log(`🎙️ Using OpenAI Realtime API (voice: ${OPENAI_VOICE})`);
   console.log(`🎧 Waiting for calls...\n`);
 });
 
@@ -159,7 +163,7 @@ EXAMPLE PHRASES:
 - "Oh awesome, nice to meet you [name]! So what's the best number to reach you at?"
 - "Perfect, got it! And what's your email?"
 - "Great, thanks so much [name]! We'll be in touch real soon. You have a wonderful day!"`,
-        voice: "nova",  // Try nova - often sounds more natural
+        voice: OPENAI_VOICE,
         input_audio_format: "g711_ulaw",
         output_audio_format: "g711_ulaw",
         input_audio_transcription: {
