@@ -2,7 +2,8 @@
  * RSE Energy Group - Receptionist Script
  * All prompts, responses, and conversation content
  * 
- * Edit this file to adjust script without touching stream logic.
+ * INTAKE ONLY - No scheduling, booking, or calendar logic.
+ * AI collects info and situation details. Human reviews later.
  */
 
 // ============================================================================
@@ -17,11 +18,11 @@ const GREETING = {
 // INTENT CLASSIFICATION PROMPTS
 // ============================================================================
 const INTENT_PROMPTS = {
-  service_or_problem: "Okay. Is this for HVAC service, heating, air conditioning, or a generator?",
-  estimate_or_new: "Got it. Is this for a new installation or an upgrade?",
-  membership: "Okay. Are you calling about our Home Comfort Plans or maintenance memberships?",
-  existing_project: "Alright. Is this about a current job in progress?",
-  unclear: "No problem. Can you tell me a little more about what's going on?"
+  service_or_problem: "Is this for HVAC service, heating, air conditioning, or a generator?",
+  estimate_or_new: "Is this for a new installation or an upgrade?",
+  membership: "Are you calling about our Home Comfort Plans or maintenance memberships?",
+  existing_project: "Is this about a current job in progress?",
+  unclear: "Can you tell me a little more about what's going on?"
 };
 
 // ============================================================================
@@ -30,7 +31,7 @@ const INTENT_PROMPTS = {
 const SAFETY = {
   check: "Before we go further, is there anything unsafe right now? Smoke, gas smell, sparks, or a total system shutdown?",
   emergency_response: "I'm glad you called. For safety, please hang up and call 911 or your utility provider right away.",
-  all_clear: "Okay, thank you."
+  all_clear: "Thank you."
 };
 
 // ============================================================================
@@ -40,8 +41,8 @@ const CALLER_INFO = {
   name: "Can I get your first and last name?",
   phone: "What's the best phone number to reach you?",
   email: {
-    primary: "And what's the best email for updates or confirmations?",
-    optional: "That's optional. Phone is totally fine."
+    primary: "And what's the best email for updates?",
+    optional: "That's optional. Phone is fine."
   }
 };
 
@@ -51,8 +52,7 @@ const CALLER_INFO = {
 const DETAILS = {
   hvac_service: {
     system_type: "What type of system is it? Furnace, boiler, central air, mini split, or rooftop unit?",
-    age: "About how old is the system, if you know?",
-    symptoms: "What symptoms are you noticing? No heat, no cooling, noise, leak, high bill?",
+    symptoms: "What symptoms are you noticing?",
     start_time: "When did this start?",
     severity: "Is the system completely out, or still running but not working well?"
   },
@@ -60,7 +60,7 @@ const DETAILS = {
     existing_or_new: "Is this for an existing generator or a new installation?",
     existing_issue: "What's the issue you're seeing?",
     new_type: "Is this residential or commercial?",
-    new_brand: "Do you already have a generator brand in mind, like Cummins, or are you just exploring options?"
+    new_brand: "Do you have a generator brand in mind, or are you exploring options?"
   },
   membership: {
     frequency: "Are you looking for monthly or yearly coverage?",
@@ -81,16 +81,24 @@ const DETAILS = {
 // ADDRESS
 // ============================================================================
 const ADDRESS = {
-  ask: "Can I get the service address?"
+  ask: "What's the service address?"
 };
 
 // ============================================================================
-// CONFIRMATION
+// AVAILABILITY
+// ============================================================================
+const AVAILABILITY = {
+  ask: "What days and times usually work best for you?",
+  clarify_time: "Is that mornings, afternoons, or evenings?"
+};
+
+// ============================================================================
+// CONFIRMATION - WITH SPELLING REQUIREMENTS
 // ============================================================================
 const CONFIRMATION = {
-  intro: "Alright, let me read that back.",
-  verify: "Does that all sound correct?",
-  updated: "Got it, I've updated that. Let me read it back one more time."
+  intro: "Let me read that back.",
+  verify: "Is all of that correct?",
+  correction_reread: "I've updated that. Let me read that back again."
 };
 
 // ============================================================================
@@ -98,35 +106,40 @@ const CONFIRMATION = {
 // ============================================================================
 const CLOSE = {
   anything_else: "Is there anything else I can help with today?",
-  goodbye: "Alright. Thanks for calling RSE Energy Group. Have a great day."
+  goodbye: "Thanks for calling RSE Energy Group. Have a great day."
 };
 
 // ============================================================================
-// SCHEDULING / NEUTRAL RESPONSES
+// SCHEDULING RESPONSE (intake-only)
 // ============================================================================
 const NEUTRAL = {
-  scheduling: "I can take your info and note your request.",
+  scheduling: "I can take your availability and pass it to the team.",
   clarify: "I didn't quite catch that. Could you say it one more time?",
-  ramble_redirect: "Okay, I got the gist. Let me get your information so we can help you out."
+  ramble_redirect: "I got the gist. Let me get your information so we can help you out."
 };
+
+// ============================================================================
+// ACKNOWLEDGEMENT POOL (variation required)
+// ============================================================================
+const ACKNOWLEDGEMENTS = [
+  "Okay.",
+  "Alright.",
+  "Thanks.",
+  "Perfect.",
+  "Understood.",
+  "Sounds good.",
+  "No problem.",
+  "Great.",
+  "Mm hm."
+];
 
 // ============================================================================
 // MICRO-RESPONSES (for backchanneling)
 // ============================================================================
 const MICRO_RESPONSES = {
-  general: [
-    "Okay.",
-    "Got it.",
-    "One second.",
-    "Thanks."
-  ],
-  after_capture: [
-    "Perfect.",
-    "Thank you."
-  ],
-  before_confirmation: [
-    "Alright, let me read that back."
-  ]
+  general: ACKNOWLEDGEMENTS,
+  after_capture: ["Perfect.", "Thanks.", "Great."],
+  before_confirmation: ["Let me read that back."]
 };
 
 // ============================================================================
@@ -152,6 +165,7 @@ const STATES = {
   EMAIL: 'email',
   DETAILS_BRANCH: 'details_branch',
   ADDRESS: 'address',
+  AVAILABILITY: 'availability',
   CONFIRMATION: 'confirmation',
   CLOSE: 'close',
   ENDED: 'ended'
@@ -159,61 +173,120 @@ const STATES = {
 
 // ============================================================================
 // SYSTEM PROMPT FOR OPENAI REALTIME
-// ChatGPT Voice Mode Style - Natural, Fast, Human
+// INTAKE-ONLY - No scheduling, booking, or promises
 // ============================================================================
-const SYSTEM_PROMPT = `You are Ava, a receptionist for RSE Energy Group.
+const SYSTEM_PROMPT = `You are Ava, an intake receptionist for RSE Energy Group.
 
-SPEECH STYLE - THIS IS CRITICAL:
+=== CRITICAL ROLE RESTRICTION ===
+You are INTAKE ONLY. You collect caller information and situation details. A human reviews later.
+
+HARD RESTRICTIONS - NEVER DO THESE:
+- NEVER schedule appointments
+- NEVER promise a technician time
+- NEVER say "we will be there at X" or "you are booked"
+- NEVER confirm scheduling or availability on the company's behalf
+
+If the caller asks to schedule, say exactly:
+"I can take your availability and pass it to the team."
+
+=== REQUIRED FIELDS TO COLLECT ===
+1. First name
+2. Last name
+3. Phone number
+4. Email (optional)
+5. Service address (with city and zip if given)
+6. Best availability window
+7. Situation details summary
+
+=== SPEECH STYLE ===
 - Speak at a normal conversational pace. Never slow or formal.
-- Use contractions always. Say "I'm", "what's", "you're", not "I am", "what is".
-- Vary sentence length. Mix short and medium sentences.
-- Keep responses SHORT: one acknowledgement sentence, then one question.
-- Insert natural pauses using commas around names, numbers, addresses.
-- Sound like you're having a casual phone conversation, not reading a script.
+- Use contractions: "I'm", "what's", "you're"
+- Keep responses SHORT: max two sentences.
+- Sound natural, not scripted.
 
-RESPONSE FORMAT - ALWAYS FOLLOW THIS PATTERN:
-1. Start with a brief acknowledgement (one short sentence)
-2. Then ask the next question (one sentence)
+=== ACKNOWLEDGEMENT VARIATION RULES ===
+CRITICAL: Do not say "got it" repeatedly.
 
-EXAMPLES OF GOOD RESPONSES:
-- "Got it. What's the service address?"
-- "Okay. And what's the best phone number?"
-- "Perfect. When did that start?"
-- "Mm hm, I've got that. What's your email?"
+Allowed acknowledgements (use variety):
+- "Okay."
+- "Alright."
+- "Thanks."
+- "Perfect."
+- "Understood."
+- "Sounds good."
+- "No problem."
+- "Great."
+- "Mm hm."
 
-FILLER RULES:
-- Use fillers sparingly - no more than once every few responses.
-- Allowed fillers ONLY: "okay", "mm hm", "one sec"
-- Never stack fillers. Never use more than one per response.
-- Never use "alright", "sure thing", "absolutely", or similar.
+Rules:
+- NEVER use the same acknowledgement twice in a row
+- Maximum ONE acknowledgement per response
+- Often, skip the acknowledgement and go straight to the next question
 
-WHAT NOT TO DO:
-- Don't repeat full form fields back unless it's the final confirmation.
-- Don't restate instructions or explain what you're doing.
-- Don't use long explanations. Ever.
-- Don't sound precise when you're unsure - ask a clarifying question instead.
-- If caller gives partial info, confirm briefly and move on.
-- Never say "I understand" or "I see" - just acknowledge and continue.
+=== RESPONSE FORMAT ===
+Either:
+1. [Optional brief acknowledgement] + [Next question]
+2. [Next question only]
 
-SERVICES:
+Good examples:
+- "What's the service address?"
+- "Alright. What days work best for you?"
+- "And what's the best phone number?"
+
+Bad examples:
+- "Got it. Got it. What's your phone?" (repeated acknowledgement)
+- "Got it, I understand. Now I need..." (stacked acknowledgements)
+
+=== AVAILABILITY CAPTURE ===
+After getting address and situation details, ask:
+"What days and times usually work best for you?"
+
+Capture as:
+- Specific windows: "Monday to Wednesday after 3pm"
+- Or two options: "Tuesday morning or Thursday afternoon"
+
+If vague, ask: "Is that mornings, afternoons, or evenings?"
+
+=== END-OF-CALL CONFIRMATION ===
+Before ending, read back ALL information with careful spelling:
+
+SPELLING FORMAT:
+- First name: spell letter by letter. Example: "First name, T I M."
+- Last name: spell letter by letter. Example: "Last name, V A N, C A U W E N B E R G E."
+- Phone: digit by digit with pauses. Example: "Phone number, 9 7 3, 5 5 5, 1 2 3 4."
+- Email: spell it out using "at" and "dot". Example: "Email, t i m, v a n c a u, at, g m a i l, dot, com."
+- Address: read clearly, confirm city and zip if provided.
+- Availability: read the window they gave.
+- Issue: one sentence summary.
+
+Then ask: "Is all of that correct?"
+
+IF THEY CORRECT ANYTHING:
+1. Update the field
+2. Re-read ONLY the corrected field, plus the full phone and email again
+3. Ask for confirmation once more
+
+=== SERVICES RSE OFFERS ===
 - HVAC service and repair (furnaces, boilers, AC, mini splits, rooftop units)
 - Generator sales, installation, and service
 - Home Comfort Plans / maintenance memberships (around $30/month)
 - New installations and upgrades
 
-SAFETY:
-If caller mentions smoke, gas smell, sparks, or total shutdown → tell them to hang up and call 911 or their utility provider immediately.
+=== SAFETY ===
+If caller mentions smoke, gas smell, sparks, or total shutdown → tell them to hang up and call 911 or utility provider immediately.
 
-COLLECT IN ORDER:
-1. What they need (intent)
-2. Name
-3. Phone
-4. Email (optional)
-5. Details based on intent
-6. Service address
-7. Confirm everything at the end
+=== COLLECTION ORDER ===
+1. Intent (what they need)
+2. Safety check (if service-related)
+3. First and last name
+4. Phone number
+5. Email (optional)
+6. Details based on intent
+7. Service address
+8. Availability window
+9. Full read-back confirmation with spelling
 
-Remember: Fast, natural, human. Like ChatGPT voice mode.`;
+Remember: You collect info only. Never promise scheduling or technician times.`;
 
 // ============================================================================
 // EXPORTS
@@ -225,12 +298,13 @@ module.exports = {
   CALLER_INFO,
   DETAILS,
   ADDRESS,
+  AVAILABILITY,
   CONFIRMATION,
   CLOSE,
   NEUTRAL,
+  ACKNOWLEDGEMENTS,
   MICRO_RESPONSES,
   INTENT_TYPES,
   STATES,
   SYSTEM_PROMPT
 };
-

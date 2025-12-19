@@ -4,9 +4,13 @@
  * When user stops speaking, start a short timer (150-250ms).
  * If OpenAI audio hasn't started streaming, play a micro-response.
  * Stop micro-response as soon as OpenAI audio begins.
+ * 
+ * ACKNOWLEDGEMENT VARIATION:
+ * - Never use the same acknowledgement twice in a row
+ * - Max one acknowledgement per user turn
  */
 
-const { MICRO_RESPONSES } = require('../scripts/rse-script');
+const { MICRO_RESPONSES, ACKNOWLEDGEMENTS } = require('../scripts/rse-script');
 const { BACKCHANNEL_CONFIG } = require('../config/vad-config');
 
 /**
@@ -18,11 +22,64 @@ function getRandomDelay() {
 }
 
 /**
+ * Create an acknowledgement manager that prevents repetition
+ */
+function createAcknowledgementManager() {
+  let lastUsed = null;
+  let usedThisTurn = false;
+  
+  return {
+    /**
+     * Get next acknowledgement (never repeats last one)
+     * @returns {string|null} An acknowledgement or null if already used this turn
+     */
+    getNext() {
+      if (usedThisTurn) {
+        return null; // Max one per turn
+      }
+      
+      // Filter out the last used acknowledgement
+      const available = ACKNOWLEDGEMENTS.filter(ack => ack !== lastUsed);
+      
+      // Pick random from available
+      const selected = available[Math.floor(Math.random() * available.length)];
+      
+      lastUsed = selected;
+      usedThisTurn = true;
+      
+      return selected;
+    },
+    
+    /**
+     * Reset for new turn (called when user starts speaking)
+     */
+    resetTurn() {
+      usedThisTurn = false;
+    },
+    
+    /**
+     * Check if acknowledgement was already used this turn
+     */
+    wasUsedThisTurn() {
+      return usedThisTurn;
+    },
+    
+    /**
+     * Get the last used acknowledgement (for logging/debugging)
+     */
+    getLastUsed() {
+      return lastUsed;
+    }
+  };
+}
+
+/**
  * Select a micro-response based on context
  * @param {string} context - 'general', 'after_capture', or 'before_confirmation'
+ * @param {string|null} lastUsed - Last used phrase to avoid repeating
  * @returns {string} A random micro-response phrase
  */
-function selectMicroResponse(context = 'general') {
+function selectMicroResponse(context = 'general', lastUsed = null) {
   let pool;
   
   switch (context) {
@@ -36,7 +93,10 @@ function selectMicroResponse(context = 'general') {
       pool = MICRO_RESPONSES.general;
   }
   
-  return pool[Math.floor(Math.random() * pool.length)];
+  // Filter out last used to prevent repetition
+  const available = lastUsed ? pool.filter(r => r !== lastUsed) : pool;
+  
+  return available[Math.floor(Math.random() * available.length)] || pool[0];
 }
 
 /**
@@ -47,6 +107,10 @@ function createBackchannelManager() {
   let timer = null;
   let isActive = false;
   let onTrigger = null;
+  let lastMicroResponse = null;
+  
+  // Acknowledgement manager for variation
+  const ackManager = createAcknowledgementManager();
   
   return {
     /**
@@ -64,7 +128,8 @@ function createBackchannelManager() {
       
       timer = setTimeout(() => {
         if (onTrigger) {
-          const response = selectMicroResponse(context);
+          const response = selectMicroResponse(context, lastMicroResponse);
+          lastMicroResponse = response;
           isActive = true;
           onTrigger(response);
         }
@@ -105,18 +170,23 @@ function createBackchannelManager() {
      */
     finished() {
       isActive = false;
+    },
+    
+    /**
+     * Get acknowledgement manager for this session
+     */
+    getAckManager() {
+      return ackManager;
+    },
+    
+    /**
+     * Reset acknowledgement tracking for new user turn
+     */
+    resetTurn() {
+      ackManager.resetTurn();
     }
   };
 }
-
-/**
- * Pre-generate G.711 μ-law audio for micro-responses
- * These are generated via OpenAI TTS at startup for instant playback
- * 
- * Note: For true instant playback, you'd pre-generate these as static files.
- * For now, we'll use OpenAI to generate them on-demand with minimal text.
- */
-const MICRO_AUDIO_CACHE = new Map();
 
 /**
  * Generate the prompt for a quick TTS micro-response
@@ -136,9 +206,8 @@ function createMicroResponsePayload(phrase) {
 
 module.exports = {
   createBackchannelManager,
+  createAcknowledgementManager,
   selectMicroResponse,
   getRandomDelay,
-  createMicroResponsePayload,
-  MICRO_AUDIO_CACHE
+  createMicroResponsePayload
 };
-

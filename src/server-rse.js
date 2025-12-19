@@ -14,7 +14,7 @@ const http = require("http");
 // ============================================================================
 // IMPORTS
 // ============================================================================
-const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES } = require('./scripts/rse-script');
+const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL } = require('./scripts/rse-script');
 const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = require('./config/vad-config');
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
@@ -306,6 +306,9 @@ wss.on("connection", (twilioWs, req) => {
         speechStartTime = Date.now();
         longSpeechBackchannelSent = false;
         
+        // Reset acknowledgement tracking for new user turn
+        backchannel.resetTurn();
+        
         // AGGRESSIVE BARGE-IN: Immediately stop assistant audio
         if (playBuffer.length > 0 || responseInProgress) {
           console.log("🛑 Barge-in: stopping assistant audio");
@@ -448,7 +451,7 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     if (state === STATES.CONFIRMATION) {
       return 'before_confirmation';
     }
-    if ([STATES.NAME, STATES.PHONE, STATES.EMAIL, STATES.ADDRESS].includes(state)) {
+    if ([STATES.NAME, STATES.PHONE, STATES.EMAIL, STATES.ADDRESS, STATES.AVAILABILITY].includes(state)) {
       return 'after_capture';
     }
     return 'general';

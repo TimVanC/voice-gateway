@@ -1,8 +1,8 @@
 /**
  * RSE Call State Machine
  * 
- * Deterministic state machine for call intake flow.
- * States: greeting → intent → safety_check → name → phone → email → details_branch → address → confirmation → close
+ * INTAKE-ONLY: Collects info and situation details. No scheduling.
+ * States: greeting → intent → safety_check → name → phone → email → details_branch → address → availability → confirmation → close
  */
 
 const { 
@@ -14,6 +14,7 @@ const {
   CALLER_INFO,
   DETAILS,
   ADDRESS,
+  AVAILABILITY,
   CONFIRMATION,
   CLOSE,
   NEUTRAL
@@ -27,14 +28,19 @@ function createCallStateMachine() {
   // Current state
   let currentState = STATES.GREETING;
   
-  // Collected caller data
+  // Collected caller data - REQUIRED FIELDS
   const data = {
     intent: null,           // hvac_service, generator, membership, existing_project, other
     isSafetyRisk: false,    // If emergency detected
-    name: null,
-    phone: null,
-    email: null,
-    address: null,
+    firstName: null,        // Required
+    lastName: null,         // Required
+    phone: null,            // Required
+    email: null,            // Optional
+    address: null,          // Required
+    city: null,             // If provided
+    zip: null,              // If provided
+    availability: null,     // Required - availability window
+    situationSummary: null, // One-line issue summary
     
     // Details based on intent
     details: {
@@ -99,6 +105,9 @@ function createCallStateMachine() {
       case STATES.ADDRESS:
         return ADDRESS.ask;
         
+      case STATES.AVAILABILITY:
+        return AVAILABILITY.ask;
+        
       case STATES.CONFIRMATION:
         return getConfirmationPrompt();
         
@@ -117,7 +126,6 @@ function createCallStateMachine() {
    * Get intent classification prompt based on what we know
    */
   function getIntentPrompt() {
-    // We don't know intent yet, need model to classify
     return INTENT_PROMPTS.unclear;
   }
   
@@ -129,7 +137,7 @@ function createCallStateMachine() {
     if (detailsQuestionIndex < questions.length) {
       return questions[detailsQuestionIndex];
     }
-    return null; // Move to next state
+    return null;
   }
   
   /**
@@ -178,75 +186,133 @@ function createCallStateMachine() {
   }
   
   /**
-   * Generate confirmation summary
+   * Generate confirmation prompt with spelled-out fields
    */
   function getConfirmationPrompt() {
     const intro = confirmationAttempts > 0 
-      ? CONFIRMATION.updated 
+      ? CONFIRMATION.correction_reread 
       : CONFIRMATION.intro;
     
-    let summary = `${intro} I have `;
+    // Build the read-back with spelling
+    let parts = [intro];
     
-    // Name
-    if (data.name) {
-      summary += `${data.name}`;
+    // First name spelled
+    if (data.firstName) {
+      parts.push(`First name, ${spellOut(data.firstName)}.`);
     }
     
-    // Phone
+    // Last name spelled
+    if (data.lastName) {
+      parts.push(`Last name, ${spellOut(data.lastName)}.`);
+    }
+    
+    // Phone spelled digit by digit
     if (data.phone) {
-      summary += `, phone number ${formatPhoneForSpeech(data.phone)}`;
+      parts.push(`Phone number, ${spellPhoneNumber(data.phone)}.`);
     }
     
-    // Email
+    // Email spelled
     if (data.email) {
-      summary += `, email ${data.email}`;
+      parts.push(`Email, ${spellEmail(data.email)}.`);
     }
     
     // Address
     if (data.address) {
-      summary += `, at ${data.address}`;
+      let addressPart = `Service address, ${data.address}`;
+      if (data.city) addressPart += `, ${data.city}`;
+      if (data.zip) addressPart += `, ${data.zip}`;
+      parts.push(addressPart + '.');
     }
     
-    // Intent/Issue summary
-    summary += `. ${getIssueSummary()}`;
+    // Availability
+    if (data.availability) {
+      parts.push(`Best availability, ${data.availability}.`);
+    }
     
-    summary += ` ${CONFIRMATION.verify}`;
+    // Issue summary
+    parts.push(getIssueSummary());
     
-    return summary;
+    parts.push(CONFIRMATION.verify);
+    
+    return parts.join(' ');
   }
   
   /**
-   * Format phone number for speech (spell out)
+   * Spell out a word letter by letter with spaces
    */
-  function formatPhoneForSpeech(phone) {
-    // Just return as-is, the model will speak it naturally
-    return phone;
+  function spellOut(text) {
+    if (!text) return '';
+    return text.toUpperCase().split('').join(' ');
+  }
+  
+  /**
+   * Spell phone number digit by digit with grouping
+   */
+  function spellPhoneNumber(phone) {
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length >= 10) {
+      const area = digits.slice(-10, -7).split('').join(' ');
+      const prefix = digits.slice(-7, -4).split('').join(' ');
+      const line = digits.slice(-4).split('').join(' ');
+      return `${area}, ${prefix}, ${line}`;
+    }
+    return digits.split('').join(' ');
+  }
+  
+  /**
+   * Spell email with "at" and "dot" wording
+   */
+  function spellEmail(email) {
+    if (!email) return '';
+    return email.toLowerCase()
+      .replace(/@/g, ', at, ')
+      .replace(/\./g, ', dot, ')
+      .split('')
+      .map(char => {
+        if (char === ',' || char === ' ') return char;
+        return char;
+      })
+      .join('')
+      .replace(/([a-z0-9])/gi, '$1 ')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
   
   /**
    * Get one-line issue summary
    */
   function getIssueSummary() {
+    // Store as situationSummary
+    let summary = '';
+    
     switch (data.intent) {
       case INTENT_TYPES.HVAC_SERVICE:
         const symptom = data.details.symptoms || 'HVAC issue';
-        return `Calling about ${symptom}.`;
+        summary = `Calling about ${symptom}.`;
+        break;
         
       case INTENT_TYPES.GENERATOR:
         if (data.details.generatorType === 'new') {
-          return `Looking for a new generator installation.`;
+          summary = 'Looking for a new generator installation.';
+        } else {
+          summary = 'Generator service needed.';
         }
-        return `Generator service needed.`;
+        break;
         
       case INTENT_TYPES.MEMBERSHIP:
-        return `Interested in maintenance membership.`;
+        summary = 'Interested in maintenance membership.';
+        break;
         
       case INTENT_TYPES.EXISTING_PROJECT:
-        return `Following up on an existing project.`;
+        summary = 'Following up on an existing project.';
+        break;
         
       default:
-        return `General inquiry.`;
+        summary = data.details.issueDescription || 'General inquiry.';
     }
+    
+    data.situationSummary = summary;
+    return summary;
   }
   
   /**
@@ -257,7 +323,6 @@ function createCallStateMachine() {
     currentState = newState;
     console.log(`📍 State: ${oldState} → ${newState}`);
     
-    // Reset detail question index when entering details branch
     if (newState === STATES.DETAILS_BRANCH) {
       detailsQuestionIndex = 0;
     }
@@ -267,29 +332,23 @@ function createCallStateMachine() {
   
   /**
    * Process user input and determine next state
-   * @param {string} transcript - User's spoken input
-   * @param {Object} analysis - Optional model analysis of intent/entities
-   * @returns {Object} { nextState, prompt, action }
    */
   function processInput(transcript, analysis = {}) {
     const lowerTranscript = transcript.toLowerCase();
     
     switch (currentState) {
       case STATES.GREETING:
-        // Move to intent classification
         return { 
           nextState: transitionTo(STATES.INTENT),
-          prompt: null, // Let model classify
+          prompt: null,
           action: 'classify_intent'
         };
         
       case STATES.INTENT:
-        // Intent should be classified by model
         if (analysis.intent) {
           data.intent = analysis.intent;
           console.log(`📋 Intent: ${data.intent}`);
           
-          // Check if safety check needed
           if (needsSafetyCheck()) {
             return {
               nextState: transitionTo(STATES.SAFETY_CHECK),
@@ -305,7 +364,6 @@ function createCallStateMachine() {
           };
         }
         
-        // Need more info to classify
         return {
           nextState: currentState,
           prompt: INTENT_PROMPTS.unclear,
@@ -313,7 +371,6 @@ function createCallStateMachine() {
         };
         
       case STATES.SAFETY_CHECK:
-        // Check for safety concerns
         if (detectSafetyEmergency(lowerTranscript)) {
           data.isSafetyRisk = true;
           return {
@@ -331,8 +388,10 @@ function createCallStateMachine() {
         
       case STATES.NAME:
         if (transcript.length > 0) {
-          data.name = extractName(transcript);
-          console.log(`📋 Name: ${data.name}`);
+          const { firstName, lastName } = extractName(transcript);
+          data.firstName = firstName;
+          data.lastName = lastName;
+          console.log(`📋 Name: ${data.firstName} ${data.lastName}`);
           return {
             nextState: transitionTo(STATES.PHONE),
             prompt: CALLER_INFO.phone,
@@ -382,7 +441,6 @@ function createCallStateMachine() {
         };
         
       case STATES.DETAILS_BRANCH:
-        // Store detail answer and move to next question or state
         storeDetailAnswer(transcript, analysis);
         detailsQuestionIndex++;
         
@@ -395,7 +453,6 @@ function createCallStateMachine() {
           };
         }
         
-        // Done with details, get address
         return {
           nextState: transitionTo(STATES.ADDRESS),
           prompt: ADDRESS.ask,
@@ -404,17 +461,44 @@ function createCallStateMachine() {
         
       case STATES.ADDRESS:
         if (transcript.length > 2) {
-          data.address = transcript;
+          const addressParts = extractAddress(transcript);
+          data.address = addressParts.address;
+          data.city = addressParts.city;
+          data.zip = addressParts.zip;
           console.log(`📋 Address: ${data.address}`);
+          return {
+            nextState: transitionTo(STATES.AVAILABILITY),
+            prompt: AVAILABILITY.ask,
+            action: 'ask'
+          };
+        }
+        return {
+          nextState: currentState,
+          prompt: ADDRESS.ask,
+          action: 'ask'
+        };
+        
+      case STATES.AVAILABILITY:
+        if (transcript.length > 2) {
+          data.availability = extractAvailability(transcript);
+          console.log(`📋 Availability: ${data.availability}`);
           return {
             nextState: transitionTo(STATES.CONFIRMATION),
             prompt: getConfirmationPrompt(),
             action: 'confirm'
           };
         }
+        // If vague, ask follow-up
+        if (isVagueAvailability(lowerTranscript)) {
+          return {
+            nextState: currentState,
+            prompt: AVAILABILITY.clarify_time,
+            action: 'ask'
+          };
+        }
         return {
           nextState: currentState,
-          prompt: ADDRESS.ask,
+          prompt: AVAILABILITY.ask,
           action: 'ask'
         };
         
@@ -428,7 +512,6 @@ function createCallStateMachine() {
         }
         if (isCorrection(lowerTranscript)) {
           confirmationAttempts++;
-          // Let model handle the correction
           return {
             nextState: currentState,
             prompt: null,
@@ -488,7 +571,19 @@ function createCallStateMachine() {
       .replace(/^(this is|i'm|i am|my name is|it's|hey|hi|hello|yeah|oh yeah)\s*/gi, '')
       .replace(/[.,!?]$/g, '')
       .trim();
-    return name || text;
+    
+    // Split into first and last name
+    const parts = name.split(/\s+/);
+    if (parts.length >= 2) {
+      return {
+        firstName: parts[0],
+        lastName: parts.slice(1).join(' ')
+      };
+    }
+    return {
+      firstName: name,
+      lastName: ''
+    };
   }
   
   function hasPhoneNumber(text) {
@@ -496,7 +591,6 @@ function createCallStateMachine() {
   }
   
   function extractPhone(text) {
-    // Extract digits
     const digits = text.replace(/\D/g, '');
     if (digits.length >= 10) {
       const last10 = digits.slice(-10);
@@ -512,21 +606,48 @@ function createCallStateMachine() {
   function isEmailDeclined(text) {
     const declinePatterns = [
       'no email', 'don\'t have email', 'no thanks', 'skip', 
-      'phone is fine', 'just phone', 'prefer not', 'rather not'
+      'phone is fine', 'just phone', 'prefer not', 'rather not',
+      'don\'t have one', 'no i don\'t'
     ];
     return declinePatterns.some(p => text.includes(p));
   }
   
   function extractEmail(text) {
-    // Normalize "at" to "@"
     return text.replace(/\s+at\s+/gi, '@').replace(/\s+dot\s+/gi, '.').trim();
+  }
+  
+  function extractAddress(text) {
+    // Basic address extraction - look for zip and city patterns
+    const zipMatch = text.match(/\b\d{5}(-\d{4})?\b/);
+    const zip = zipMatch ? zipMatch[0] : null;
+    
+    // Very basic - in production would use a geocoding API
+    return {
+      address: text,
+      city: null,  // Would need NLP to extract
+      zip: zip
+    };
+  }
+  
+  function extractAvailability(text) {
+    // Clean up and normalize availability
+    return text
+      .replace(/^(i'm available|i can do|works for me|best for me is)\s*/gi, '')
+      .trim();
+  }
+  
+  function isVagueAvailability(text) {
+    const vaguePatterns = ['anytime', 'whenever', 'flexible', 'any day', 'any time'];
+    return vaguePatterns.some(p => text.includes(p)) && 
+           !text.includes('morning') && 
+           !text.includes('afternoon') && 
+           !text.includes('evening');
   }
   
   function storeDetailAnswer(text, analysis) {
     const questions = getDetailQuestions();
     const currentQuestion = questions[detailsQuestionIndex];
     
-    // Store based on which question was asked
     if (data.intent === INTENT_TYPES.HVAC_SERVICE) {
       if (currentQuestion === DETAILS.hvac_service.system_type) {
         data.details.systemType = text;
@@ -571,7 +692,8 @@ function createCallStateMachine() {
   function isConfirmation(text) {
     const confirmPatterns = [
       'yes', 'yep', 'yeah', 'correct', 'right', 'that\'s right', 
-      'sounds good', 'looks good', 'perfect', 'all good', 'good'
+      'sounds good', 'looks good', 'perfect', 'all good', 'good',
+      'that\'s correct', 'yes it is', 'yup'
     ];
     return confirmPatterns.some(p => text.includes(p));
   }
@@ -579,7 +701,8 @@ function createCallStateMachine() {
   function isCorrection(text) {
     const correctionPatterns = [
       'no', 'not quite', 'actually', 'wait', 'change', 'wrong',
-      'incorrect', 'that\'s not', 'fix', 'update', 'correction'
+      'incorrect', 'that\'s not', 'fix', 'update', 'correction',
+      'let me correct', 'that\'s wrong'
     ];
     return correctionPatterns.some(p => text.includes(p));
   }
@@ -599,16 +722,13 @@ function createCallStateMachine() {
   // ============================================================================
   
   return {
-    // State getters
     getState: () => currentState,
-    getData: () => ({ ...data }),
+    getData: () => ({ ...data, details: { ...data.details } }),
     getNextPrompt,
     
-    // State transitions
     processInput,
     transitionTo,
     
-    // Data setters
     setIntent: (intent) => { 
       data.intent = intent; 
       console.log(`📋 Intent set: ${intent}`);
@@ -624,11 +744,10 @@ function createCallStateMachine() {
       console.log(`📋 Detail ${key}: ${value}`);
     },
     
-    // Flags
     setSilenceAfterGreeting: () => { silenceAfterGreeting = true; },
     incrementConfirmationAttempts: () => { confirmationAttempts++; },
+    getConfirmationPrompt,
     
-    // Constants for external use
     STATES,
     INTENT_TYPES
   };
@@ -639,4 +758,3 @@ module.exports = {
   STATES,
   INTENT_TYPES
 };
-
