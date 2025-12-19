@@ -582,8 +582,16 @@ function createCallStateMachine() {
   // ============================================================================
   
   function needsSafetyCheck() {
+    // Only service calls need safety check, NOT installations
+    // Installations are for new equipment, not emergencies
     return data.intent === INTENT_TYPES.HVAC_SERVICE || 
-           data.intent === INTENT_TYPES.GENERATOR;
+           (data.intent === INTENT_TYPES.GENERATOR && !isGeneratorInstallation());
+  }
+  
+  function isGeneratorInstallation() {
+    // Check if the generator intent is for installation (not service)
+    const d = data.details;
+    return d && d.generatorType === 'new';
   }
   
   function detectSafetyEmergency(text) {

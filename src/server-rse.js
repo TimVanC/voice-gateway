@@ -567,7 +567,7 @@ Sound polite and helpful, not dismissive.`,
     }
     
     // ============================================================
-    // ALLOWED SERVICES
+    // ALLOWED SERVICES - Order matters! Check installation FIRST
     // ============================================================
     
     // Generator keywords
@@ -575,28 +575,26 @@ Sound polite and helpful, not dismissive.`,
       return INTENT_TYPES.GENERATOR;
     }
     
-    // Service/repair keywords (HVAC)
-    if (/\b(repair|fix|broken|not working|service|problem|issue|no heat|no cool|noise|leak|frozen|won't start|stopped working)\b/.test(text)) {
+    // Installation/upgrade keywords - CHECK BEFORE service keywords
+    // "new", "install", "replace" indicate installation, not service
+    if (/\b(new|install|installation|replace|replacement|upgrade|estimate|quote|cost|price|proposal)\b/.test(text)) {
+      console.log('📋 Detected installation/upgrade keywords');
+      return INTENT_TYPES.HVAC_INSTALLATION;
+    }
+    
+    // Service/repair keywords (HVAC) - only for actual problems
+    if (/\b(repair|fix|broken|not working|service call|problem|issue|no heat|no cool|noise|leak|frozen|won't start|stopped working|maintenance)\b/.test(text)) {
       return INTENT_TYPES.HVAC_SERVICE;
     }
     
     // Membership keywords
-    if (/\b(membership|member|plan|maintenance plan|home comfort|tune up|annual service|monthly plan)\b/.test(text)) {
+    if (/\b(membership|member|plan|home comfort|tune up|annual service|monthly plan)\b/.test(text)) {
       return INTENT_TYPES.MEMBERSHIP;
     }
     
     // Existing project keywords
     if (/\b(existing project|current project|in progress|follow up|following up|job|quote you gave|estimate you gave|spoke to someone)\b/.test(text)) {
       return INTENT_TYPES.EXISTING_PROJECT;
-    }
-    
-    // Installation/upgrade keywords (HVAC)
-    if (/\b(estimate|quote|new|install|replace|replacement|upgrade|cost|price|proposal)\b/.test(text)) {
-      if (/\b(furnace|boiler|ac|air condition|heat pump|mini split|hvac|heating|cooling)\b/.test(text)) {
-        return INTENT_TYPES.HVAC_INSTALLATION;
-      }
-      // Default to HVAC installation for general estimates
-      return INTENT_TYPES.HVAC_INSTALLATION;
     }
     
     // HVAC system mentions without clear intent - default to service
@@ -616,21 +614,25 @@ Sound polite and helpful, not dismissive.`,
       // Determine if we should use a filler based on turn count
       const useFiller = assistantTurnCount > 0 && 
                         assistantTurnCount % FILLER_CONFIG.min_turns_between_fillers === 0;
-      const fillerHint = useFiller ? 
-        `Start with a brief acknowledgement like "Got it" or "Okay", then ` : '';
+      const ack = useFiller ? 'Okay. ' : '';
+      
+      console.log(`🗣️ State prompt: "${ack}${prompt}"`);
       
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          instructions: `${fillerHint}Say: "${prompt}"
+          instructions: `YOU MUST SAY EXACTLY THIS (you can add a brief acknowledgement first):
 
-CRITICAL RULES:
-- Speak at normal conversational speed, not slow
-- Use contractions (what's, I'm, you're)  
-- Keep it to TWO sentences max: brief acknowledgement + the question
-- Sound natural, not robotic or scripted`,
-          max_output_tokens: 300
+"${ack}${prompt}"
+
+CRITICAL - DO NOT DEVIATE:
+- Say ONLY what is written above
+- Do NOT add extra questions
+- Do NOT skip ahead in the intake process
+- Sound natural, use contractions
+- Keep it short`,
+          max_output_tokens: 200
         }
       }));
     } else if (responseInProgress) {
@@ -651,36 +653,61 @@ CRITICAL RULES:
     const state = stateMachine.getState();
     const data = stateMachine.getData();
     
-    // ChatGPT-style response rules
-    const styleRules = `
-RESPONSE STYLE - FOLLOW EXACTLY:
-- Start with brief acknowledgement (one short sentence)
-- Then ask ONE question (one sentence)
-- Use contractions. Speak naturally.
-- Never explain what you're doing
-- Never repeat back full info unless confirming at the end`;
+    console.log(`💬 Natural response: action=${action}, state=${state}`);
+    
+    // STRICT COLLECTION ORDER - the AI must follow this exactly
+    const collectionOrder = `
+STRICT INTAKE ORDER - YOU MUST FOLLOW THIS:
+1. Understand what they need (HVAC service, installation, generator, membership, existing project)
+2. If it's a service issue: Ask about safety first (smoke, gas smell, sparks?)
+3. Ask for first AND last name
+4. Ask for phone number
+5. Ask for email (optional)
+6. Ask about the situation/problem details
+7. Ask for service address
+8. Ask for availability
+9. Read back ALL info for confirmation
+DO NOT SKIP ANY STEP. DO NOT ASK FOR ADDRESS BEFORE PHONE.`;
     
     let instruction = '';
     
     if (action === 'classify_intent') {
       instruction = `Caller said: "${userInput}"
 
-Figure out what they need. Respond with:
-1. Brief acknowledgement
-2. One clarifying question
-${styleRules}`;
+You are an intake receptionist. Figure out what they need.
+
+ALLOWED SERVICES ONLY:
+- HVAC (heating, AC, service, maintenance, installation, upgrades)
+- Generators (service, maintenance, installation)
+- Memberships (Home Comfort Plans)
+- Existing projects
+
+If they mention something else (solar, electrical, plumbing), say:
+"We specialize in HVAC and generators. I can help with that if you need."
+
+Respond with:
+1. Brief acknowledgement (one short sentence)
+2. One clarifying question about their need
+
+Keep it SHORT. Two sentences max.`;
     } else if (action === 'answer_question') {
       instruction = `Caller asked: "${userInput}"
 
-Answer briefly. If you don't know specifics, say "I can take your info and have someone follow up."
-${styleRules}`;
+Answer briefly. You're intake only - don't schedule or promise times.
+If you don't know specifics, say "I can take your info and have someone follow up."
+
+Keep it SHORT. Two sentences max.`;
     } else if (action === 'handle_correction') {
       instruction = `Caller is correcting something: "${userInput}"
 
-Current info: Name: ${data.name || 'none'}, Phone: ${data.phone || 'none'}, Email: ${data.email || 'none'}, Address: ${data.address || 'none'}
+Current info: 
+- Name: ${data.firstName || ''} ${data.lastName || ''}
+- Phone: ${data.phone || 'not yet'}
+- Email: ${data.email || 'not yet'}
+- Address: ${data.address || 'not yet'}
 
 Ask what needs fixing, confirm briefly, move on.
-${styleRules}`;
+Keep it SHORT.`;
     }
     
     openaiWs.send(JSON.stringify({
@@ -688,7 +715,7 @@ ${styleRules}`;
       response: {
         modalities: ["audio", "text"],
         instructions: instruction,
-        max_output_tokens: 400
+        max_output_tokens: 300
       }
     }));
   }
