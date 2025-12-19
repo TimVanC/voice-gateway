@@ -99,6 +99,8 @@ wss.on("connection", (twilioWs, req) => {
   let playBuffer = Buffer.alloc(0);
   let responseInProgress = false;
   let audioStreamingStarted = false;
+  let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
+  let pendingUserInput = null;  // Queue for input that arrives while response is in progress
   
   // State machine for this call
   const stateMachine = createCallStateMachine();
@@ -294,6 +296,8 @@ wss.on("connection", (twilioWs, req) => {
         
         if (status === "cancelled") {
           console.log(`⚠️ Response CANCELLED`);
+          // Don't send any new prompts - we cancelled for a reason
+          // Either waiting for transcription, or user barged in
         } else if (status === "incomplete") {
           console.log(`⚠️ Response INCOMPLETE - will retry if needed`);
           // Response was cut off - send the appropriate prompt for current state
@@ -309,12 +313,23 @@ wss.on("connection", (twilioWs, req) => {
         
         // Reset dynamic silence to default after turn completes
         currentSilenceDuration = VAD_CONFIG.silence_default;
+        
+        // Process any pending input that arrived while response was in progress
+        if (pendingUserInput && status !== "cancelled") {
+          console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
+          const input = pendingUserInput;
+          pendingUserInput = null;
+          processUserInput(input);
+        }
         break;
         
       case "input_audio_buffer.speech_started":
         console.log("🎤 User speaking...");
         speechStartTime = Date.now();
         longSpeechBackchannelSent = false;
+        
+        // Clear any pending input - we'll get a fresh transcript
+        pendingUserInput = null;
         
         // Reset acknowledgement tracking for new user turn
         backchannel.resetTurn();
@@ -324,6 +339,7 @@ wss.on("connection", (twilioWs, req) => {
           console.log("🛑 Barge-in: stopping assistant audio");
           playBuffer = Buffer.alloc(0);  // Clear audio buffer immediately
           responseInProgress = false;
+          audioStreamingStarted = false;
         }
         
         // Start long-speech backchannel timer (4-6 seconds)
@@ -357,27 +373,18 @@ wss.on("connection", (twilioWs, req) => {
         }
         speechStartTime = null;
         
-        // DYNAMIC SILENCE ADJUSTMENT
-        // Short clear answers get faster response, long rambling gets more patience
-        if (speechDuration < 2000) {
-          // Short answer - caller finished thought quickly
-          currentSilenceDuration = VAD_CONFIG.silence_short;
-          console.log(`⚡ Dynamic silence: ${currentSilenceDuration}ms (short answer)`);
-        } else if (speechDuration > 5000) {
-          // Long speech - might pause mid-thought
-          currentSilenceDuration = VAD_CONFIG.silence_long;
-          console.log(`⏳ Dynamic silence: ${currentSilenceDuration}ms (long speech)`);
-        } else {
-          currentSilenceDuration = VAD_CONFIG.silence_default;
-        }
-        
-        // Start post-speech backchannel timer (only if not already backchanneled)
-        if (BACKCHANNEL_CONFIG.enabled && !longSpeechBackchannelSent) {
-          const context = getBackchannelContext();
-          backchannel.start((microResponse) => {
-            console.log(`💬 Backchannel: "${microResponse}"`);
-            sendMicroResponse(microResponse);
-          }, context);
+        // ===================================================================
+        // CRITICAL: Cancel OpenAI's auto-response!
+        // OpenAI's VAD triggers a response immediately when speech stops,
+        // but the transcription takes 1-2 seconds to arrive. If we don't
+        // cancel, the AI will respond with a generic "please continue" before
+        // we even know what the user said.
+        // ===================================================================
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response`);
+          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          // Mark that we're waiting for transcription
+          waitingForTranscription = true;
         }
         break;
         
@@ -385,6 +392,21 @@ wss.on("connection", (twilioWs, req) => {
         if (event.transcript) {
           const transcript = event.transcript.trim();
           console.log(`📝 User said: "${transcript}"`);
+          
+          // Clear the waiting flag - we have the transcript now
+          waitingForTranscription = false;
+          
+          // If a response is already in progress (shouldn't happen after our cancel),
+          // log it but still process the input
+          if (responseInProgress) {
+            console.log(`⚠️ Response was in progress when transcript arrived`);
+            if (audioStreamingStarted) {
+              console.log(`🎵 Audio already streaming - will queue input`);
+              // Let current response finish, queue this input
+              pendingUserInput = transcript;
+              return;
+            }
+          }
           
           // Process through state machine
           processUserInput(transcript);
