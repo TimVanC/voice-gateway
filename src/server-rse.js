@@ -251,7 +251,9 @@ wss.on("connection", (twilioWs, req) => {
         
       case "response.created":
         console.log(`🚀 Response started (id: ${event.response?.id})`);
-        playBuffer = Buffer.alloc(0);
+        // DON'T clear playBuffer here - let existing audio finish playing!
+        // Audio from new response will be appended, not replace
+        // Only clear on explicit cancellation or barge-in
         responseInProgress = true;
         audioStreamingStarted = false;
         
@@ -274,8 +276,10 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.audio.done":
-        console.log(`🔊 Audio complete (buffer: ${playBuffer.length} bytes)`);
-        responseInProgress = false;
+        const audioSeconds = (playBuffer.length / 8000).toFixed(1);
+        console.log(`🔊 Audio complete (buffer: ${playBuffer.length} bytes = ~${audioSeconds}s to play)`);
+        // Keep responseInProgress true until response.done
+        // This prevents new responses from starting while audio is still in buffer
         break;
         
       case "response.audio_transcript.done":
@@ -496,6 +500,7 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     if (responseInProgress && !audioStreamingStarted) {
       console.log(`🛑 Cancelling OpenAI auto-response (no audio yet)`);
       openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+      playBuffer = Buffer.alloc(0);  // Clear buffer since we're cancelling
       responseInProgress = false;
     }
     
