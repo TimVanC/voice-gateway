@@ -14,7 +14,7 @@ const http = require("http");
 // ============================================================================
 // IMPORTS
 // ============================================================================
-const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL } = require('./scripts/rse-script');
+const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL, OUT_OF_SCOPE } = require('./scripts/rse-script');
 const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = require('./config/vad-config');
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
@@ -488,6 +488,9 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     // Generate appropriate response based on state machine result
     if (result.prompt) {
       sendStatePrompt(result.prompt);
+    } else if (result.action === 'redirect_out_of_scope') {
+      // Handle out-of-scope request with polite redirect
+      sendOutOfScopeResponse(transcript);
     } else if (result.action === 'classify_intent' || result.action === 'answer_question' || result.action === 'handle_correction') {
       // Let the model generate a natural response
       sendNaturalResponse(transcript, result.action);
@@ -495,41 +498,114 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
   }
   
   // ============================================================================
+  // SEND OUT OF SCOPE RESPONSE
+  // ============================================================================
+  function sendOutOfScopeResponse(transcript) {
+    if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
+      const lowerTranscript = transcript.toLowerCase();
+      
+      // Determine specific response based on what was asked
+      let response = OUT_OF_SCOPE.general;
+      if (lowerTranscript.includes('solar')) {
+        response = OUT_OF_SCOPE.solar;
+      } else if (lowerTranscript.includes('electric') || lowerTranscript.includes('wiring')) {
+        response = OUT_OF_SCOPE.electrical;
+      } else if (lowerTranscript.includes('plumb') || lowerTranscript.includes('water heater')) {
+        response = OUT_OF_SCOPE.plumbing;
+      }
+      
+      console.log(`🚫 Out-of-scope response: "${response}"`);
+      responseInProgress = true;
+      
+      openaiWs.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: `Say exactly: "${response}"
+
+Then ask: "Is there anything else I can help with?"
+Sound polite and helpful, not dismissive.`,
+          max_output_tokens: 200
+        }
+      }));
+    }
+  }
+  
+  // ============================================================================
   // INTENT CLASSIFICATION
   // ============================================================================
   function classifyIntent(text) {
-    // Service/repair keywords
-    if (/\b(repair|fix|broken|not working|service|problem|issue|no heat|no cool|noise|leak|frozen|won't start)\b/.test(text)) {
-      if (/\b(generator|generac|cummins|backup power)\b/.test(text)) {
-        return INTENT_TYPES.GENERATOR;
-      }
-      return INTENT_TYPES.HVAC_SERVICE;
+    // ============================================================
+    // DISALLOWED SERVICES - Check first and reject
+    // ============================================================
+    if (/\b(solar|photovoltaic|pv panel|solar panel|solar audit|solar energy|solar install)\b/.test(text)) {
+      console.log('⚠️ Detected disallowed service: SOLAR');
+      return INTENT_TYPES.OUT_OF_SCOPE;
     }
     
+    if (/\b(electrical|electrician|wiring|outlet|circuit|breaker|panel upgrade)\b/.test(text) && 
+        !/\b(generator|hvac|furnace|ac|air condition)\b/.test(text)) {
+      console.log('⚠️ Detected disallowed service: ELECTRICAL');
+      return INTENT_TYPES.OUT_OF_SCOPE;
+    }
+    
+    if (/\b(plumbing|plumber|water heater|pipe|drain|toilet|faucet|sewer)\b/.test(text)) {
+      console.log('⚠️ Detected disallowed service: PLUMBING');
+      return INTENT_TYPES.OUT_OF_SCOPE;
+    }
+    
+    if (/\b(roofing|roof|insulation|window|door|siding)\b/.test(text) && 
+        !/\b(hvac|furnace|ac|air condition|rooftop unit)\b/.test(text)) {
+      console.log('⚠️ Detected disallowed service: OTHER HOME IMPROVEMENT');
+      return INTENT_TYPES.OUT_OF_SCOPE;
+    }
+    
+    // Energy audit only allowed if HVAC-related
+    if (/\b(energy audit)\b/.test(text) && !/\b(hvac|heating|cooling)\b/.test(text)) {
+      console.log('⚠️ Detected disallowed service: ENERGY AUDIT');
+      return INTENT_TYPES.OUT_OF_SCOPE;
+    }
+    
+    // ============================================================
+    // ALLOWED SERVICES
+    // ============================================================
+    
     // Generator keywords
-    if (/\b(generator|generac|cummins|backup power|standby|whole house)\b/.test(text)) {
+    if (/\b(generator|generac|cummins|backup power|standby|whole house power)\b/.test(text)) {
       return INTENT_TYPES.GENERATOR;
     }
     
+    // Service/repair keywords (HVAC)
+    if (/\b(repair|fix|broken|not working|service|problem|issue|no heat|no cool|noise|leak|frozen|won't start|stopped working)\b/.test(text)) {
+      return INTENT_TYPES.HVAC_SERVICE;
+    }
+    
     // Membership keywords
-    if (/\b(membership|member|plan|maintenance|home comfort|tune up|annual|monthly)\b/.test(text)) {
+    if (/\b(membership|member|plan|maintenance plan|home comfort|tune up|annual service|monthly plan)\b/.test(text)) {
       return INTENT_TYPES.MEMBERSHIP;
     }
     
     // Existing project keywords
-    if (/\b(existing|current|in progress|follow up|following up|scheduled|appointment|job|project|quote|estimate you gave)\b/.test(text)) {
+    if (/\b(existing project|current project|in progress|follow up|following up|job|quote you gave|estimate you gave|spoke to someone)\b/.test(text)) {
       return INTENT_TYPES.EXISTING_PROJECT;
     }
     
-    // Estimate/new installation
-    if (/\b(estimate|quote|new|install|replace|upgrade|cost|price)\b/.test(text)) {
-      if (/\b(generator)\b/.test(text)) {
-        return INTENT_TYPES.GENERATOR;
+    // Installation/upgrade keywords (HVAC)
+    if (/\b(estimate|quote|new|install|replace|replacement|upgrade|cost|price|proposal)\b/.test(text)) {
+      if (/\b(furnace|boiler|ac|air condition|heat pump|mini split|hvac|heating|cooling)\b/.test(text)) {
+        return INTENT_TYPES.HVAC_INSTALLATION;
       }
-      return INTENT_TYPES.HVAC_SERVICE; // Default to HVAC for general estimates
+      // Default to HVAC installation for general estimates
+      return INTENT_TYPES.HVAC_INSTALLATION;
     }
     
-    return INTENT_TYPES.OTHER;
+    // HVAC system mentions without clear intent - default to service
+    if (/\b(furnace|boiler|ac|air condition|heat pump|mini split|hvac|heating|cooling|thermostat|ductwork)\b/.test(text)) {
+      return INTENT_TYPES.HVAC_SERVICE;
+    }
+    
+    // If nothing matched, return null to let AI classify naturally
+    return null;
   }
   
   // ============================================================================

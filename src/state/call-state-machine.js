@@ -17,7 +17,10 @@ const {
   AVAILABILITY,
   CONFIRMATION,
   CLOSE,
-  NEUTRAL
+  OUT_OF_SCOPE,
+  NEUTRAL,
+  ALLOWED_SERVICES,
+  DISALLOWED_SERVICES
 } = require('../scripts/rse-script');
 
 /**
@@ -153,6 +156,13 @@ function createCallStateMachine() {
           DETAILS.hvac_service.severity
         ];
         
+      case INTENT_TYPES.HVAC_INSTALLATION:
+        return [
+          DETAILS.hvac_installation.project_type,
+          DETAILS.hvac_installation.system_type,
+          DETAILS.hvac_installation.property_type
+        ];
+        
       case INTENT_TYPES.GENERATOR:
         if (data.details.generatorType === 'existing') {
           return [DETAILS.generator.existing_issue];
@@ -177,8 +187,9 @@ function createCallStateMachine() {
           DETAILS.existing_project.help
         ];
         
-      case INTENT_TYPES.OTHER:
-        return [DETAILS.other.clarify];
+      case INTENT_TYPES.OUT_OF_SCOPE:
+        // No detail questions for out-of-scope - will be handled specially
+        return [];
         
       default:
         return [];
@@ -291,6 +302,11 @@ function createCallStateMachine() {
         summary = `Calling about ${symptom}.`;
         break;
         
+      case INTENT_TYPES.HVAC_INSTALLATION:
+        const projectType = data.details.projectType || 'HVAC installation';
+        summary = `Looking for ${projectType}.`;
+        break;
+        
       case INTENT_TYPES.GENERATOR:
         if (data.details.generatorType === 'new') {
           summary = 'Looking for a new generator installation.';
@@ -307,8 +323,12 @@ function createCallStateMachine() {
         summary = 'Following up on an existing project.';
         break;
         
+      case INTENT_TYPES.OUT_OF_SCOPE:
+        summary = 'Out-of-scope request.';
+        break;
+        
       default:
-        summary = data.details.issueDescription || 'General inquiry.';
+        summary = 'General inquiry.';
     }
     
     data.situationSummary = summary;
@@ -348,6 +368,16 @@ function createCallStateMachine() {
         if (analysis.intent) {
           data.intent = analysis.intent;
           console.log(`📋 Intent: ${data.intent}`);
+          
+          // Handle out-of-scope requests (solar, electrical, plumbing, etc.)
+          if (data.intent === INTENT_TYPES.OUT_OF_SCOPE) {
+            console.log(`⚠️ Out-of-scope request detected`);
+            return {
+              nextState: transitionTo(STATES.CLOSE),
+              prompt: OUT_OF_SCOPE.general,
+              action: 'redirect_out_of_scope'
+            };
+          }
           
           if (needsSafetyCheck()) {
             return {
@@ -658,6 +688,14 @@ function createCallStateMachine() {
       } else if (currentQuestion === DETAILS.hvac_service.severity) {
         data.details.severity = text;
       }
+    } else if (data.intent === INTENT_TYPES.HVAC_INSTALLATION) {
+      if (currentQuestion === DETAILS.hvac_installation.project_type) {
+        data.details.projectType = text;
+      } else if (currentQuestion === DETAILS.hvac_installation.system_type) {
+        data.details.systemType = text;
+      } else if (currentQuestion === DETAILS.hvac_installation.property_type) {
+        data.details.propertyType = text;
+      }
     } else if (data.intent === INTENT_TYPES.GENERATOR) {
       if (currentQuestion === DETAILS.generator.existing_or_new) {
         data.details.generatorType = text.toLowerCase().includes('new') ? 'new' : 'existing';
@@ -682,8 +720,6 @@ function createCallStateMachine() {
       } else if (currentQuestion === DETAILS.existing_project.help) {
         data.details.helpNeeded = text;
       }
-    } else {
-      data.details.issueDescription = text;
     }
     
     console.log(`📋 Detail stored: ${text.substring(0, 50)}...`);
