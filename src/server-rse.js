@@ -126,6 +126,8 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   let greetingSilenceTimer = null;       // Timer for greeting silence fallback
   let awaitingFirstResponse = false;     // True after greeting, until user speaks
+  let greetingTimerStarted = false;      // Prevent multiple timers
+  let greetingResponseId = null;         // Track which response is the greeting
   
   // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
@@ -251,7 +253,15 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.created":
-        console.log(`🚀 Response started (id: ${event.response?.id})`);
+        const responseId = event.response?.id;
+        console.log(`🚀 Response started (id: ${responseId})`);
+        
+        // Track the greeting response ID
+        if (awaitingFirstResponse && !greetingResponseId) {
+          greetingResponseId = responseId;
+          console.log(`📌 Greeting response ID: ${responseId}`);
+        }
+        
         playBuffer = Buffer.alloc(0);
         responseInProgress = true;
         audioStreamingStarted = false;
@@ -286,17 +296,24 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.done":
+        const doneResponseId = event.response?.id;
         const status = event.response?.status;
+        
         if (status === "cancelled") {
-          console.log(`⚠️ Response CANCELLED`);
+          console.log(`⚠️ Response CANCELLED (id: ${doneResponseId})`);
         } else if (status === "incomplete") {
-          console.log(`⚠️ Response INCOMPLETE`);
+          console.log(`⚠️ Response INCOMPLETE (id: ${doneResponseId})`);
         } else {
-          console.log(`✅ Response complete (state: ${stateMachine.getState()})`);
+          console.log(`✅ Response complete (id: ${doneResponseId}, state: ${stateMachine.getState()})`);
           assistantTurnCount++;  // Track for filler spacing
           
-          // Start greeting silence fallback timer if we just finished the greeting
-          if (awaitingFirstResponse && stateMachine.getState() === STATES.GREETING) {
+          // Start greeting silence fallback timer ONLY:
+          // - If we're awaiting first response
+          // - If this is the greeting response (matching ID)
+          // - If we haven't already started a timer
+          const isGreetingResponse = doneResponseId === greetingResponseId;
+          if (awaitingFirstResponse && isGreetingResponse && !greetingTimerStarted) {
+            greetingTimerStarted = true;
             console.log(`⏱️ Starting ${SILENCE_CONFIG.greeting_fallback_ms}ms greeting silence timer`);
             greetingSilenceTimer = setTimeout(() => {
               if (awaitingFirstResponse) {
@@ -436,6 +453,7 @@ wss.on("connection", (twilioWs, req) => {
   function sendGreeting() {
     console.log("👋 Sending greeting");
     awaitingFirstResponse = true;  // Start watching for silence
+    greetingTimerStarted = false;  // Reset timer flag
     
     openaiWs.send(JSON.stringify({
       type: "response.create",
