@@ -72,13 +72,39 @@ const DETAILS = {
   },
   membership: {
     frequency: "Are you looking for monthly or yearly coverage?",
-    systems: "How many systems does the property have?",
-    pricing: "Our plans start around thirty dollars per month for one system. I can take your info and note what you're looking for."
+    systems: "How many systems or properties do you want covered?",
+    inclusions: "A team member can confirm all the details. Let me get your info so they can follow up."
   },
   existing_project: {
     site: "Which site is this for?",
     contact: "Who have you been working with at RSE?",
     help: "What do you need help with today?"
+  }
+};
+
+// ============================================================================
+// MEMBERSHIP PLANS - ACCURATE PRICING (do not invent other plans)
+// ============================================================================
+const MEMBERSHIP_PLANS = {
+  generator: {
+    name: "Generator Service Plan",
+    yearly: 275
+  },
+  home_comfort: {
+    monthly: {
+      one_unit: 31.25,
+      two_units: 42,
+      three_units: 50,
+      four_units: 58,
+      multiple_properties: 80
+    },
+    yearly: {
+      one_unit: 375,
+      two_units: 450,
+      three_units: 550,
+      four_units: 650,
+      multiple_properties: 900
+    }
   }
 };
 
@@ -292,9 +318,31 @@ ALLOWED SERVICES ONLY (never mention anything else):
    - Generator installation and sales
    - Only mention Cummins if caller brings it up first
 
-3. MEMBERSHIPS:
-   - Home Comfort Plans
-   - Maintenance memberships (around $30/month per system)
+3. MEMBERSHIPS (exact pricing - do not invent other plans):
+   
+   Generator Service Plan:
+   - $275/year
+   
+   Home Comfort Plans (MONTHLY):
+   - 1 unit: $31.25/month
+   - 2 units: $42/month
+   - 3 units: $50/month
+   - 4 units: $58/month
+   - Multiple properties: $80/month
+   
+   Home Comfort Plans (YEARLY):
+   - 1 unit: $375/year
+   - 2 units: $450/year
+   - 3 units: $550/year
+   - 4 units: $650/year
+   - Multiple properties: $900/year
+
+   MEMBERSHIP RULES:
+   - Only mention plans when caller asks about memberships, plans, pricing, or maintenance
+   - Present monthly vs yearly options, then ask how many systems/properties
+   - You do NOT sell plans, process payments, or enroll anyone
+   - Take name, phone, email, address, availability and pass to team
+   - If caller asks about inclusions, say: "A team member can confirm all the details."
 
 4. EXISTING PROJECTS:
    - Ongoing jobs already in progress with RSE
@@ -393,6 +441,7 @@ module.exports = {
   SAFETY,
   CALLER_INFO,
   DETAILS,
+  MEMBERSHIP_PLANS,
   ADDRESS,
   AVAILABILITY,
   CONFIRMATION,
