@@ -444,7 +444,7 @@ wss.on("connection", (twilioWs, req) => {
         instructions: `Greet the caller. Say exactly: "${GREETING.primary}"
 
 Speak at a normal conversational pace - not slow or formal. Use contractions. Sound natural and friendly, like a real person answering the phone.`,
-        max_output_tokens: 100
+        max_output_tokens: 300
       }
     }));
   }
@@ -468,7 +468,7 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
         instructions: `The caller hasn't responded. Say exactly: "${GREETING.silence_fallback}"
 
 Speak at a normal conversational pace. Sound helpful and inviting.`,
-        max_output_tokens: 100
+        max_output_tokens: 300
       }
     }));
   }
@@ -598,7 +598,7 @@ CRITICAL RULES:
 - Use contractions (what's, I'm, you're)  
 - Keep it to TWO sentences max: brief acknowledgement + the question
 - Sound natural, not robotic or scripted`,
-          max_output_tokens: 150
+          max_output_tokens: 300
         }
       }));
     } else if (responseInProgress) {
@@ -656,7 +656,7 @@ ${styleRules}`;
       response: {
         modalities: ["audio", "text"],
         instructions: instruction,
-        max_output_tokens: 200
+        max_output_tokens: 400
       }
     }));
   }
