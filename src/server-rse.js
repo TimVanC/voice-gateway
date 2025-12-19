@@ -122,6 +122,12 @@ wss.on("connection", (twilioWs, req) => {
   let currentSilenceDuration = VAD_CONFIG.silence_default;  // Dynamic silence
   
   // ============================================================================
+  // GREETING SILENCE FALLBACK
+  // ============================================================================
+  let greetingSilenceTimer = null;       // Timer for greeting silence fallback
+  let awaitingFirstResponse = false;     // True after greeting, until user speaks
+  
+  // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
   // ============================================================================
   function pumpFrames() {
@@ -288,6 +294,17 @@ wss.on("connection", (twilioWs, req) => {
         } else {
           console.log(`✅ Response complete (state: ${stateMachine.getState()})`);
           assistantTurnCount++;  // Track for filler spacing
+          
+          // Start greeting silence fallback timer if we just finished the greeting
+          if (awaitingFirstResponse && stateMachine.getState() === STATES.GREETING) {
+            console.log(`⏱️ Starting ${SILENCE_CONFIG.greeting_fallback_ms}ms greeting silence timer`);
+            greetingSilenceTimer = setTimeout(() => {
+              if (awaitingFirstResponse) {
+                console.log(`🔇 No response after greeting - sending fallback prompt`);
+                sendGreetingFallback();
+              }
+            }, SILENCE_CONFIG.greeting_fallback_ms);
+          }
         }
         responseInProgress = false;
         
@@ -299,6 +316,14 @@ wss.on("connection", (twilioWs, req) => {
         console.log("🎤 User speaking...");
         speechStartTime = Date.now();
         longSpeechBackchannelSent = false;
+        
+        // Cancel greeting silence timer - user is responding
+        if (greetingSilenceTimer) {
+          console.log("⏱️ Cancelled greeting silence timer - user speaking");
+          clearTimeout(greetingSilenceTimer);
+          greetingSilenceTimer = null;
+        }
+        awaitingFirstResponse = false;
         
         // AGGRESSIVE BARGE-IN: Immediately stop assistant audio
         if (playBuffer.length > 0 || responseInProgress) {
@@ -410,6 +435,7 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   function sendGreeting() {
     console.log("👋 Sending greeting");
+    awaitingFirstResponse = true;  // Start watching for silence
     
     openaiWs.send(JSON.stringify({
       type: "response.create",
@@ -418,6 +444,30 @@ wss.on("connection", (twilioWs, req) => {
         instructions: `Greet the caller. Say exactly: "${GREETING.primary}"
 
 Speak at a normal conversational pace - not slow or formal. Use contractions. Sound natural and friendly, like a real person answering the phone.`,
+        max_output_tokens: 100
+      }
+    }));
+  }
+  
+  // ============================================================================
+  // SEND GREETING FALLBACK (when no response after 4 seconds)
+  // ============================================================================
+  function sendGreetingFallback() {
+    if (responseInProgress) {
+      console.log("⏳ Response in progress, skipping greeting fallback");
+      return;
+    }
+    
+    awaitingFirstResponse = false;
+    console.log("📢 Sending greeting fallback");
+    
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        instructions: `The caller hasn't responded. Say exactly: "${GREETING.silence_fallback}"
+
+Speak at a normal conversational pace. Sound helpful and inviting.`,
         max_output_tokens: 100
       }
     }));
@@ -457,10 +507,14 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
       return;
     }
     
-    // Clear silence timer if still active
+    // Clear silence timers if still active
     if (silenceTimer) {
       clearTimeout(silenceTimer);
       silenceTimer = null;
+    }
+    if (greetingSilenceTimer) {
+      clearTimeout(greetingSilenceTimer);
+      greetingSilenceTimer = null;
     }
     
     const currentState = stateMachine.getState();
@@ -677,6 +731,7 @@ ${styleRules}`;
     if (paceTimer) clearInterval(paceTimer);
     if (keepAliveTimer) clearInterval(keepAliveTimer);
     if (silenceTimer) clearTimeout(silenceTimer);
+    if (greetingSilenceTimer) clearTimeout(greetingSilenceTimer);
     if (longSpeechTimer) clearTimeout(longSpeechTimer);
     backchannel.cancel();
     

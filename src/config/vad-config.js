@@ -51,9 +51,10 @@ const FILLER_CONFIG = {
   allowed: ["okay", "mm hm", "one sec"]
 };
 
-// Silence detection for greeting fallback (disabled)
+// Silence detection for greeting fallback
 const SILENCE_CONFIG = {
-  greeting_fallback_seconds: 2
+  // Time to wait after greeting before sending fallback prompt (ms)
+  greeting_fallback_ms: 4000
 };
 
 module.exports = {
