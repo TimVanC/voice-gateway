@@ -299,6 +299,9 @@ wss.on("connection", (twilioWs, req) => {
         
         // Reset dynamic silence to default after turn completes
         currentSilenceDuration = VAD_CONFIG.silence_default;
+        
+        // Process any user input that was queued while response was in progress
+        processPendingInput();
         break;
         
       case "input_audio_buffer.speech_started":
@@ -460,30 +463,46 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
   // ============================================================================
   // PROCESS USER INPUT THROUGH STATE MACHINE
   // ============================================================================
+  
+  // Queue for user input that arrives while response is in progress
+  let pendingUserInput = null;
+  
   function processUserInput(transcript) {
-    // Don't process if a response is already in progress
-    if (responseInProgress) {
-      console.log(`⏳ Skipping input processing - response in progress`);
-      return;
-    }
-    
     // Clear silence timer if still active
     if (silenceTimer) {
       clearTimeout(silenceTimer);
       silenceTimer = null;
     }
     
+    // If response in progress, queue this input for later
+    if (responseInProgress) {
+      console.log(`📥 Queuing input (response in progress): "${transcript.substring(0, 50)}..."`);
+      pendingUserInput = transcript;
+      return;
+    }
+    
+    doProcessUserInput(transcript);
+  }
+  
+  function doProcessUserInput(transcript) {
     const currentState = stateMachine.getState();
     const lowerTranscript = transcript.toLowerCase();
+    
+    console.log(`🔄 Processing input in state ${currentState}: "${transcript.substring(0, 50)}..."`);
     
     // Intent classification for greeting/intent states
     let analysis = {};
     if (currentState === STATES.GREETING || currentState === STATES.INTENT) {
       analysis.intent = classifyIntent(lowerTranscript);
+      if (analysis.intent) {
+        console.log(`📋 Detected intent: ${analysis.intent}`);
+      }
     }
     
     // Process through state machine
     const result = stateMachine.processInput(transcript, analysis);
+    
+    console.log(`📍 State machine result: nextState=${result.nextState}, action=${result.action}`);
     
     // Generate appropriate response based on state machine result
     if (result.prompt) {
@@ -494,6 +513,16 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     } else if (result.action === 'classify_intent' || result.action === 'answer_question' || result.action === 'handle_correction') {
       // Let the model generate a natural response
       sendNaturalResponse(transcript, result.action);
+    }
+  }
+  
+  // Process any pending input after response completes
+  function processPendingInput() {
+    if (pendingUserInput) {
+      console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
+      const input = pendingUserInput;
+      pendingUserInput = null;
+      doProcessUserInput(input);
     }
   }
   
