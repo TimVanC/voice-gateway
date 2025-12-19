@@ -15,7 +15,7 @@ const http = require("http");
 // IMPORTS
 // ============================================================================
 const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES } = require('./scripts/rse-script');
-const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG, SILENCE_CONFIG } = require('./config/vad-config');
+const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = require('./config/vad-config');
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 
@@ -122,12 +122,9 @@ wss.on("connection", (twilioWs, req) => {
   let currentSilenceDuration = VAD_CONFIG.silence_default;  // Dynamic silence
   
   // ============================================================================
-  // GREETING SILENCE FALLBACK
+  // GREETING STATE
   // ============================================================================
-  let greetingSilenceTimer = null;       // Timer for greeting silence fallback
-  let awaitingFirstResponse = false;     // True after greeting, until user speaks
-  let greetingTimerStarted = false;      // Prevent multiple timers
-  let greetingResponseId = null;         // Track which response is the greeting
+  let greetingSent = false;              // Track if greeting was sent
   
   // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
@@ -253,15 +250,7 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.created":
-        const responseId = event.response?.id;
-        console.log(`🚀 Response started (id: ${responseId})`);
-        
-        // Track the greeting response ID
-        if (awaitingFirstResponse && !greetingResponseId) {
-          greetingResponseId = responseId;
-          console.log(`📌 Greeting response ID: ${responseId}`);
-        }
-        
+        console.log(`🚀 Response started (id: ${event.response?.id})`);
         playBuffer = Buffer.alloc(0);
         responseInProgress = true;
         audioStreamingStarted = false;
@@ -296,32 +285,15 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.done":
-        const doneResponseId = event.response?.id;
         const status = event.response?.status;
         
         if (status === "cancelled") {
-          console.log(`⚠️ Response CANCELLED (id: ${doneResponseId})`);
+          console.log(`⚠️ Response CANCELLED`);
         } else if (status === "incomplete") {
-          console.log(`⚠️ Response INCOMPLETE (id: ${doneResponseId})`);
+          console.log(`⚠️ Response INCOMPLETE`);
         } else {
-          console.log(`✅ Response complete (id: ${doneResponseId}, state: ${stateMachine.getState()})`);
+          console.log(`✅ Response complete (state: ${stateMachine.getState()})`);
           assistantTurnCount++;  // Track for filler spacing
-          
-          // Start greeting silence fallback timer ONLY:
-          // - If we're awaiting first response
-          // - If this is the greeting response (matching ID)
-          // - If we haven't already started a timer
-          const isGreetingResponse = doneResponseId === greetingResponseId;
-          if (awaitingFirstResponse && isGreetingResponse && !greetingTimerStarted) {
-            greetingTimerStarted = true;
-            console.log(`⏱️ Starting ${SILENCE_CONFIG.greeting_fallback_ms}ms greeting silence timer`);
-            greetingSilenceTimer = setTimeout(() => {
-              if (awaitingFirstResponse) {
-                console.log(`🔇 No response after greeting - sending fallback prompt`);
-                sendGreetingFallback();
-              }
-            }, SILENCE_CONFIG.greeting_fallback_ms);
-          }
         }
         responseInProgress = false;
         
@@ -333,14 +305,6 @@ wss.on("connection", (twilioWs, req) => {
         console.log("🎤 User speaking...");
         speechStartTime = Date.now();
         longSpeechBackchannelSent = false;
-        
-        // Cancel greeting silence timer - user is responding
-        if (greetingSilenceTimer) {
-          console.log("⏱️ Cancelled greeting silence timer - user speaking");
-          clearTimeout(greetingSilenceTimer);
-          greetingSilenceTimer = null;
-        }
-        awaitingFirstResponse = false;
         
         // AGGRESSIVE BARGE-IN: Immediately stop assistant audio
         if (playBuffer.length > 0 || responseInProgress) {
@@ -452,8 +416,7 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   function sendGreeting() {
     console.log("👋 Sending greeting");
-    awaitingFirstResponse = true;  // Start watching for silence
-    greetingTimerStarted = false;  // Reset timer flag
+    greetingSent = true;
     
     openaiWs.send(JSON.stringify({
       type: "response.create",
@@ -462,30 +425,6 @@ wss.on("connection", (twilioWs, req) => {
         instructions: `Greet the caller. Say exactly: "${GREETING.primary}"
 
 Speak at a normal conversational pace - not slow or formal. Use contractions. Sound natural and friendly, like a real person answering the phone.`,
-        max_output_tokens: 300
-      }
-    }));
-  }
-  
-  // ============================================================================
-  // SEND GREETING FALLBACK (when no response after 4 seconds)
-  // ============================================================================
-  function sendGreetingFallback() {
-    if (responseInProgress) {
-      console.log("⏳ Response in progress, skipping greeting fallback");
-      return;
-    }
-    
-    awaitingFirstResponse = false;
-    console.log("📢 Sending greeting fallback");
-    
-    openaiWs.send(JSON.stringify({
-      type: "response.create",
-      response: {
-        modalities: ["audio", "text"],
-        instructions: `The caller hasn't responded. Say exactly: "${GREETING.silence_fallback}"
-
-Speak at a normal conversational pace. Sound helpful and inviting.`,
         max_output_tokens: 300
       }
     }));
@@ -525,14 +464,10 @@ Speak at a normal conversational pace. Sound helpful and inviting.`,
       return;
     }
     
-    // Clear silence timers if still active
+    // Clear silence timer if still active
     if (silenceTimer) {
       clearTimeout(silenceTimer);
       silenceTimer = null;
-    }
-    if (greetingSilenceTimer) {
-      clearTimeout(greetingSilenceTimer);
-      greetingSilenceTimer = null;
     }
     
     const currentState = stateMachine.getState();
@@ -749,7 +684,6 @@ ${styleRules}`;
     if (paceTimer) clearInterval(paceTimer);
     if (keepAliveTimer) clearInterval(keepAliveTimer);
     if (silenceTimer) clearTimeout(silenceTimer);
-    if (greetingSilenceTimer) clearTimeout(greetingSilenceTimer);
     if (longSpeechTimer) clearTimeout(longSpeechTimer);
     backchannel.cancel();
     
