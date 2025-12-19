@@ -286,23 +286,25 @@ wss.on("connection", (twilioWs, req) => {
         
       case "response.done":
         const status = event.response?.status;
+        const currentState = stateMachine.getState();
         
         if (status === "cancelled") {
           console.log(`⚠️ Response CANCELLED`);
         } else if (status === "incomplete") {
-          console.log(`⚠️ Response INCOMPLETE`);
+          console.log(`⚠️ Response INCOMPLETE - will retry if needed`);
+          // Response was cut off - send the appropriate prompt for current state
+          setTimeout(() => {
+            sendNextPromptIfNeeded();
+          }, 100);
         } else {
-          console.log(`✅ Response complete (state: ${stateMachine.getState()})`);
+          console.log(`✅ Response complete (state: ${currentState})`);
           assistantTurnCount++;  // Track for filler spacing
         }
         responseInProgress = false;
+        audioStreamingStarted = false;  // Reset for next response
         
         // Reset dynamic silence to default after turn completes
         currentSilenceDuration = VAD_CONFIG.silence_default;
-        
-        // DON'T process pending input here - let OpenAI's next response handle it
-        // We were causing overlapping responses by triggering our own while OpenAI 
-        // was already generating one from VAD
         break;
         
       case "input_audio_buffer.speech_started":
@@ -468,15 +470,6 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
   // Track if we've already processed this turn's input
   let lastProcessedTranscript = null;
   
-  // Cancel any in-progress OpenAI response
-  function cancelCurrentResponse() {
-    if (openaiWs?.readyState === WebSocket.OPEN && responseInProgress) {
-      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-      console.log(`🛑 Cancelling OpenAI auto-response to take control`);
-      responseInProgress = false;
-    }
-  }
-  
   function processUserInput(transcript) {
     // Clear silence timer if still active
     if (silenceTimer) {
@@ -491,13 +484,63 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     }
     lastProcessedTranscript = transcript;
     
-    // Cancel OpenAI's auto-generated response so we can control the conversation
-    cancelCurrentResponse();
+    // If OpenAI is already speaking (audio streaming), let it finish
+    // We'll just update our state machine without sending a new response
+    if (audioStreamingStarted && responseInProgress) {
+      console.log(`🎵 Audio already streaming - updating state only, no new response`);
+      updateStateOnly(transcript);
+      return;
+    }
     
-    // Small delay to ensure cancel is processed before we send new response
+    // If response just started but no audio yet, we can safely cancel and take over
+    if (responseInProgress && !audioStreamingStarted) {
+      console.log(`🛑 Cancelling OpenAI auto-response (no audio yet)`);
+      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+      responseInProgress = false;
+    }
+    
+    // Small delay to ensure cancel is processed
     setTimeout(() => {
       doProcessUserInput(transcript);
     }, 50);
+  }
+  
+  // Update state machine without sending a new response
+  // (used when OpenAI is already speaking)
+  function updateStateOnly(transcript) {
+    const currentState = stateMachine.getState();
+    const lowerTranscript = transcript.toLowerCase();
+    
+    console.log(`📊 State update only (no response): ${currentState}`);
+    
+    // Intent classification for greeting/intent states
+    let analysis = {};
+    if (currentState === STATES.GREETING || currentState === STATES.INTENT) {
+      analysis.intent = classifyIntent(lowerTranscript);
+      if (analysis.intent) {
+        console.log(`📋 Detected intent: ${analysis.intent}`);
+      }
+    }
+    
+    // Process through state machine to update state
+    const result = stateMachine.processInput(transcript, analysis);
+    console.log(`📍 State updated to: ${result.nextState}`);
+    
+    // Don't send a response - let OpenAI's current response finish
+  }
+  
+  // Send the next prompt based on current state (used for recovery)
+  function sendNextPromptIfNeeded() {
+    if (responseInProgress) {
+      console.log(`⏳ Skipping recovery prompt - response in progress`);
+      return;
+    }
+    
+    const prompt = stateMachine.getNextPrompt();
+    if (prompt) {
+      console.log(`🔄 Recovery: sending prompt for state ${stateMachine.getState()}`);
+      sendStatePrompt(prompt);
+    }
   }
   
   function doProcessUserInput(transcript) {
