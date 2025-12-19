@@ -3,6 +3,11 @@
  * 
  * INTAKE-ONLY: Collects info and situation details. No scheduling.
  * States: greeting → intent → safety_check → name → phone → email → details_branch → address → availability → confirmation → close
+ * 
+ * CONFIDENCE-BASED CLARIFICATION:
+ * - High confidence: Accept silently
+ * - Medium confidence: Confirm explicitly
+ * - Low confidence: Ask to repeat or spell
  */
 
 const { 
@@ -22,6 +27,19 @@ const {
   ALLOWED_SERVICES,
   DISALLOWED_SERVICES
 } = require('../scripts/rse-script');
+
+const {
+  CONFIDENCE,
+  estimateFirstNameConfidence,
+  estimateLastNameConfidence,
+  estimatePhoneConfidence,
+  estimateEmailConfidence,
+  estimateAddressConfidence,
+  estimateCityConfidence,
+  estimateZipConfidence,
+  getClarificationPrompt,
+  cleanTranscript
+} = require('../utils/confidence-estimator');
 
 /**
  * Create a new call state manager
@@ -78,6 +96,14 @@ function createCallStateMachine() {
   let detailsQuestionIndex = 0;
   let silenceAfterGreeting = false;
   let confirmationAttempts = 0;
+  
+  // Confidence-based clarification tracking
+  let pendingClarification = {
+    field: null,           // Which field needs clarification
+    value: null,           // The value we heard
+    confidence: null,      // Confidence result
+    awaitingConfirmation: false  // Are we waiting for yes/no?
+  };
   
   /**
    * Get the next prompt based on current state and data
@@ -417,11 +443,62 @@ function createCallStateMachine() {
         };
         
       case STATES.NAME:
+        // Handle clarification confirmation
+        if (pendingClarification.field === 'name' && pendingClarification.awaitingConfirmation) {
+          if (isConfirmation(lowerTranscript)) {
+            // User confirmed - accept the value
+            data.firstName = pendingClarification.value.firstName;
+            data.lastName = pendingClarification.value.lastName;
+            console.log(`✅ Name confirmed: ${data.firstName} ${data.lastName}`);
+            clearPendingClarification();
+            return {
+              nextState: transitionTo(STATES.PHONE),
+              prompt: CALLER_INFO.phone,
+              action: 'ask'
+            };
+          } else {
+            // User said no or gave new name - treat as new input
+            clearPendingClarification();
+          }
+        }
+        
         if (transcript.length > 0) {
           const { firstName, lastName } = extractName(transcript);
+          
+          // Check confidence for first name
+          const firstNameConf = estimateFirstNameConfidence(firstName || transcript);
+          const lastNameConf = lastName ? estimateLastNameConfidence(lastName) : { level: CONFIDENCE.HIGH };
+          
+          // Use the lower confidence level
+          const overallConf = getLowestConfidence(firstNameConf, lastNameConf);
+          
+          console.log(`📋 Name: ${firstName} ${lastName} (confidence: ${overallConf.level})`);
+          
+          if (overallConf.level === CONFIDENCE.LOW) {
+            // Ask to repeat
+            return {
+              nextState: currentState,
+              prompt: "I didn't catch that clearly. Could you repeat your first and last name?",
+              action: 'ask'
+            };
+          } else if (overallConf.level === CONFIDENCE.MEDIUM || (lastName && lastName.length > 8)) {
+            // Store pending and ask for confirmation
+            pendingClarification = {
+              field: 'name',
+              value: { firstName, lastName },
+              confidence: overallConf,
+              awaitingConfirmation: true
+            };
+            return {
+              nextState: currentState,
+              prompt: `I heard ${firstName} ${lastName}. Is that correct?`,
+              action: 'ask'
+            };
+          }
+          
+          // High confidence - accept silently
           data.firstName = firstName;
           data.lastName = lastName;
-          console.log(`📋 Name: ${data.firstName} ${data.lastName}`);
           return {
             nextState: transitionTo(STATES.PHONE),
             prompt: CALLER_INFO.phone,
@@ -435,12 +512,56 @@ function createCallStateMachine() {
         };
         
       case STATES.PHONE:
+        // Handle clarification confirmation
+        if (pendingClarification.field === 'phone' && pendingClarification.awaitingConfirmation) {
+          if (isConfirmation(lowerTranscript)) {
+            data.phone = pendingClarification.value;
+            console.log(`✅ Phone confirmed: ${data.phone}`);
+            clearPendingClarification();
+            return {
+              nextState: transitionTo(STATES.EMAIL),
+              prompt: CALLER_INFO.email.primary,
+              action: 'ask'
+            };
+          } else {
+            clearPendingClarification();
+          }
+        }
+        
         if (hasPhoneNumber(lowerTranscript)) {
-          data.phone = extractPhone(transcript);
-          console.log(`📋 Phone: ${data.phone}`);
+          const phone = extractPhone(transcript);
+          const phoneConf = estimatePhoneConfidence(transcript);
+          
+          console.log(`📋 Phone: ${phone} (confidence: ${phoneConf.level})`);
+          
+          if (phoneConf.level === CONFIDENCE.LOW) {
+            return {
+              nextState: currentState,
+              prompt: "I may have missed a digit. Could you repeat the phone number slowly?",
+              action: 'ask'
+            };
+          } else if (phoneConf.level === CONFIDENCE.MEDIUM) {
+            // Always read back phone numbers for confirmation
+            const formatted = formatPhoneForConfirmation(phone);
+            pendingClarification = {
+              field: 'phone',
+              value: phone,
+              confidence: phoneConf,
+              awaitingConfirmation: true
+            };
+            return {
+              nextState: currentState,
+              prompt: `I have ${formatted}. Is that correct?`,
+              action: 'ask'
+            };
+          }
+          
+          // High confidence - still read back phone for verification
+          const formatted = formatPhoneForConfirmation(phone);
+          data.phone = phone;
           return {
             nextState: transitionTo(STATES.EMAIL),
-            prompt: CALLER_INFO.email.primary,
+            prompt: `Got it, ${formatted}. ${CALLER_INFO.email.primary}`,
             action: 'ask'
           };
         }
@@ -451,13 +572,66 @@ function createCallStateMachine() {
         };
         
       case STATES.EMAIL:
-        if (hasEmail(lowerTranscript) || isEmailDeclined(lowerTranscript)) {
-          if (!isEmailDeclined(lowerTranscript)) {
-            data.email = extractEmail(transcript);
-            console.log(`📋 Email: ${data.email}`);
+        // Handle clarification confirmation
+        if (pendingClarification.field === 'email' && pendingClarification.awaitingConfirmation) {
+          if (isConfirmation(lowerTranscript)) {
+            data.email = pendingClarification.value;
+            console.log(`✅ Email confirmed: ${data.email}`);
+            clearPendingClarification();
+            return {
+              nextState: transitionTo(STATES.DETAILS_BRANCH),
+              prompt: getDetailsPrompt(),
+              action: 'ask'
+            };
           } else {
-            console.log(`📋 Email: declined`);
+            clearPendingClarification();
+            // Ask them to spell it
+            return {
+              nextState: currentState,
+              prompt: "Could you spell out the email address for me?",
+              action: 'ask'
+            };
           }
+        }
+        
+        if (hasEmail(lowerTranscript) || isEmailDeclined(lowerTranscript)) {
+          if (isEmailDeclined(lowerTranscript)) {
+            console.log(`📋 Email: declined`);
+            return {
+              nextState: transitionTo(STATES.DETAILS_BRANCH),
+              prompt: getDetailsPrompt(),
+              action: 'ask'
+            };
+          }
+          
+          const email = extractEmail(transcript);
+          const emailConf = estimateEmailConfidence(transcript);
+          
+          console.log(`📋 Email: ${email} (confidence: ${emailConf.level})`);
+          
+          if (emailConf.level === CONFIDENCE.LOW) {
+            return {
+              nextState: currentState,
+              prompt: "Could you spell out the email address for me?",
+              action: 'ask'
+            };
+          } else if (emailConf.level === CONFIDENCE.MEDIUM) {
+            const formatted = formatEmailForConfirmation(email);
+            pendingClarification = {
+              field: 'email',
+              value: email,
+              confidence: emailConf,
+              awaitingConfirmation: true
+            };
+            return {
+              nextState: currentState,
+              prompt: `I have ${formatted}. Is that right?`,
+              action: 'ask'
+            };
+          }
+          
+          // High confidence
+          data.email = email;
           return {
             nextState: transitionTo(STATES.DETAILS_BRANCH),
             prompt: getDetailsPrompt(),
@@ -490,12 +664,72 @@ function createCallStateMachine() {
         };
         
       case STATES.ADDRESS:
+        // Handle clarification confirmation
+        if (pendingClarification.field === 'address' && pendingClarification.awaitingConfirmation) {
+          if (isConfirmation(lowerTranscript)) {
+            data.address = pendingClarification.value.address;
+            data.city = pendingClarification.value.city;
+            data.zip = pendingClarification.value.zip;
+            console.log(`✅ Address confirmed: ${data.address}`);
+            clearPendingClarification();
+            return {
+              nextState: transitionTo(STATES.AVAILABILITY),
+              prompt: AVAILABILITY.ask,
+              action: 'ask'
+            };
+          } else {
+            clearPendingClarification();
+          }
+        }
+        
         if (transcript.length > 2) {
           const addressParts = extractAddress(transcript);
+          
+          // Check confidence for each part
+          const addressConf = estimateAddressConfidence(addressParts.address || transcript);
+          const cityConf = addressParts.city ? estimateCityConfidence(addressParts.city) : { level: CONFIDENCE.HIGH };
+          const zipConf = addressParts.zip ? estimateZipConfidence(addressParts.zip) : { level: CONFIDENCE.HIGH };
+          
+          const overallConf = getLowestConfidence(addressConf, cityConf, zipConf);
+          
+          console.log(`📋 Address: ${addressParts.address} (confidence: ${overallConf.level})`);
+          
+          if (overallConf.level === CONFIDENCE.LOW) {
+            // Determine which part needs clarification
+            if (zipConf.level === CONFIDENCE.LOW) {
+              return {
+                nextState: currentState,
+                prompt: "Could you repeat the zip code?",
+                action: 'ask'
+              };
+            }
+            return {
+              nextState: currentState,
+              prompt: "I didn't catch that clearly. Could you repeat the street address?",
+              action: 'ask'
+            };
+          } else if (overallConf.level === CONFIDENCE.MEDIUM) {
+            pendingClarification = {
+              field: 'address',
+              value: addressParts,
+              confidence: overallConf,
+              awaitingConfirmation: true
+            };
+            let confirmPrompt = `I heard ${addressParts.address}`;
+            if (addressParts.city) confirmPrompt += `, ${addressParts.city}`;
+            if (addressParts.zip) confirmPrompt += `, ${addressParts.zip}`;
+            confirmPrompt += `. Is that correct?`;
+            return {
+              nextState: currentState,
+              prompt: confirmPrompt,
+              action: 'ask'
+            };
+          }
+          
+          // High confidence
           data.address = addressParts.address;
           data.city = addressParts.city;
           data.zip = addressParts.zip;
-          console.log(`📋 Address: ${data.address}`);
           return {
             nextState: transitionTo(STATES.AVAILABILITY),
             prompt: AVAILABILITY.ask,
@@ -622,6 +856,46 @@ function createCallStateMachine() {
       firstName: name,
       lastName: ''
     };
+  }
+  
+  // ============================================================================
+  // CONFIDENCE HELPERS
+  // ============================================================================
+  
+  function clearPendingClarification() {
+    pendingClarification = {
+      field: null,
+      value: null,
+      confidence: null,
+      awaitingConfirmation: false
+    };
+  }
+  
+  function getLowestConfidence(...confidences) {
+    const levels = { low: 0, medium: 1, high: 2 };
+    let lowest = { level: CONFIDENCE.HIGH };
+    
+    for (const conf of confidences) {
+      if (conf && levels[conf.level] < levels[lowest.level]) {
+        lowest = conf;
+      }
+    }
+    return lowest;
+  }
+  
+  function formatPhoneForConfirmation(phone) {
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length >= 10) {
+      const last10 = digits.slice(-10);
+      return `${last10.slice(0,3)}, ${last10.slice(3,6)}, ${last10.slice(6)}`;
+    }
+    return phone;
+  }
+  
+  function formatEmailForConfirmation(email) {
+    return email
+      .replace(/@/g, ' at ')
+      .replace(/\./g, ' dot ');
   }
   
   function hasPhoneNumber(text) {
