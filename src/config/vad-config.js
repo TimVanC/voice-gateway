@@ -4,15 +4,15 @@
  */
 
 const VAD_CONFIG = {
-  // Default settings
-  threshold: 0.6,
-  prefix_padding_ms: 350,
-  silence_duration_ms: 625,
+  // Default settings - INCREASED to reduce phantom speech detection
+  threshold: 0.7,           // Higher = less sensitive to background noise (was 0.6)
+  prefix_padding_ms: 400,   // More padding before speech triggers (was 350)
+  silence_duration_ms: 650, // Slightly longer to confirm speech ended (was 625)
   
   // Dynamic silence adjustments
   silence_short: 550,   // When caller clearly finishes a thought
   silence_long: 700,    // When caller pauses mid-thought
-  silence_default: 625  // Reset value after turn completes
+  silence_default: 650  // Reset value after turn completes
 };
 
 // Backchannel timing configuration
