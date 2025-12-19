@@ -300,8 +300,9 @@ wss.on("connection", (twilioWs, req) => {
         // Reset dynamic silence to default after turn completes
         currentSilenceDuration = VAD_CONFIG.silence_default;
         
-        // Process any user input that was queued while response was in progress
-        processPendingInput();
+        // DON'T process pending input here - let OpenAI's next response handle it
+        // We were causing overlapping responses by triggering our own while OpenAI 
+        // was already generating one from VAD
         break;
         
       case "input_audio_buffer.speech_started":
@@ -464,8 +465,17 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
   // PROCESS USER INPUT THROUGH STATE MACHINE
   // ============================================================================
   
-  // Queue for user input that arrives while response is in progress
-  let pendingUserInput = null;
+  // Track if we've already processed this turn's input
+  let lastProcessedTranscript = null;
+  
+  // Cancel any in-progress OpenAI response
+  function cancelCurrentResponse() {
+    if (openaiWs?.readyState === WebSocket.OPEN && responseInProgress) {
+      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+      console.log(`🛑 Cancelling OpenAI auto-response to take control`);
+      responseInProgress = false;
+    }
+  }
   
   function processUserInput(transcript) {
     // Clear silence timer if still active
@@ -474,14 +484,20 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
       silenceTimer = null;
     }
     
-    // If response in progress, queue this input for later
-    if (responseInProgress) {
-      console.log(`📥 Queuing input (response in progress): "${transcript.substring(0, 50)}..."`);
-      pendingUserInput = transcript;
+    // Avoid processing the same transcript twice
+    if (transcript === lastProcessedTranscript) {
+      console.log(`⏭️ Skipping duplicate transcript`);
       return;
     }
+    lastProcessedTranscript = transcript;
     
-    doProcessUserInput(transcript);
+    // Cancel OpenAI's auto-generated response so we can control the conversation
+    cancelCurrentResponse();
+    
+    // Small delay to ensure cancel is processed before we send new response
+    setTimeout(() => {
+      doProcessUserInput(transcript);
+    }, 50);
   }
   
   function doProcessUserInput(transcript) {
@@ -513,16 +529,6 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     } else if (result.action === 'classify_intent' || result.action === 'answer_question' || result.action === 'handle_correction') {
       // Let the model generate a natural response
       sendNaturalResponse(transcript, result.action);
-    }
-  }
-  
-  // Process any pending input after response completes
-  function processPendingInput() {
-    if (pendingUserInput) {
-      console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
-      const input = pendingUserInput;
-      pendingUserInput = null;
-      doProcessUserInput(input);
     }
   }
   
