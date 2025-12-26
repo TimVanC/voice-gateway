@@ -590,12 +590,13 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
   function updateStateOnly(transcript) {
     const currentState = stateMachine.getState();
     const lowerTranscript = transcript.toLowerCase();
+    const currentData = stateMachine.getData();
     
     console.log(`📊 State update only (no response): ${currentState}`);
     
-    // Intent classification for greeting/intent states
+    // Intent classification - only if intent is NOT already locked
     let analysis = {};
-    if (currentState === STATES.GREETING || currentState === STATES.INTENT) {
+    if ((currentState === STATES.GREETING || currentState === STATES.INTENT) && !currentData.intent) {
       analysis.intent = classifyIntent(lowerTranscript);
       if (analysis.intent) {
         console.log(`📋 Detected intent: ${analysis.intent}`);
@@ -626,16 +627,19 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
   function doProcessUserInput(transcript) {
     const currentState = stateMachine.getState();
     const lowerTranscript = transcript.toLowerCase();
+    const currentData = stateMachine.getData();
     
     console.log(`🔄 Processing input in state ${currentState}: "${transcript.substring(0, 50)}..."`);
     
-    // Intent classification for greeting/intent states
+    // Intent classification - only if intent is NOT already locked
     let analysis = {};
-    if (currentState === STATES.GREETING || currentState === STATES.INTENT) {
+    if ((currentState === STATES.GREETING || currentState === STATES.INTENT) && !currentData.intent) {
       analysis.intent = classifyIntent(lowerTranscript);
       if (analysis.intent) {
         console.log(`📋 Detected intent: ${analysis.intent}`);
       }
+    } else if (currentData.intent) {
+      console.log(`📋 Intent already locked: ${currentData.intent} - skipping classification`);
     }
     
     // Process through state machine
@@ -740,13 +744,29 @@ Sound polite and helpful, not dismissive.`,
       return INTENT_TYPES.HVAC_INSTALLATION;
     }
     
-    // Service/repair keywords (HVAC) - only for actual problems
-    if (/\b(repair|fix|broken|not working|service call|problem|issue|no heat|no cool|noise|leak|frozen|won't start|stopped working|maintenance)\b/.test(text)) {
+    // Service/repair keywords (HVAC) - HIGH CONFIDENCE patterns
+    // These should immediately lock intent as HVAC_SERVICE
+    if (/\b(repair|fix|broken|not working|isn't working|isnt working|won't work|wont work|doesn't work|doesnt work)\b/.test(text)) {
+      return INTENT_TYPES.HVAC_SERVICE;
+    }
+    if (/\b(service call|problem|issue|no heat|no cool|no cooling|no heating|not heating|not cooling)\b/.test(text)) {
+      return INTENT_TYPES.HVAC_SERVICE;
+    }
+    if (/\b(noise|leak|leaking|frozen|won't start|wont start|stopped working|not running|won't turn on|wont turn on)\b/.test(text)) {
+      return INTENT_TYPES.HVAC_SERVICE;
+    }
+    if (/\b(heat.{0,10}(not|isn't|isnt|won't|wont|doesn't|doesnt))|((not|isn't|isnt|won't|wont).{0,10}heat)\b/i.test(text)) {
+      return INTENT_TYPES.HVAC_SERVICE;
+    }
+    if (/\b(ac.{0,10}(not|isn't|isnt|won't|wont|doesn't|doesnt))|((not|isn't|isnt|won't|wont).{0,10}(ac|air condition))\b/i.test(text)) {
+      return INTENT_TYPES.HVAC_SERVICE;
+    }
+    if (/\b(blowing.{0,15}(cold|warm|lukewarm|hot))\b/i.test(text)) {
       return INTENT_TYPES.HVAC_SERVICE;
     }
     
-    // Membership keywords
-    if (/\b(membership|member|plan|home comfort|tune up|annual service|monthly plan)\b/.test(text)) {
+    // Membership keywords - HIGH CONFIDENCE patterns
+    if (/\b(membership|member|maintenance plan|home comfort plan|service plan|annual coverage|monthly coverage|tune up plan)\b/.test(text)) {
       return INTENT_TYPES.MEMBERSHIP;
     }
     

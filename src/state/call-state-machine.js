@@ -384,6 +384,38 @@ function createCallStateMachine() {
     
     switch (currentState) {
       case STATES.GREETING:
+        // If intent was detected from the greeting, lock it immediately
+        if (analysis.intent) {
+          data.intent = analysis.intent;
+          console.log(`📋 Intent LOCKED from greeting: ${data.intent}`);
+          
+          // Handle out-of-scope immediately
+          if (data.intent === INTENT_TYPES.OUT_OF_SCOPE) {
+            console.log(`⚠️ Out-of-scope request detected`);
+            return {
+              nextState: transitionTo(STATES.CLOSE),
+              prompt: OUT_OF_SCOPE.general,
+              action: 'redirect_out_of_scope'
+            };
+          }
+          
+          // Advance directly to next state based on intent
+          if (needsSafetyCheck()) {
+            return {
+              nextState: transitionTo(STATES.SAFETY_CHECK),
+              prompt: SAFETY.check,
+              action: 'ask'
+            };
+          }
+          
+          return {
+            nextState: transitionTo(STATES.NAME),
+            prompt: CALLER_INFO.name,
+            action: 'ask'
+          };
+        }
+        
+        // No intent detected - go to INTENT state to ask
         return { 
           nextState: transitionTo(STATES.INTENT),
           prompt: null,
@@ -391,9 +423,29 @@ function createCallStateMachine() {
         };
         
       case STATES.INTENT:
+        // GUARDRAIL: If intent is already locked, advance immediately
+        if (data.intent) {
+          console.log(`📋 Intent already locked: ${data.intent} - advancing`);
+          
+          if (needsSafetyCheck()) {
+            return {
+              nextState: transitionTo(STATES.SAFETY_CHECK),
+              prompt: SAFETY.check,
+              action: 'ask'
+            };
+          }
+          
+          return {
+            nextState: transitionTo(STATES.NAME),
+            prompt: CALLER_INFO.name,
+            action: 'ask'
+          };
+        }
+        
+        // Try to classify intent from this turn
         if (analysis.intent) {
           data.intent = analysis.intent;
-          console.log(`📋 Intent: ${data.intent}`);
+          console.log(`📋 Intent LOCKED: ${data.intent}`);
           
           // Handle out-of-scope requests (solar, electrical, plumbing, etc.)
           if (data.intent === INTENT_TYPES.OUT_OF_SCOPE) {
@@ -420,6 +472,7 @@ function createCallStateMachine() {
           };
         }
         
+        // No intent detected yet - ask for clarification
         return {
           nextState: currentState,
           prompt: INTENT_PROMPTS.unclear,
