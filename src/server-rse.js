@@ -129,6 +129,12 @@ wss.on("connection", (twilioWs, req) => {
   let greetingSent = false;              // Track if greeting was sent
   
   // ============================================================================
+  // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
+  // ============================================================================
+  let silenceRecoveryTimer = null;       // Timer to recover from stuck state
+  const SILENCE_RECOVERY_MS = 8000;      // Wait 8 seconds before prompting
+  
+  // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
   // ============================================================================
   function pumpFrames() {
@@ -261,6 +267,9 @@ wss.on("connection", (twilioWs, req) => {
         
         // Cancel backchannel timer - real response is coming
         backchannel.cancel();
+        
+        // Clear silence recovery timer - we're responding
+        clearSilenceRecoveryTimer();
         break;
         
       case "response.audio.delta":
@@ -300,18 +309,18 @@ wss.on("connection", (twilioWs, req) => {
           // Either waiting for transcription, or user barged in
         } else if (status === "incomplete") {
           console.log(`⚠️ Response INCOMPLETE`);
-          // NOTE: Do NOT auto-retry here! The AI was already speaking and will
-          // assume context from its incomplete response. The user will respond
-          // to what they heard, and we'll handle it naturally. Only retry if
-          // no audio was sent at all.
           if (!audioStreamingStarted) {
+            // No audio was sent at all - retry immediately
             console.log(`🔄 No audio was sent - will retry prompt`);
             setTimeout(() => {
               sendNextPromptIfNeeded();
             }, 100);
+          } else {
+            // Audio was sent (user heard something) - start a recovery timer
+            // If the user doesn't respond within 8 seconds, gently prompt them
+            console.log(`⏰ Starting 8s silence recovery timer`);
+            startSilenceRecoveryTimer();
           }
-          // If audio was streaming (user heard something), don't retry
-          // The user will respond and we'll handle it
         } else {
           console.log(`✅ Response complete (state: ${currentState})`);
           assistantTurnCount++;  // Track for filler spacing
@@ -338,6 +347,9 @@ wss.on("connection", (twilioWs, req) => {
         
         // Clear any pending input - we'll get a fresh transcript
         pendingUserInput = null;
+        
+        // Clear silence recovery timer - user is responding!
+        clearSilenceRecoveryTimer();
         
         // Reset acknowledgement tracking for new user turn
         backchannel.resetTurn();
@@ -451,6 +463,48 @@ wss.on("connection", (twilioWs, req) => {
         if (!ignoredEvents.includes(event.type)) {
           console.log(`📨 OpenAI event: ${event.type}`);
         }
+    }
+  }
+  
+  // ============================================================================
+  // SILENCE RECOVERY TIMER
+  // ============================================================================
+  function startSilenceRecoveryTimer() {
+    // Clear any existing timer
+    if (silenceRecoveryTimer) {
+      clearTimeout(silenceRecoveryTimer);
+    }
+    
+    silenceRecoveryTimer = setTimeout(() => {
+      silenceRecoveryTimer = null;
+      
+      // Only prompt if we're not already in a response and user isn't speaking
+      if (!responseInProgress && !speechStartTime) {
+        console.log(`⏰ Silence recovery: no user response after ${SILENCE_RECOVERY_MS}ms`);
+        
+        // Send a gentle "are you there?" prompt followed by repeating the current question
+        const currentPrompt = stateMachine.getNextPrompt();
+        if (currentPrompt && openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: `The caller may not have heard you or might be thinking. 
+Say briefly: "Are you still there?" 
+Then if no response comes, gently repeat the question.
+Keep it natural and patient.`,
+              max_output_tokens: 200
+            }
+          }));
+        }
+      }
+    }, SILENCE_RECOVERY_MS);
+  }
+  
+  function clearSilenceRecoveryTimer() {
+    if (silenceRecoveryTimer) {
+      clearTimeout(silenceRecoveryTimer);
+      silenceRecoveryTimer = null;
     }
   }
   
@@ -904,6 +958,7 @@ Keep it SHORT.`;
     if (keepAliveTimer) clearInterval(keepAliveTimer);
     if (silenceTimer) clearTimeout(silenceTimer);
     if (longSpeechTimer) clearTimeout(longSpeechTimer);
+    clearSilenceRecoveryTimer();
     backchannel.cancel();
     
     if (openaiWs?.readyState === WebSocket.OPEN) {
