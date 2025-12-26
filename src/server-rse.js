@@ -132,7 +132,7 @@ wss.on("connection", (twilioWs, req) => {
   // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
   // ============================================================================
   let silenceRecoveryTimer = null;       // Timer to recover from stuck state
-  const SILENCE_RECOVERY_MS = 12000;     // Wait 12 seconds before prompting (was 8, too aggressive)
+  const SILENCE_RECOVERY_MS = 6000;      // Wait 6 seconds before prompting
   
   // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
@@ -482,14 +482,40 @@ wss.on("connection", (twilioWs, req) => {
       if (!responseInProgress && !speechStartTime) {
         console.log(`⏰ Silence recovery: no user response after ${SILENCE_RECOVERY_MS}ms`);
         
-        // Just repeat the current prompt - don't ask "are you still there"
+        // Re-send the current prompt with FRESH context
         const currentPrompt = stateMachine.getNextPrompt();
         if (currentPrompt && openaiWs?.readyState === WebSocket.OPEN) {
-          // Simply re-send the current state's prompt
-          sendStatePrompt(currentPrompt);
+          // Use special recovery prompt that forces complete re-statement
+          sendRecoveryPrompt(currentPrompt);
         }
       }
     }, SILENCE_RECOVERY_MS);
+  }
+  
+  // ============================================================================
+  // SEND RECOVERY PROMPT (forces complete re-statement, ignores previous)
+  // ============================================================================
+  function sendRecoveryPrompt(prompt) {
+    if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
+      console.log(`🔄 Recovery prompt: "${prompt}"`);
+      
+      openaiWs.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: `IMPORTANT: Your previous response may have been cut off. 
+The caller may not have heard you clearly.
+
+Say this COMPLETE sentence FROM THE BEGINNING:
+"${prompt}"
+
+DO NOT continue from where you left off.
+DO NOT say partial sentences.
+Say the ENTIRE sentence above, word for word.`,
+          max_output_tokens: 200
+        }
+      }));
+    }
   }
   
   function clearSilenceRecoveryTimer() {
