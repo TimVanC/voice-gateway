@@ -926,10 +926,24 @@ function createCallStateMachine() {
   }
   
   /**
-   * Check if text looks like an actual name (not a phrase/question)
+   * Check if text looks like an actual name (not a phrase/question/number)
    */
   function looksLikeName(text) {
     if (!text || text.length < 2) return false;
+    
+    const lowerText = text.toLowerCase().trim();
+    
+    // Reject if it's just punctuation or empty
+    if (/^[,.\s!?]+$/.test(text)) return false;
+    
+    // Reject if it contains numbers (likely a phone, address, etc.)
+    if (/\d{3,}/.test(text)) return false;
+    
+    // Reject if it looks like an address (has street indicators)
+    if (/\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd)\b/i.test(text)) return false;
+    
+    // Reject if it looks like a time/duration
+    if (/\b(year|years|month|months|week|weeks|day|days|hour|hours|minute|minutes|second|seconds|ago|old)\b/i.test(text)) return false;
     
     // Things that are definitely NOT names
     const notNames = [
@@ -939,29 +953,27 @@ function createCallStateMachine() {
       'the', 'this', 'that', 'is', 'are', 'was', 'were',
       'go', 'back', 'before', 'after', 'question', 'asked',
       'can', 'could', 'would', 'should', 'did', 'do', 'don\'t',
-      'i', 'you', 'me', 'my', 'your'
+      'i', 'you', 'me', 'my', 'your', 'it', 'would', 'be', 'it\'s',
+      'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'
     ];
-    
-    const lowerText = text.toLowerCase();
     
     // Check if it's just one of these words
     if (notNames.includes(lowerText)) return false;
     
     // Check if it starts with one of these words (likely a phrase, not a name)
-    for (const word of ['excuse', 'what', 'wait', 'hold', 'can', 'could', 'did', 'go', 'sorry']) {
-      if (lowerText.startsWith(word + ' ')) return false;
+    const phraseStarters = ['excuse', 'what', 'wait', 'hold', 'can', 'could', 'did', 'go', 'sorry', 
+                            'it would', 'that would', 'three', 'four', 'about', 'around', 'maybe',
+                            'i think', 'i don\'t', 'i\'m not', 'no i', 'yes i'];
+    for (const phrase of phraseStarters) {
+      if (lowerText.startsWith(phrase + ' ') || lowerText === phrase) return false;
     }
     
     // Check if it's a question (ends with ?)
     if (text.endsWith('?')) return false;
     
-    // Names usually start with uppercase and are short words
-    // If first letter is lowercase, probably not a name
-    if (text[0] === text[0].toLowerCase() && text.length > 3) {
-      // Short words are ok lowercase (ed, al, etc.)
-      // But longer phrases probably aren't names
-      if (text.includes(' ') && text.length > 10) return false;
-    }
+    // Names usually start with uppercase and are relatively short
+    // Reject very long phrases (likely not a name)
+    if (text.length > 30) return false;
     
     return true;
   }
@@ -982,14 +994,25 @@ function createCallStateMachine() {
   }
   
   function extractName(text) {
-    // Remove common prefixes
+    // Remove common prefixes and their punctuation variations
     let name = text
-      .replace(/^(this is|i'm|i am|my name is|it's|hey|hi|hello|yeah|oh yeah)\s*/gi, '')
-      .replace(/[.,!?]$/g, '')
+      // Remove leading filler words with optional punctuation
+      .replace(/^(yeah,?\s*|yes,?\s*|oh,?\s*|um,?\s*|uh,?\s*|so,?\s*|well,?\s*)+/gi, '')
+      // Remove "it's", "this is", "my name is", etc.
+      .replace(/^(it's|it is|this is|i'm|i am|my name is|the name is|name's)\s*/gi, '')
+      // Remove trailing punctuation
+      .replace(/[.,!?]+$/g, '')
+      // Remove leading/trailing punctuation and whitespace
+      .replace(/^[,.\s]+|[,.\s]+$/g, '')
       .trim();
     
+    // If we stripped everything, return empty
+    if (!name || name.length < 2) {
+      return { firstName: '', lastName: '' };
+    }
+    
     // Split into first and last name
-    const parts = name.split(/\s+/);
+    const parts = name.split(/\s+/).filter(p => p.length > 0);
     if (parts.length >= 2) {
       return {
         firstName: parts[0],

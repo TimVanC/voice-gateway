@@ -132,7 +132,7 @@ wss.on("connection", (twilioWs, req) => {
   // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
   // ============================================================================
   let silenceRecoveryTimer = null;       // Timer to recover from stuck state
-  const SILENCE_RECOVERY_MS = 8000;      // Wait 8 seconds before prompting
+  const SILENCE_RECOVERY_MS = 12000;     // Wait 12 seconds before prompting (was 8, too aggressive)
   
   // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
@@ -482,20 +482,11 @@ wss.on("connection", (twilioWs, req) => {
       if (!responseInProgress && !speechStartTime) {
         console.log(`⏰ Silence recovery: no user response after ${SILENCE_RECOVERY_MS}ms`);
         
-        // Send a gentle "are you there?" prompt followed by repeating the current question
+        // Just repeat the current prompt - don't ask "are you still there"
         const currentPrompt = stateMachine.getNextPrompt();
         if (currentPrompt && openaiWs?.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: "response.create",
-            response: {
-              modalities: ["audio", "text"],
-              instructions: `The caller may not have heard you or might be thinking. 
-Say briefly: "Are you still there?" 
-Then if no response comes, gently repeat the question.
-Keep it natural and patient.`,
-              max_output_tokens: 200
-            }
-          }));
+          // Simply re-send the current state's prompt
+          sendStatePrompt(currentPrompt);
         }
       }
     }, SILENCE_RECOVERY_MS);
@@ -778,28 +769,27 @@ Sound polite and helpful, not dismissive.`,
   // ============================================================================
   function sendStatePrompt(prompt) {
     if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
-      // Determine if we should use a filler based on turn count
-      const useFiller = assistantTurnCount > 0 && 
-                        assistantTurnCount % FILLER_CONFIG.min_turns_between_fillers === 0;
-      const ack = useFiller ? 'Okay. ' : '';
+      console.log(`🗣️ State prompt: "${prompt}"`);
       
-      console.log(`🗣️ State prompt: "${ack}${prompt}"`);
-      
+      // Use extremely strict instructions to prevent AI from going off-script
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          instructions: `YOU MUST SAY EXACTLY THIS (you can add a brief acknowledgement first):
+          instructions: `STRICT SCRIPT - SAY THIS EXACT SENTENCE:
 
-"${ack}${prompt}"
+"${prompt}"
 
-CRITICAL - DO NOT DEVIATE:
-- Say ONLY what is written above
-- Do NOT add extra questions
-- Do NOT skip ahead in the intake process
-- Sound natural, use contractions
-- Keep it short`,
-          max_output_tokens: 200
+RULES:
+1. Say ONLY the sentence above, word for word
+2. You may add ONE brief word before it like "Okay" or "Great" 
+3. DO NOT add any other questions
+4. DO NOT continue the conversation
+5. DO NOT mention technicians, scheduling, or anything else
+6. STOP after saying the sentence above
+
+This is a phone script. Follow it exactly.`,
+          max_output_tokens: 150
         }
       }));
     } else if (responseInProgress) {
