@@ -689,6 +689,37 @@ function createCallStateMachine() {
           }
         }
         
+        // IMPORTANT: If user confirms and we already have an email, move on
+        if (data.email && isConfirmation(lowerTranscript)) {
+          console.log(`✅ Email already confirmed: ${data.email} - advancing`);
+          return {
+            nextState: transitionTo(STATES.DETAILS_BRANCH),
+            prompt: getDetailsPrompt(),
+            action: 'ask'
+          };
+        }
+        
+        // Handle "we already did that" / "you already have it" type responses
+        if (data.email && isAlreadyProvidedResponse(lowerTranscript)) {
+          console.log(`✅ Email already provided: ${data.email} - advancing`);
+          return {
+            nextState: transitionTo(STATES.DETAILS_BRANCH),
+            prompt: getDetailsPrompt(),
+            action: 'ask'
+          };
+        }
+        
+        // Handle "what email do you have?" - read back the stored email
+        if (data.email && isAskingForReadback(lowerTranscript)) {
+          const formatted = formatEmailForConfirmation(data.email);
+          console.log(`📋 Reading back stored email: ${data.email}`);
+          return {
+            nextState: currentState,
+            prompt: `I have ${formatted}. Is that correct?`,
+            action: 'ask'
+          };
+        }
+        
         if (hasEmail(lowerTranscript) || isEmailDeclined(lowerTranscript)) {
           if (isEmailDeclined(lowerTranscript)) {
             console.log(`📋 Email: declined`);
@@ -712,6 +743,8 @@ function createCallStateMachine() {
             };
           } else if (emailConf.level === CONFIDENCE.MEDIUM) {
             const formatted = formatEmailForConfirmation(email);
+            // Store email now so confirmation will work even if AI goes off-script
+            data.email = email;
             pendingClarification = {
               field: 'email',
               value: email,
@@ -1145,7 +1178,48 @@ function createCallStateMachine() {
   }
   
   function extractEmail(text) {
-    return text.replace(/\s+at\s+/gi, '@').replace(/\s+dot\s+/gi, '.').trim();
+    // Remove common prefixes like "that would be", "my email is", "it's", etc.
+    let email = text
+      .replace(/^(that would be|that's|it's|it is|my email is|email is|you can reach me at|reach me at|it's|the email is)\s*/gi, '')
+      .trim();
+    
+    // Convert spoken "at" and "dot" to symbols
+    // Handle cases like "john dot miller at email dot com"
+    email = email
+      .replace(/\s+at\s+/gi, '@')
+      .replace(/\s+dot\s+/gi, '.')
+      .replace(/\s*@\s*/g, '@')  // Clean up spaces around @
+      .replace(/\s*\.\s*/g, '.')  // Clean up spaces around .
+      .replace(/\s+/g, '')        // Remove any remaining spaces in email
+      .toLowerCase()
+      .trim();
+    
+    return email;
+  }
+  
+  /**
+   * Detect if caller says they already provided the info
+   */
+  function isAlreadyProvidedResponse(text) {
+    const alreadyProvidedPatterns = [
+      'we just went over', 'already gave', 'already provided', 'already told you',
+      'you already have', 'we just did', 'you have it', 'just went over that',
+      'we covered that', 'i just gave you', 'i already said', 'already confirmed',
+      'we already did'
+    ];
+    return alreadyProvidedPatterns.some(p => text.includes(p));
+  }
+  
+  /**
+   * Detect if caller is asking for a read-back of stored info
+   */
+  function isAskingForReadback(text) {
+    const readbackPatterns = [
+      'what do you have', 'what email do you have', 'read it back', 
+      'spell it for me', 'say it back', 'repeat it', 'what did you get',
+      'tell me what you have', 'read back', 'what you have'
+    ];
+    return readbackPatterns.some(p => text.includes(p));
   }
   
   function extractAddress(text) {
