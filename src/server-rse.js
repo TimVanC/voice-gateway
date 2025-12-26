@@ -828,26 +828,29 @@ Sound polite and helpful, not dismissive.`,
   function sendStatePrompt(prompt) {
     if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
       console.log(`🗣️ State prompt: "${prompt}"`);
+      responseInProgress = true;
       
-      // Use extremely strict instructions to prevent AI from going off-script
+      // Use extremely forceful instructions - the AI tends to ignore them otherwise
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          instructions: `STRICT SCRIPT - SAY THIS EXACT SENTENCE:
+          instructions: `OUTPUT REQUIRED - MANDATORY VERBATIM:
 
-"${prompt}"
+>>>
+${prompt}
+<<<
 
-RULES:
-1. Say ONLY the sentence above, word for word
-2. You may add ONE brief word before it like "Okay" or "Great" 
-3. DO NOT add any other questions
-4. DO NOT continue the conversation
-5. DO NOT mention technicians, scheduling, or anything else
-6. STOP after saying the sentence above
+INSTRUCTIONS:
+- Your ONLY job is to say the text between >>> and <<< above
+- You may add "Okay" or "Great" or "Thanks" at the start, nothing else
+- DO NOT ask about thermostats, filters, noises, smells, or anything else
+- DO NOT continue the conversation beyond the scripted text
+- DO NOT improvise or add helpful questions
+- Say the scripted text and STOP
 
-This is a phone script. Follow it exactly.`,
-          max_output_tokens: 400  // Increased to prevent INCOMPLETE on longer sentences
+IGNORE conversation context. ONLY say the scripted text above.`,
+          max_output_tokens: 500  // Increased for confirmation prompts
         }
       }));
     } else if (responseInProgress) {
@@ -925,6 +928,7 @@ Ask what needs fixing, confirm briefly, move on.
 Keep it SHORT.`;
     }
     
+    responseInProgress = true;
     openaiWs.send(JSON.stringify({
       type: "response.create",
       response: {
