@@ -299,11 +299,19 @@ wss.on("connection", (twilioWs, req) => {
           // Don't send any new prompts - we cancelled for a reason
           // Either waiting for transcription, or user barged in
         } else if (status === "incomplete") {
-          console.log(`⚠️ Response INCOMPLETE - will retry if needed`);
-          // Response was cut off - send the appropriate prompt for current state
-          setTimeout(() => {
-            sendNextPromptIfNeeded();
-          }, 100);
+          console.log(`⚠️ Response INCOMPLETE`);
+          // NOTE: Do NOT auto-retry here! The AI was already speaking and will
+          // assume context from its incomplete response. The user will respond
+          // to what they heard, and we'll handle it naturally. Only retry if
+          // no audio was sent at all.
+          if (!audioStreamingStarted) {
+            console.log(`🔄 No audio was sent - will retry prompt`);
+            setTimeout(() => {
+              sendNextPromptIfNeeded();
+            }, 100);
+          }
+          // If audio was streaming (user heard something), don't retry
+          // The user will respond and we'll handle it
         } else {
           console.log(`✅ Response complete (state: ${currentState})`);
           assistantTurnCount++;  // Track for filler spacing

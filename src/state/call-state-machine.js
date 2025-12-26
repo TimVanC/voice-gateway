@@ -462,8 +462,34 @@ function createCallStateMachine() {
           }
         }
         
+        // Check if caller is confused or asking for clarification (NOT a name)
+        if (isConfusedOrAsking(lowerTranscript)) {
+          console.log(`📋 Caller confused/asking - not a name: "${transcript}"`);
+          return {
+            nextState: currentState,
+            prompt: CALLER_INFO.name,
+            action: 'ask'
+          };
+        }
+        
+        // Check for backtracking request
+        if (isBacktrackRequest(lowerTranscript)) {
+          console.log(`📋 Backtrack request detected`);
+          return handleBacktrackRequest(transcript);
+        }
+        
         if (transcript.length > 0) {
           const { firstName, lastName } = extractName(transcript);
+          
+          // Check if this looks like a name at all
+          if (!looksLikeName(firstName)) {
+            console.log(`📋 Doesn't look like a name: "${firstName}"`);
+            return {
+              nextState: currentState,
+              prompt: CALLER_INFO.name,
+              action: 'ask'
+            };
+          }
           
           // Check confidence for first name
           const firstNameConf = estimateFirstNameConfidence(firstName || transcript);
@@ -526,6 +552,22 @@ function createCallStateMachine() {
           } else {
             clearPendingClarification();
           }
+        }
+        
+        // Check if caller is confused or asking for clarification
+        if (isConfusedOrAsking(lowerTranscript)) {
+          console.log(`📋 Caller confused/asking: "${transcript}"`);
+          return {
+            nextState: currentState,
+            prompt: CALLER_INFO.phone,
+            action: 'ask'
+          };
+        }
+        
+        // Check for backtracking request
+        if (isBacktrackRequest(lowerTranscript)) {
+          console.log(`📋 Backtrack request detected`);
+          return handleBacktrackRequest(transcript);
         }
         
         if (hasPhoneNumber(lowerTranscript)) {
@@ -820,6 +862,108 @@ function createCallStateMachine() {
     // Installations are for new equipment, not emergencies
     return data.intent === INTENT_TYPES.HVAC_SERVICE || 
            (data.intent === INTENT_TYPES.GENERATOR && !isGeneratorInstallation());
+  }
+  
+  /**
+   * Detect if caller is confused or asking for clarification (NOT giving their name)
+   */
+  function isConfusedOrAsking(text) {
+    const confusedPatterns = [
+      'excuse me', 'pardon', 'pardon me', 'what', 'huh', 'sorry',
+      'what did you say', 'can you repeat', 'didn\'t catch', 'didn\'t hear',
+      'come again', 'say that again', 'one more time', 'i missed that',
+      'what was that', 'sorry what', 'excuse me what'
+    ];
+    return confusedPatterns.some(p => text.includes(p));
+  }
+  
+  /**
+   * Detect if caller wants to go back/backtrack
+   */
+  function isBacktrackRequest(text) {
+    const backtrackPatterns = [
+      'go back', 'wait', 'hold on', 'before that', 'previous question',
+      'what did you ask', 'asked before', 'earlier question',
+      'back up', 'start over', 'go back to'
+    ];
+    return backtrackPatterns.some(p => text.includes(p));
+  }
+  
+  /**
+   * Handle a backtrack request - explain what was asked and where we are
+   */
+  function handleBacktrackRequest(transcript) {
+    // Explain the previous question based on current state
+    let explanation = '';
+    switch (currentState) {
+      case STATES.NAME:
+        explanation = "I just asked for your first and last name. What's your name?";
+        break;
+      case STATES.PHONE:
+        explanation = "I was asking for the best phone number to reach you.";
+        break;
+      case STATES.EMAIL:
+        explanation = "I was asking for your email address.";
+        break;
+      case STATES.DETAILS_BRANCH:
+        explanation = "I was asking about the details of your issue.";
+        break;
+      case STATES.ADDRESS:
+        explanation = "I was asking for the service address.";
+        break;
+      case STATES.AVAILABILITY:
+        explanation = "I was asking about your availability.";
+        break;
+      default:
+        explanation = "Let me help you. Can I get your first and last name?";
+    }
+    
+    return {
+      nextState: currentState,
+      prompt: explanation,
+      action: 'ask'
+    };
+  }
+  
+  /**
+   * Check if text looks like an actual name (not a phrase/question)
+   */
+  function looksLikeName(text) {
+    if (!text || text.length < 2) return false;
+    
+    // Things that are definitely NOT names
+    const notNames = [
+      'excuse', 'pardon', 'what', 'huh', 'wait', 'hold', 'sorry',
+      'um', 'uh', 'hmm', 'okay', 'ok', 'yeah', 'yes', 'no', 'nope',
+      'hello', 'hi', 'hey', 'bye', 'thanks', 'thank you',
+      'the', 'this', 'that', 'is', 'are', 'was', 'were',
+      'go', 'back', 'before', 'after', 'question', 'asked',
+      'can', 'could', 'would', 'should', 'did', 'do', 'don\'t',
+      'i', 'you', 'me', 'my', 'your'
+    ];
+    
+    const lowerText = text.toLowerCase();
+    
+    // Check if it's just one of these words
+    if (notNames.includes(lowerText)) return false;
+    
+    // Check if it starts with one of these words (likely a phrase, not a name)
+    for (const word of ['excuse', 'what', 'wait', 'hold', 'can', 'could', 'did', 'go', 'sorry']) {
+      if (lowerText.startsWith(word + ' ')) return false;
+    }
+    
+    // Check if it's a question (ends with ?)
+    if (text.endsWith('?')) return false;
+    
+    // Names usually start with uppercase and are short words
+    // If first letter is lowercase, probably not a name
+    if (text[0] === text[0].toLowerCase() && text.length > 3) {
+      // Short words are ok lowercase (ed, al, etc.)
+      // But longer phrases probably aren't names
+      if (text.includes(' ') && text.length > 10) return false;
+    }
+    
+    return true;
   }
   
   function isGeneratorInstallation() {
