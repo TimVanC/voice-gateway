@@ -99,6 +99,7 @@ wss.on("connection", (twilioWs, req) => {
   let playBuffer = Buffer.alloc(0);
   let responseInProgress = false;
   let audioStreamingStarted = false;
+  let totalAudioBytesSent = 0;  // Track total audio in current response
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
   let pendingUserInput = null;  // Queue for input that arrives while response is in progress
   
@@ -264,6 +265,7 @@ wss.on("connection", (twilioWs, req) => {
         // Only clear on explicit cancellation or barge-in
         responseInProgress = true;
         audioStreamingStarted = false;
+        totalAudioBytesSent = 0;  // Reset for new response
         
         // Cancel backchannel timer - real response is coming
         backchannel.cancel();
@@ -283,6 +285,7 @@ wss.on("connection", (twilioWs, req) => {
           audioStreamingStarted = true;
           const audioData = Buffer.from(event.delta, "base64");
           playBuffer = Buffer.concat([playBuffer, audioData]);
+          totalAudioBytesSent += audioData.length;  // Track total
         }
         break;
         
@@ -309,17 +312,26 @@ wss.on("connection", (twilioWs, req) => {
           // Either waiting for transcription, or user barged in
         } else if (status === "incomplete") {
           console.log(`⚠️ Response INCOMPLETE`);
-          if (!audioStreamingStarted) {
+          if (!audioStreamingStarted || totalAudioBytesSent === 0) {
             // No audio was sent at all - retry immediately
             console.log(`🔄 No audio was sent - will retry prompt`);
             setTimeout(() => {
               sendNextPromptIfNeeded();
             }, 100);
           } else {
-            // Audio was sent (user heard something) - start a recovery timer
-            // If the user doesn't respond within 8 seconds, gently prompt them
-            console.log(`⏰ Starting 8s silence recovery timer`);
-            startSilenceRecoveryTimer();
+            // Audio was sent (user heard something)
+            // Check if enough audio was sent that user probably understood
+            const audioSeconds = totalAudioBytesSent / 8000;
+            if (audioSeconds > 3) {
+              // User heard 3+ seconds - they probably got the gist
+              // Just wait for their response, don't interrupt with recovery
+              console.log(`⏸️ User heard ${audioSeconds.toFixed(1)}s of audio - waiting for response`);
+              // No recovery timer - just wait for user to respond naturally
+            } else {
+              // Short audio - use recovery timer
+              console.log(`⏰ Only ${audioSeconds.toFixed(1)}s of audio sent - starting recovery timer`);
+              startSilenceRecoveryTimer();
+            }
           }
         } else {
           console.log(`✅ Response complete (state: ${currentState})`);
@@ -835,7 +847,7 @@ RULES:
 6. STOP after saying the sentence above
 
 This is a phone script. Follow it exactly.`,
-          max_output_tokens: 150
+          max_output_tokens: 400  // Increased to prevent INCOMPLETE on longer sentences
         }
       }));
     } else if (responseInProgress) {
