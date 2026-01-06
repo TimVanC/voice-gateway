@@ -18,6 +18,7 @@ const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL, OUT_OF_SCOPE } =
 const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = require('./config/vad-config');
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
+const { logCallIntake } = require('./utils/google-sheets-logger');
 
 // ============================================================================
 // CONFIGURATION
@@ -89,6 +90,7 @@ wss.on("connection", (twilioWs, req) => {
   // CALL SESSION STATE
   // ============================================================================
   let streamSid = null;
+  let callerNumber = null;  // Store caller number for logging
   let openaiWs = null;
   let paceTimer = null;
   let keepAliveTimer = null;
@@ -958,7 +960,8 @@ Keep it SHORT.`;
           
           // Store caller number if provided
           if (msg.start.customParameters?.callerNumber) {
-            stateMachine.updateData('phone', msg.start.customParameters.callerNumber);
+            callerNumber = msg.start.customParameters.callerNumber;
+            stateMachine.updateData('phone', callerNumber);
           }
           
           // Start audio pump
@@ -1004,7 +1007,17 @@ Keep it SHORT.`;
   function cleanup() {
     // Log collected data before cleanup
     const data = stateMachine.getData();
+    const currentState = stateMachine.getState();
     console.log("📋 Call data collected:", JSON.stringify(data, null, 2));
+    console.log(`📋 Final state: ${currentState}`);
+    
+    // Log to Google Sheets (non-blocking) - only if confirmation succeeded
+    logCallIntake(data, currentState, {
+      callId: streamSid || `CALL-${Date.now()}`,
+      callerNumber: callerNumber
+    }).catch(err => {
+      console.error('❌ Failed to log to Google Sheets:', err.message);
+    });
     
     if (paceTimer) clearInterval(paceTimer);
     if (keepAliveTimer) clearInterval(keepAliveTimer);
