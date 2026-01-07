@@ -57,24 +57,43 @@ function getSheetsClient() {
   try {
     let auth;
     
-    // Try file-based credentials first (if GOOGLE_APPLICATION_CREDENTIALS is set)
+    // Check if GOOGLE_APPLICATION_CREDENTIALS is actually JSON (starts with {)
+    // This handles cases where Railway sets it to JSON instead of a file path
     if (GOOGLE_APPLICATION_CREDENTIALS) {
-      const credentialsPath = path.resolve(GOOGLE_APPLICATION_CREDENTIALS);
-      if (fs.existsSync(credentialsPath)) {
-        console.log(`📁 Using file-based credentials from: ${credentialsPath}`);
+      const trimmed = GOOGLE_APPLICATION_CREDENTIALS.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        // It's JSON, not a file path - use it directly
+        console.log(`📝 Using JSON credentials from GOOGLE_APPLICATION_CREDENTIALS`);
+        let credentials;
+        try {
+          credentials = JSON.parse(trimmed);
+        } catch (e) {
+          throw new Error('GOOGLE_APPLICATION_CREDENTIALS contains invalid JSON');
+        }
         auth = new google.auth.GoogleAuth({
-          keyFile: credentialsPath,
+          credentials,
           scopes: ['https://www.googleapis.com/auth/spreadsheets']
         });
         return google.sheets({ version: 'v4', auth });
       } else {
-        console.warn(`⚠️  Credentials file not found at: ${credentialsPath}, trying inline JSON...`);
+        // It's a file path - try to use it
+        const credentialsPath = path.resolve(GOOGLE_APPLICATION_CREDENTIALS);
+        if (fs.existsSync(credentialsPath)) {
+          console.log(`📁 Using file-based credentials from: ${credentialsPath}`);
+          auth = new google.auth.GoogleAuth({
+            keyFile: credentialsPath,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets']
+          });
+          return google.sheets({ version: 'v4', auth });
+        } else {
+          console.warn(`⚠️  Credentials file not found at: ${credentialsPath}, trying inline JSON...`);
+        }
       }
     }
     
     // Fall back to inline JSON credentials (GOOGLE_SHEETS_CREDENTIALS)
     if (GOOGLE_SHEETS_CREDENTIALS_JSON) {
-      console.log(`📝 Using inline JSON credentials from environment variable`);
+      console.log(`📝 Using inline JSON credentials from GOOGLE_SHEETS_CREDENTIALS`);
       let credentials;
       try {
         credentials = typeof GOOGLE_SHEETS_CREDENTIALS_JSON === 'string' 
@@ -92,7 +111,7 @@ function getSheetsClient() {
     }
     
     // Neither method available
-    throw new Error('Google credentials not configured. Set either GOOGLE_APPLICATION_CREDENTIALS (file path) or GOOGLE_SHEETS_CREDENTIALS (JSON string)');
+    throw new Error('Google credentials not configured. Set either GOOGLE_APPLICATION_CREDENTIALS (file path or JSON) or GOOGLE_SHEETS_CREDENTIALS (JSON string)');
   } catch (error) {
     throw new Error(`Failed to initialize Google Sheets client: ${error.message}`);
   }
