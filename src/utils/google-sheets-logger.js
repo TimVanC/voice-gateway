@@ -19,7 +19,7 @@ require('dotenv').config();
 // ============================================================================
 const SPREADSHEET_ID = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
 const SHEET_NAME = process.env.GOOGLE_SHEETS_SHEET_NAME || 'RSE Data Call Intake Log';
-const GOOGLE_CREDENTIALS = process.env.GOOGLE_SHEETS_CREDENTIALS;
+const GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
 // ============================================================================
 // V1 SCHEMA DEFINITION (Required columns only)
@@ -375,10 +375,10 @@ async function logCallIntake(callData, currentState, metadata = {}) {
     return { success: false, skipped: true, reason };
   }
   
-  if (!SPREADSHEET_ID || !GOOGLE_CREDENTIALS) {
+  if (!SPREADSHEET_ID || !GOOGLE_APPLICATION_CREDENTIALS) {
     console.warn('⚠️  Google Sheets logging disabled (missing credentials)');
     console.warn(`   Call would have been logged with status: ${determineCallStatus(currentState, callData)}`);
-    console.warn(`   To enable logging, set GOOGLE_SHEETS_SPREADSHEET_ID and GOOGLE_SHEETS_CREDENTIALS in .env`);
+    console.warn(`   To enable logging, set GOOGLE_SHEETS_SPREADSHEET_ID and GOOGLE_APPLICATION_CREDENTIALS in .env`);
     return { success: false, error: 'Google Sheets credentials not configured', skipped: true };
   }
   
