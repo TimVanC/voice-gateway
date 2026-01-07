@@ -1357,7 +1357,7 @@ function createCallStateMachine() {
     }
     
     // Remove common prefixes and extract email portion
-    // Handle "that would be", "yeah that would be", etc.
+    // Handle "that would be", "yeah that would be", etc. - be aggressive about removing these
     let email = text
       .replace(/^(yeah\s*,?\s*)?(so\s+the\s+|that\s+would\s+be|that's|it's|it\s+is|my\s+email\s+is|email\s+is|you\s+can\s+reach\s+me\s+at|reach\s+me\s+at|the\s+email\s+is)\s*/gi, '')
       .trim();
@@ -1371,8 +1371,8 @@ function createCallStateMachine() {
     
     // Extract just the email part (look for name pattern + "at" + domain)
     // Pattern: "TimVanC at gmail.com" or "timvanc at gmail dot com" or "timvansi at gmail.com"
-    // Make sure we don't match "would be" as part of the email
-    const emailMatch = email.match(/([a-z0-9]+(?:\s+[a-z0-9]+)*?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
+    // Make sure we don't match "would be" as part of the email - look for actual email patterns
+    const emailMatch = email.match(/([a-z0-9]+(?:\s*[a-z0-9]+)*?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
     if (emailMatch) {
       // Clean up the name part - remove spaces to make "Tim Van C" -> "timvanc"
       let namePart = emailMatch[1].replace(/\s+/g, '').toLowerCase();
@@ -1421,7 +1421,9 @@ function createCallStateMachine() {
     
     // Clean up common artifacts - remove prefixes that might be stuck
     // Remove "wouldbe", "would", "that", "so", "the" if they appear at the start
+    // Also remove "wouldbe" if it appears anywhere (from "would be" being concatenated)
     email = email.replace(/^(wouldbe|would|that|so|the|yeah)/, '');
+    email = email.replace(/wouldbe/g, '');  // Remove "wouldbe" anywhere in the email
     
     // Apply spelling instructions
     if (spellingInstructions.length > 0) {
