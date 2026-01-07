@@ -18,7 +18,7 @@ require('dotenv').config();
 // CONFIGURATION
 // ============================================================================
 const SPREADSHEET_ID = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-const SHEET_NAME = process.env.GOOGLE_SHEETS_SHEET_NAME || 'Call Intake Log';
+const SHEET_NAME = process.env.GOOGLE_SHEETS_SHEET_NAME || 'RSE Data Call Intake Log';
 const GOOGLE_CREDENTIALS = process.env.GOOGLE_SHEETS_CREDENTIALS;
 
 // ============================================================================
