@@ -1357,19 +1357,22 @@ function createCallStateMachine() {
     }
     
     // Remove common prefixes and extract email portion
+    // Handle "that would be", "yeah that would be", etc.
     let email = text
-      .replace(/^(so\s+the\s+|that\s+would\s+be|that's|it's|it\s+is|my\s+email\s+is|email\s+is|you\s+can\s+reach\s+me\s+at|reach\s+me\s+at|the\s+email\s+is)\s*/gi, '')
+      .replace(/^(yeah\s*,?\s*)?(so\s+the\s+|that\s+would\s+be|that's|it's|it\s+is|my\s+email\s+is|email\s+is|you\s+can\s+reach\s+me\s+at|reach\s+me\s+at|the\s+email\s+is)\s*/gi, '')
       .trim();
     
     // Remove spelling instructions and trailing clarifications
     email = email
       .replace(/\b(with\s+)?(two|2|double)\s+[a-z]'?s?\b/gi, '')
       .replace(/\band\s+that'?s\s+[^.]*$/i, '')  // Remove "and that's Tim with two M's" type endings
+      .replace(/\b(and\s+)?(that'?s|it'?s)\s+[^.]*$/i, '')  // Remove trailing "and that's..." phrases
       .trim();
     
     // Extract just the email part (look for name pattern + "at" + domain)
-    // Pattern: "Tim Van C at gmail.com" or "timvanc at gmail dot com" or "timvansi at gmail.com"
-    const emailMatch = email.match(/([a-z0-9\s]+?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
+    // Pattern: "TimVanC at gmail.com" or "timvanc at gmail dot com" or "timvansi at gmail.com"
+    // Make sure we don't match "would be" as part of the email
+    const emailMatch = email.match(/([a-z0-9]+(?:\s+[a-z0-9]+)*?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
     if (emailMatch) {
       // Clean up the name part - remove spaces to make "Tim Van C" -> "timvanc"
       let namePart = emailMatch[1].replace(/\s+/g, '').toLowerCase();
@@ -1417,7 +1420,8 @@ function createCallStateMachine() {
       .trim();
     
     // Clean up common artifacts - remove prefixes that might be stuck
-    email = email.replace(/^(sothe|that|so|the)/, '');
+    // Remove "wouldbe", "would", "that", "so", "the" if they appear at the start
+    email = email.replace(/^(wouldbe|would|that|so|the|yeah)/, '');
     
     // Apply spelling instructions
     if (spellingInstructions.length > 0) {
