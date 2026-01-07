@@ -12,6 +12,8 @@
  */
 
 const { google } = require('googleapis');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 // ============================================================================
@@ -44,6 +46,7 @@ const COLUMN_HEADERS = [
 
 /**
  * Initialize Google Sheets API client
+ * Uses file-based credentials via GOOGLE_APPLICATION_CREDENTIALS
  */
 function getSheetsClient() {
   if (!GOOGLE_APPLICATION_CREDENTIALS) {
@@ -54,11 +57,17 @@ function getSheetsClient() {
     throw new Error('GOOGLE_SHEETS_SPREADSHEET_ID environment variable is required');
   }
   
+  // Check if credentials file exists
+  const credentialsPath = path.resolve(GOOGLE_APPLICATION_CREDENTIALS);
+  if (!fs.existsSync(credentialsPath)) {
+    throw new Error(`Google credentials file not found at: ${credentialsPath}`);
+  }
+  
   try {
     // Use file-based credentials via GOOGLE_APPLICATION_CREDENTIALS
     // This environment variable should point to the JSON key file path
     const auth = new google.auth.GoogleAuth({
-      keyFile: GOOGLE_APPLICATION_CREDENTIALS,
+      keyFile: credentialsPath,
       scopes: ['https://www.googleapis.com/auth/spreadsheets']
     });
     
