@@ -46,27 +46,26 @@ const COLUMN_HEADERS = [
  * Initialize Google Sheets API client
  */
 function getSheetsClient() {
-  if (!GOOGLE_CREDENTIALS) {
-    throw new Error('GOOGLE_SHEETS_CREDENTIALS environment variable is required');
+  if (!GOOGLE_APPLICATION_CREDENTIALS) {
+    throw new Error('GOOGLE_APPLICATION_CREDENTIALS environment variable is required');
   }
   
   if (!SPREADSHEET_ID) {
     throw new Error('GOOGLE_SHEETS_SPREADSHEET_ID environment variable is required');
   }
   
-  let credentials;
   try {
-    credentials = JSON.parse(GOOGLE_CREDENTIALS);
-  } catch (e) {
-    throw new Error('GOOGLE_SHEETS_CREDENTIALS must be valid JSON');
+    // Use file-based credentials via GOOGLE_APPLICATION_CREDENTIALS
+    // This environment variable should point to the JSON key file path
+    const auth = new google.auth.GoogleAuth({
+      keyFile: GOOGLE_APPLICATION_CREDENTIALS,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    
+    return google.sheets({ version: 'v4', auth });
+  } catch (error) {
+    throw new Error(`Failed to initialize Google Sheets client: ${error.message}`);
   }
-  
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets']
-  });
-  
-  return google.sheets({ version: 'v4', auth });
 }
 
 /**
