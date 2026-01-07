@@ -377,7 +377,9 @@ async function logCallIntake(callData, currentState, metadata = {}) {
   
   if (!SPREADSHEET_ID || !GOOGLE_CREDENTIALS) {
     console.warn('⚠️  Google Sheets logging disabled (missing credentials)');
-    return { success: false, error: 'Google Sheets credentials not configured' };
+    console.warn(`   Call would have been logged with status: ${determineCallStatus(currentState, callData)}`);
+    console.warn(`   To enable logging, set GOOGLE_SHEETS_SPREADSHEET_ID and GOOGLE_SHEETS_CREDENTIALS in .env`);
+    return { success: false, error: 'Google Sheets credentials not configured', skipped: true };
   }
   
   try {

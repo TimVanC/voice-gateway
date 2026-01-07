@@ -235,9 +235,22 @@ wss.on("connection", (twilioWs, req) => {
         
         if (elapsed > 10000) {
           console.error(`⚠️ No OpenAI activity for ${elapsed}ms!`);
+          // Try to send a ping to keep connection alive
+          try {
+            openaiWs.ping();
+          } catch (e) {
+            console.error(`❌ Keep-alive ping failed: ${e.message}`);
+          }
+        } else {
+          // Normal keep-alive ping
+          try {
+            openaiWs.ping();
+          } catch (e) {
+            console.error(`❌ Keep-alive ping failed: ${e.message}`);
+          }
         }
-        
-        openaiWs.ping();
+      } else {
+        console.warn(`⚠️ Keep-alive: OpenAI WS not open (state: ${openaiWs?.readyState})`);
       }
     }, 20000);
   }
