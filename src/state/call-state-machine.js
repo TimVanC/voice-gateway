@@ -694,7 +694,37 @@ function createCallStateMachine() {
               prompt: getDetailsPrompt(),
               action: 'ask'
             };
-          } else {
+          } else if (isCorrection(lowerTranscript)) {
+            // User said it's wrong - check if they're giving a letter correction
+            const letterCorrectionMatch = lowerTranscript.match(/\bit'?s\s+(?:the\s+)?letter\s+([a-z])\b/i);
+            if (letterCorrectionMatch && data.email) {
+              const correctLetter = letterCorrectionMatch[1].toLowerCase();
+              // Try to fix the email - look for common misheard letters at the end
+              let correctedEmail = data.email;
+              const localPart = correctedEmail.split('@')[0];
+              const domain = correctedEmail.split('@')[1];
+              
+              // If user says "it's the letter C", replace last letter(s) with C
+              // Common: "si" -> "c", "see" -> "c", etc.
+              if (localPart.endsWith('si') || localPart.endsWith('see') || localPart.endsWith('sea')) {
+                correctedEmail = localPart.slice(0, -2) + correctLetter + '@' + domain;
+              } else if (localPart.endsWith('i') || localPart.endsWith('y') || localPart.endsWith('e')) {
+                correctedEmail = localPart.slice(0, -1) + correctLetter + '@' + domain;
+              } else {
+                // Just append or replace last character
+                correctedEmail = localPart.slice(0, -1) + correctLetter + '@' + domain;
+              }
+              
+              data.email = correctedEmail;
+              pendingClarification.value = correctedEmail;
+              const formatted = formatEmailForConfirmation(correctedEmail);
+              return {
+                nextState: currentState,
+                prompt: `Got it. So the email is ${formatted}. Is that correct?`,
+                action: 'ask'
+              };
+            }
+            
             clearPendingClarification();
             // Ask them to spell it
             return {
@@ -702,6 +732,9 @@ function createCallStateMachine() {
               prompt: "Could you spell out the email address for me?",
               action: 'ask'
             };
+          } else {
+            // Not a clear yes/no - might be new email input
+            clearPendingClarification();
           }
         }
         
@@ -1335,12 +1368,23 @@ function createCallStateMachine() {
       .trim();
     
     // Extract just the email part (look for name pattern + "at" + domain)
-    // Pattern: "Tim Van C at gmail.com" or "timvanc at gmail dot com"
+    // Pattern: "Tim Van C at gmail.com" or "timvanc at gmail dot com" or "timvansi at gmail.com"
     const emailMatch = email.match(/([a-z0-9\s]+?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
     if (emailMatch) {
       // Clean up the name part - remove spaces to make "Tim Van C" -> "timvanc"
       let namePart = emailMatch[1].replace(/\s+/g, '').toLowerCase();
       let domainPart = emailMatch[2];
+      
+      // Fix common ASR errors: "si" -> "c", "see" -> "c", "sea" -> "c" at the end
+      // This handles "timvansi" -> "timvanc" when user says "Tim Van C"
+      if (namePart.endsWith('si') && namePart.length > 2) {
+        namePart = namePart.slice(0, -2) + 'c';
+      } else if (namePart.endsWith('see') && namePart.length > 3) {
+        namePart = namePart.slice(0, -3) + 'c';
+      } else if (namePart.endsWith('sea') && namePart.length > 3) {
+        namePart = namePart.slice(0, -3) + 'c';
+      }
+      
       email = `${namePart}@${domainPart}`;
     } else {
       // Try simpler pattern if first didn't match
@@ -1348,6 +1392,16 @@ function createCallStateMachine() {
       if (simpleMatch) {
         let namePart = simpleMatch[1].replace(/\s+/g, '').toLowerCase();
         let domainPart = simpleMatch[2];
+        
+        // Fix common ASR errors
+        if (namePart.endsWith('si') && namePart.length > 2) {
+          namePart = namePart.slice(0, -2) + 'c';
+        } else if (namePart.endsWith('see') && namePart.length > 3) {
+          namePart = namePart.slice(0, -3) + 'c';
+        } else if (namePart.endsWith('sea') && namePart.length > 3) {
+          namePart = namePart.slice(0, -3) + 'c';
+        }
+        
         email = `${namePart}@${domainPart}`;
       }
     }
