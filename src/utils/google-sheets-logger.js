@@ -21,7 +21,8 @@ require('dotenv').config();
 // ============================================================================
 const SPREADSHEET_ID = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
 const SHEET_NAME = process.env.GOOGLE_SHEETS_SHEET_NAME || 'RSE Data Call Intake Log';
-const GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+const GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS; // File path
+const GOOGLE_SHEETS_CREDENTIALS_JSON = process.env.GOOGLE_SHEETS_CREDENTIALS; // Inline JSON (fallback)
 
 // ============================================================================
 // V1 SCHEMA DEFINITION (Required columns only)
@@ -46,32 +47,52 @@ const COLUMN_HEADERS = [
 
 /**
  * Initialize Google Sheets API client
- * Uses file-based credentials via GOOGLE_APPLICATION_CREDENTIALS
+ * Supports both file-based (GOOGLE_APPLICATION_CREDENTIALS) and inline JSON (GOOGLE_SHEETS_CREDENTIALS)
  */
 function getSheetsClient() {
-  if (!GOOGLE_APPLICATION_CREDENTIALS) {
-    throw new Error('GOOGLE_APPLICATION_CREDENTIALS environment variable is required');
-  }
-  
   if (!SPREADSHEET_ID) {
     throw new Error('GOOGLE_SHEETS_SPREADSHEET_ID environment variable is required');
   }
   
-  // Check if credentials file exists
-  const credentialsPath = path.resolve(GOOGLE_APPLICATION_CREDENTIALS);
-  if (!fs.existsSync(credentialsPath)) {
-    throw new Error(`Google credentials file not found at: ${credentialsPath}`);
-  }
-  
   try {
-    // Use file-based credentials via GOOGLE_APPLICATION_CREDENTIALS
-    // This environment variable should point to the JSON key file path
-    const auth = new google.auth.GoogleAuth({
-      keyFile: credentialsPath,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
-    });
+    let auth;
     
-    return google.sheets({ version: 'v4', auth });
+    // Try file-based credentials first (if GOOGLE_APPLICATION_CREDENTIALS is set)
+    if (GOOGLE_APPLICATION_CREDENTIALS) {
+      const credentialsPath = path.resolve(GOOGLE_APPLICATION_CREDENTIALS);
+      if (fs.existsSync(credentialsPath)) {
+        console.log(`📁 Using file-based credentials from: ${credentialsPath}`);
+        auth = new google.auth.GoogleAuth({
+          keyFile: credentialsPath,
+          scopes: ['https://www.googleapis.com/auth/spreadsheets']
+        });
+        return google.sheets({ version: 'v4', auth });
+      } else {
+        console.warn(`⚠️  Credentials file not found at: ${credentialsPath}, trying inline JSON...`);
+      }
+    }
+    
+    // Fall back to inline JSON credentials (GOOGLE_SHEETS_CREDENTIALS)
+    if (GOOGLE_SHEETS_CREDENTIALS_JSON) {
+      console.log(`📝 Using inline JSON credentials from environment variable`);
+      let credentials;
+      try {
+        credentials = typeof GOOGLE_SHEETS_CREDENTIALS_JSON === 'string' 
+          ? JSON.parse(GOOGLE_SHEETS_CREDENTIALS_JSON) 
+          : GOOGLE_SHEETS_CREDENTIALS_JSON;
+      } catch (e) {
+        throw new Error('GOOGLE_SHEETS_CREDENTIALS must be valid JSON');
+      }
+      
+      auth = new google.auth.GoogleAuth({
+        credentials,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets']
+      });
+      return google.sheets({ version: 'v4', auth });
+    }
+    
+    // Neither method available
+    throw new Error('Google credentials not configured. Set either GOOGLE_APPLICATION_CREDENTIALS (file path) or GOOGLE_SHEETS_CREDENTIALS (JSON string)');
   } catch (error) {
     throw new Error(`Failed to initialize Google Sheets client: ${error.message}`);
   }
@@ -383,10 +404,12 @@ async function logCallIntake(callData, currentState, metadata = {}) {
     return { success: false, skipped: true, reason };
   }
   
-  if (!SPREADSHEET_ID || !GOOGLE_APPLICATION_CREDENTIALS) {
+  if (!SPREADSHEET_ID || (!GOOGLE_APPLICATION_CREDENTIALS && !GOOGLE_SHEETS_CREDENTIALS_JSON)) {
     console.warn('⚠️  Google Sheets logging disabled (missing credentials)');
     console.warn(`   Call would have been logged with status: ${determineCallStatus(currentState, callData)}`);
-    console.warn(`   To enable logging, set GOOGLE_SHEETS_SPREADSHEET_ID and GOOGLE_APPLICATION_CREDENTIALS in .env`);
+    console.warn(`   To enable logging, set GOOGLE_SHEETS_SPREADSHEET_ID and either:`);
+    console.warn(`     - GOOGLE_APPLICATION_CREDENTIALS (file path), or`);
+    console.warn(`     - GOOGLE_SHEETS_CREDENTIALS (JSON string)`);
     return { success: false, error: 'Google Sheets credentials not configured', skipped: true };
   }
   
