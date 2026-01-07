@@ -531,6 +531,22 @@ function createCallStateMachine() {
           return handleBacktrackRequest(transcript);
         }
         
+        // Check if user gave an address instead of a name (cross-state detection)
+        const addressParts = extractAddress(transcript);
+        if (addressParts.zip || (addressParts.address && /\b(road|rd|street|st|avenue|ave|drive|dr|lane|ln|way|court|ct|boulevard|blvd)\b/i.test(addressParts.address))) {
+          console.log(`📋 Address detected in NAME state: ${addressParts.address}`);
+          // Store address and move to phone (skip name for now, will come back)
+          data.address = addressParts.address;
+          data.city = addressParts.city;
+          data.state = addressParts.state;
+          data.zip = addressParts.zip;
+          return {
+            nextState: transitionTo(STATES.PHONE),
+            prompt: "Got the address. What's the best phone number to reach you?",
+            action: 'ask'
+          };
+        }
+        
         if (transcript.length > 0) {
           const { firstName, lastName } = extractName(transcript);
           
@@ -734,11 +750,21 @@ function createCallStateMachine() {
           const hasSpellingInstruction = /\b(with\s+)?(two|2|double)\s+[a-z]'?s?\b/i.test(transcript);
           
           const email = extractEmail(transcript);
-          const emailConf = estimateEmailConfidence(transcript);
+          
+          // If email extraction failed, ask to spell it
+          if (!email || !email.includes('@')) {
+            return {
+              nextState: currentState,
+              prompt: "I'm having trouble catching that. Could you spell out the email address for me?",
+              action: 'ask'
+            };
+          }
+          
+          const emailConf = estimateEmailConfidence(email);
           
           console.log(`📋 Email: ${email} (confidence: ${emailConf.level})`);
           
-          // If spelling instruction detected, always confirm
+          // If spelling instruction detected, always confirm with spelling
           if (hasSpellingInstruction) {
             const formatted = formatEmailForConfirmation(email);
             data.email = email;
@@ -751,9 +777,10 @@ function createCallStateMachine() {
             // Spell it out letter by letter for confirmation
             const localPart = email.split('@')[0];
             const spelledOut = localPart.split('').join('-').toUpperCase();
+            const domain = email.split('@')[1];
             return {
               nextState: currentState,
-              prompt: `I have ${formatted}. Just to confirm, that's spelled ${spelledOut} at ${email.split('@')[1]}. Is that correct?`,
+              prompt: `I have ${formatted}. Just to confirm, that's spelled ${spelledOut} at ${domain}. Is that correct?`,
               action: 'ask'
             };
           }
@@ -1127,10 +1154,18 @@ function createCallStateMachine() {
     const symptomPatterns = [
       /\b(blowing|heating|cooling|not working|broken|issue|problem|symptom|error|fault)\b/i,
       /\b(lukewarm|warm|cold|hot|air|unit|system|hvac|furnace|boiler)\b/i,
-      /\b(just|only|really|very|quite|pretty)\s+(blowing|heating|cooling|working)/i
+      /\b(just|only|really|very|quite|pretty)\s+(blowing|heating|cooling|working)/i,
+      /\b(pushing|pushing out|blowing out)\s+(lukewarm|warm|cold|hot|air)/i,
+      /\b(only|just)\s+(pushing|blowing)/i,
+      /\bthat'?s\s+it\b/i  // "that's it" at the end is usually not a name
     ];
     
     if (symptomPatterns.some(pattern => pattern.test(text))) {
+      return false;
+    }
+    
+    // Reject if it contains "only" or "just" followed by action words (symptom descriptions)
+    if (/\b(only|just)\s+\w+\s+(out|air|working|heating|cooling)/i.test(text)) {
       return false;
     }
     
@@ -1269,22 +1304,16 @@ function createCallStateMachine() {
   }
   
   function extractEmail(text) {
-    // Remove common prefixes like "that would be", "my email is", "it's", etc.
-    let email = text
-      .replace(/^(that would be|that's|it's|it is|my email is|email is|you can reach me at|reach me at|it's|the email is)\s*/gi, '')
-      .trim();
-    
-    // Extract spelling instructions (e.g., "with two m's", "double m", "two m's")
+    // First, extract spelling instructions BEFORE processing the email
     const spellingInstructions = [];
     const twoMsPattern = /\b(with\s+)?(two|2)\s+m'?s?\b/i;
     const doubleMPattern = /\b(double|two)\s+m\b/i;
     
     if (twoMsPattern.test(text) || doubleMPattern.test(text)) {
       spellingInstructions.push({ letter: 'm', count: 2 });
-      email = email.replace(twoMsPattern, '').replace(doubleMPattern, '').trim();
     }
     
-    // Extract other spelling patterns like "with two e's", "double t", etc.
+    // Extract other spelling patterns
     const letterCountPattern = /\b(with\s+)?(two|2|double)\s+([a-z])'?s?\b/gi;
     let match;
     while ((match = letterCountPattern.exec(text)) !== null) {
@@ -1292,41 +1321,65 @@ function createCallStateMachine() {
       if (!spellingInstructions.some(inst => inst.letter === letter)) {
         spellingInstructions.push({ letter, count: 2 });
       }
-      // Remove from email text
-      email = email.replace(new RegExp(`\\b(with\\s+)?(two|2|double)\\s+${letter}'?s?\\b`, 'gi'), '').trim();
+    }
+    
+    // Remove common prefixes and extract email portion
+    let email = text
+      .replace(/^(so\s+the\s+|that\s+would\s+be|that's|it's|it\s+is|my\s+email\s+is|email\s+is|you\s+can\s+reach\s+me\s+at|reach\s+me\s+at|the\s+email\s+is)\s*/gi, '')
+      .trim();
+    
+    // Remove spelling instructions and trailing clarifications
+    email = email
+      .replace(/\b(with\s+)?(two|2|double)\s+[a-z]'?s?\b/gi, '')
+      .replace(/\band\s+that'?s\s+[^.]*$/i, '')  // Remove "and that's Tim with two M's" type endings
+      .trim();
+    
+    // Extract just the email part (look for name pattern + "at" + domain)
+    // Pattern: "Tim Van C at gmail.com" or "timvanc at gmail dot com"
+    const emailMatch = email.match(/([a-z0-9\s]+?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
+    if (emailMatch) {
+      // Clean up the name part - remove spaces to make "Tim Van C" -> "timvanc"
+      let namePart = emailMatch[1].replace(/\s+/g, '').toLowerCase();
+      let domainPart = emailMatch[2];
+      email = `${namePart}@${domainPart}`;
+    } else {
+      // Try simpler pattern if first didn't match
+      const simpleMatch = email.match(/([a-z0-9\s]+)\s+(?:at|@)\s+([a-z0-9.]+)/i);
+      if (simpleMatch) {
+        let namePart = simpleMatch[1].replace(/\s+/g, '').toLowerCase();
+        let domainPart = simpleMatch[2];
+        email = `${namePart}@${domainPart}`;
+      }
     }
     
     // Convert spoken "at" and "dot" to symbols
-    // Handle cases like "john dot miller at email dot com"
     email = email
       .replace(/\s+at\s+/gi, '@')
       .replace(/\s+dot\s+/gi, '.')
-      .replace(/\s*@\s*/g, '@')  // Clean up spaces around @
-      .replace(/\s*\.\s*/g, '.')  // Clean up spaces around .
-      .replace(/\s+/g, '')        // Remove any remaining spaces in email
+      .replace(/\s*@\s*/g, '@')
+      .replace(/\s*\.\s*/g, '.')
+      .replace(/\s+/g, '')  // Remove all spaces
       .toLowerCase()
       .trim();
     
+    // Clean up common artifacts - remove prefixes that might be stuck
+    email = email.replace(/^(sothe|that|so|the)/, '');
+    
     // Apply spelling instructions
     if (spellingInstructions.length > 0) {
-      // Find the local part (before @)
       const atIndex = email.indexOf('@');
       if (atIndex > 0) {
         let localPart = email.substring(0, atIndex);
         const domain = email.substring(atIndex);
         
-        // Apply each spelling instruction
         for (const instruction of spellingInstructions) {
           const { letter, count } = instruction;
-          // Find occurrences of the letter and double the first one found
-          // Look for single letter (not already doubled/tripled)
           const letterIndex = localPart.indexOf(letter);
           if (letterIndex >= 0) {
-            // Check if it's already doubled
             const charAt = localPart[letterIndex];
             const nextChar = localPart[letterIndex + 1];
+            // If not already doubled, double it
             if (nextChar !== charAt) {
-              // Insert the letter count-1 more times
               localPart = localPart.substring(0, letterIndex + 1) + 
                          charAt.repeat(count - 1) + 
                          localPart.substring(letterIndex + 1);
@@ -1338,8 +1391,13 @@ function createCallStateMachine() {
       }
     }
     
-    // Clean up any remaining artifacts
-    email = email.replace(/[^a-z0-9@._-]/gi, '').toLowerCase();
+    // Final cleanup - remove any non-email characters
+    email = email.replace(/[^a-z0-9@._-]/g, '').toLowerCase();
+    
+    // Validate it looks like an email
+    if (!email.includes('@') || !email.includes('.')) {
+      return null; // Invalid email format
+    }
     
     return email;
   }
