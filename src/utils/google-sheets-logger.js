@@ -391,7 +391,13 @@ async function logCallIntake(callData, currentState, metadata = {}) {
   }
   
   try {
-    const sheets = getSheetsClient();
+    let sheets;
+    try {
+      sheets = getSheetsClient();
+    } catch (error) {
+      console.error(`❌ Failed to initialize Google Sheets client: ${error.message}`);
+      return { success: false, error: error.message };
+    }
     
     // Ensure sheet exists with headers
     await ensureSheetSetup(sheets, SPREADSHEET_ID, SHEET_NAME);
