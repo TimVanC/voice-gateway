@@ -230,27 +230,28 @@ function createCallStateMachine() {
       ? CONFIRMATION.correction_reread 
       : CONFIRMATION.intro;
     
-    // Build the read-back with spelling
+    // Build the read-back - use shorter format to avoid cutting off
     let parts = [intro];
     
-    // First name spelled
-    if (data.firstName) {
-      parts.push(`First name, ${spellOut(data.firstName)}.`);
+    // First and last name together (not spelled out)
+    if (data.firstName && data.lastName) {
+      parts.push(`Name, ${data.firstName} ${data.lastName}.`);
+    } else if (data.firstName) {
+      parts.push(`First name, ${data.firstName}.`);
+    } else if (data.lastName) {
+      parts.push(`Last name, ${data.lastName}.`);
     }
     
-    // Last name spelled
-    if (data.lastName) {
-      parts.push(`Last name, ${spellOut(data.lastName)}.`);
-    }
-    
-    // Phone spelled digit by digit
+    // Phone (grouped, not digit by digit)
     if (data.phone) {
-      parts.push(`Phone number, ${spellPhoneNumber(data.phone)}.`);
+      const formatted = formatPhoneForConfirmation(data.phone);
+      parts.push(`Phone, ${formatted}.`);
     }
     
-    // Email spelled
+    // Email (formatted, not spelled out letter by letter)
     if (data.email) {
-      parts.push(`Email, ${spellEmail(data.email)}.`);
+      const formatted = formatEmailForConfirmation(data.email);
+      parts.push(`Email, ${formatted}.`);
     }
     
     // Address
@@ -266,8 +267,11 @@ function createCallStateMachine() {
       parts.push(`Best availability, ${data.availability}.`);
     }
     
-    // Issue summary
-    parts.push(getIssueSummary());
+    // Issue summary (shortened)
+    const summary = getIssueSummary();
+    if (summary) {
+      parts.push(summary);
+    }
     
     parts.push(CONFIRMATION.verify);
     
