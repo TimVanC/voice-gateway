@@ -34,7 +34,8 @@ const COLUMN_HEADERS = [
   'primary_intent',
   'service_address',
   'availability_notes',
-  'call_summary'
+  'call_summary',
+  'call_status'
 ];
 
 // ============================================================================
@@ -163,9 +164,68 @@ function buildServiceAddress(callData) {
 }
 
 /**
+ * Determine call completion status
+ */
+function determineCallStatus(currentState, callData) {
+  const { STATES } = require('../state/call-state-machine');
+  
+  // Emergency redirects
+  if (callData.isSafetyRisk === true) {
+    return 'Emergency Redirect';
+  }
+  
+  // Out of scope
+  if (currentState === STATES.OUT_OF_SCOPE) {
+    return 'Out of Scope';
+  }
+  
+  // Complete - reached CLOSE state with required data
+  if (currentState === STATES.CLOSE) {
+    const hasRequiredData = callData.firstName && 
+                            callData.lastName && 
+                            callData.phone && 
+                            callData.address && 
+                            callData.intent;
+    if (hasRequiredData) {
+      return 'Complete';
+    }
+    return 'Incomplete - Missing Data';
+  }
+  
+  // Incomplete - didn't reach CLOSE state
+  // Determine how far they got
+  if (currentState === STATES.CONFIRMATION) {
+    return 'Incomplete - Confirmation Not Confirmed';
+  }
+  if (currentState === STATES.AVAILABILITY) {
+    return 'Incomplete - No Availability';
+  }
+  if (currentState === STATES.ADDRESS) {
+    return 'Incomplete - No Address';
+  }
+  if (currentState === STATES.EMAIL) {
+    return 'Incomplete - No Email';
+  }
+  if (currentState === STATES.PHONE) {
+    return 'Incomplete - No Phone';
+  }
+  if (currentState === STATES.NAME) {
+    return 'Incomplete - No Name';
+  }
+  if (currentState === STATES.SAFETY_CHECK || currentState === STATES.INTENT) {
+    return 'Incomplete - Early Exit';
+  }
+  if (currentState === STATES.GREETING) {
+    return 'Incomplete - No Response';
+  }
+  
+  return 'Incomplete - Unknown State';
+}
+
+/**
  * Transform call data to v1 row format
  */
-function transformCallDataToRow(callData, metadata = {}) {
+function transformCallDataToRow(callData, currentState, metadata = {}) {
   const {
     firstName,
     lastName,
@@ -180,6 +240,7 @@ function transformCallDataToRow(callData, metadata = {}) {
   
   const callId = metadata.callId || `CALL-${Date.now()}`;
   const timestamp = metadata.timestamp || new Date().toISOString();
+  const callStatus = determineCallStatus(currentState, callData);
   
   // Build row matching COLUMN_HEADERS order
   return [
@@ -192,43 +253,32 @@ function transformCallDataToRow(callData, metadata = {}) {
     formatIntent(intent),
     buildServiceAddress(callData),
     availability || '',
-    generateCallSummary(callData)
+    generateCallSummary(callData),
+    callStatus
   ];
 }
 
 /**
  * Check if call should be logged based on state and data
  * 
+ * Log ALL calls except:
+ * - Emergency redirects (safety risk)
+ * 
+ * Even incomplete calls, crashes, and early hangups should be logged
+ * with appropriate status designation.
+ * 
  * @param {string} currentState - Current state from state machine
  * @param {Object} callData - Call data object
  * @returns {boolean} True if call should be logged
  */
 function shouldLogCall(currentState, callData) {
-  const { STATES } = require('../state/call-state-machine');
-  
-  // Only log if we reached CLOSE state (confirmation succeeded)
-  if (currentState !== STATES.CLOSE) {
-    return false;
-  }
-  
-  // Don't log emergency redirects
+  // Don't log emergency redirects (these are handled differently)
   if (callData.isSafetyRisk === true) {
     return false;
   }
   
-  // Don't log out-of-scope calls where caller didn't pivot
-  if (currentState === STATES.OUT_OF_SCOPE) {
-    return false;
-  }
-  
-  // Ensure we have minimum required data
-  const hasRequiredData = callData.firstName && 
-                          callData.lastName && 
-                          callData.phone && 
-                          callData.address && 
-                          callData.intent;
-  
-  return hasRequiredData;
+  // Log everything else - complete, incomplete, crashes, hangups
+  return true;
 }
 
 /**
@@ -274,7 +324,7 @@ async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
       // Check if headers exist (read first row)
       const firstRow = await sheets.spreadsheets.values.get({
         spreadsheetId,
-        range: `${sheetName}!A1:J1` // 10 columns
+        range: `${sheetName}!A1:K1` // 11 columns (added call_status)
       });
       
       if (!firstRow.data.values || firstRow.data.values.length === 0) {
@@ -304,11 +354,13 @@ async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
 /**
  * Log call intake data to Google Sheets (V1)
  * 
- * Only logs if:
- * - Confirmation step succeeded (state is CLOSE)
- * - Not an emergency redirect
- * - Not an out-of-scope call
- * - Has required data
+ * Logs ALL calls including:
+ * - Complete calls (reached CLOSE state)
+ * - Incomplete calls (early exit, crash, hangup)
+ * - Calls with missing data
+ * 
+ * Does NOT log:
+ * - Emergency redirects (safety risk)
  * 
  * @param {Object} callData - Call data from state machine
  * @param {string} currentState - Current state from state machine
@@ -318,10 +370,7 @@ async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
 async function logCallIntake(callData, currentState, metadata = {}) {
   // Check if call should be logged
   if (!shouldLogCall(currentState, callData)) {
-    const reason = currentState !== require('../state/call-state-machine').STATES.CLOSE ? 'confirmation not completed' :
-                   callData.isSafetyRisk ? 'emergency redirect' :
-                   currentState === require('../state/call-state-machine').STATES.OUT_OF_SCOPE ? 'out of scope' :
-                   'missing required data';
+    const reason = callData.isSafetyRisk ? 'emergency redirect' : 'unknown';
     console.log(`⏭️  Skipping Google Sheets log: ${reason}`);
     return { success: false, skipped: true, reason };
   }
@@ -338,7 +387,7 @@ async function logCallIntake(callData, currentState, metadata = {}) {
     await ensureSheetSetup(sheets, SPREADSHEET_ID, SHEET_NAME);
     
     // Transform data to row format
-    const row = transformCallDataToRow(callData, {
+    const row = transformCallDataToRow(callData, currentState, {
       ...metadata,
       timestamp: metadata.timestamp || new Date().toISOString()
     });
@@ -383,5 +432,6 @@ module.exports = {
   COLUMN_HEADERS,
   transformCallDataToRow,
   shouldLogCall,
-  generateCallSummary
+  generateCallSummary,
+  determineCallStatus
 };

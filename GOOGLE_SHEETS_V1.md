@@ -4,7 +4,7 @@
 
 The Google Sheets integration has been implemented with a strict v1 schema designed for initial testing and client-facing handoff. The schema is future-proof for HubSpot integration.
 
-## V1 Schema (10 Required Columns)
+## V1 Schema (11 Columns)
 
 | Column | Description | Example |
 |--------|-------------|---------|
@@ -18,23 +18,34 @@ The Google Sheets integration has been implemented with a strict v1 schema desig
 | `service_address` | Full address | `123 Main St, Anytown, 12345` |
 | `availability_notes` | Availability info | `Weekday mornings` |
 | `call_summary` | 1-2 sentence summary | `John Smith called about HVAC service. Issue: System not cooling. Available: Weekday mornings.` |
+| `call_status` | Completion status | `Complete`, `Incomplete - No Address`, etc. |
 
 ## Logging Rules
 
-### ✅ Log When:
-- Confirmation step succeeds (call reaches `CLOSE` state)
-- Call has required data:
-  - First name
-  - Last name
-  - Phone number
-  - Address
-  - Intent
+### ✅ Log ALL Calls:
+- **Complete calls** - Reached CLOSE state with all required data
+- **Incomplete calls** - Early exit, crash, hangup, missing data
+- **Dropped calls** - User hung up before completion
+- **Partial data** - Calls with some but not all required fields
 
-### ❌ Do NOT Log When:
-- Emergency redirects (`isSafetyRisk === true`)
-- Dropped calls (never reached `CLOSE` state)
-- Out-of-scope calls where caller doesn't pivot
-- Missing required data
+### ❌ Do NOT Log:
+- **Emergency redirects** (`isSafetyRisk === true`) - These are handled separately for safety
+
+## Call Status Values
+
+The `call_status` field indicates the completion state:
+
+- `Complete` - Call reached CLOSE state with all required data
+- `Incomplete - Confirmation Not Confirmed` - Reached confirmation but didn't confirm
+- `Incomplete - No Availability` - Stopped at availability step
+- `Incomplete - No Address` - Stopped at address step
+- `Incomplete - No Email` - Stopped at email step
+- `Incomplete - No Phone` - Stopped at phone step
+- `Incomplete - No Name` - Stopped at name step
+- `Incomplete - Early Exit` - Stopped at intent or safety check
+- `Incomplete - No Response` - No response after greeting
+- `Incomplete - Missing Data` - Reached CLOSE but missing required fields
+- `Out of Scope` - Caller requested out-of-scope service
 
 ## Implementation Details
 
@@ -42,9 +53,10 @@ The Google Sheets integration has been implemented with a strict v1 schema desig
 
 **Key Functions:**
 - `logCallIntake(callData, currentState, metadata)` - Main logging function
-- `shouldLogCall(currentState, callData)` - Determines if call should be logged
+- `shouldLogCall(currentState, callData)` - Determines if call should be logged (now logs all except emergencies)
+- `determineCallStatus(currentState, callData)` - Determines completion status
 - `generateCallSummary(callData)` - Creates human-readable 1-2 sentence summary
-- `transformCallDataToRow(callData, metadata)` - Transforms data to row format
+- `transformCallDataToRow(callData, currentState, metadata)` - Transforms data to row format
 
 **Features:**
 - Append-only (never overwrites existing rows)

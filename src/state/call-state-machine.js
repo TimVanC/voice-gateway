@@ -730,10 +730,33 @@ function createCallStateMachine() {
             };
           }
           
+          // Check for spelling instructions (e.g., "with two m's")
+          const hasSpellingInstruction = /\b(with\s+)?(two|2|double)\s+[a-z]'?s?\b/i.test(transcript);
+          
           const email = extractEmail(transcript);
           const emailConf = estimateEmailConfidence(transcript);
           
           console.log(`📋 Email: ${email} (confidence: ${emailConf.level})`);
+          
+          // If spelling instruction detected, always confirm
+          if (hasSpellingInstruction) {
+            const formatted = formatEmailForConfirmation(email);
+            data.email = email;
+            pendingClarification = {
+              field: 'email',
+              value: email,
+              confidence: { level: CONFIDENCE.MEDIUM },
+              awaitingConfirmation: true
+            };
+            // Spell it out letter by letter for confirmation
+            const localPart = email.split('@')[0];
+            const spelledOut = localPart.split('').join('-').toUpperCase();
+            return {
+              nextState: currentState,
+              prompt: `I have ${formatted}. Just to confirm, that's spelled ${spelledOut} at ${email.split('@')[1]}. Is that correct?`,
+              action: 'ask'
+            };
+          }
           
           if (emailConf.level === CONFIDENCE.LOW) {
             return {
@@ -824,19 +847,74 @@ function createCallStateMachine() {
           
           if (overallConf.level === CONFIDENCE.LOW) {
             // Determine which part needs clarification
-            if (zipConf.level === CONFIDENCE.LOW) {
+            if (zipConf.level === CONFIDENCE.LOW && addressParts.zip) {
               return {
                 nextState: currentState,
-                prompt: "Could you repeat the zip code?",
+                prompt: "Could you repeat the zip code slowly?",
                 action: 'ask'
               };
             }
-            return {
-              nextState: currentState,
-              prompt: "I didn't catch that clearly. Could you repeat the street address?",
-              action: 'ask'
-            };
+            if (!addressParts.city && addressConf.level === CONFIDENCE.LOW) {
+              return {
+                nextState: currentState,
+                prompt: "I didn't catch the city clearly. Could you repeat the city name?",
+                action: 'ask'
+              };
+            }
+            if (addressConf.level === CONFIDENCE.LOW) {
+              // Check if we have street name indicators
+              const hasStreetName = /\b(road|rd|street|st|avenue|ave|drive|dr|lane|ln|way|court|ct|boulevard|blvd)\b/i.test(addressParts.address);
+              if (hasStreetName) {
+                return {
+                  nextState: currentState,
+                  prompt: "I want to make sure I have the street name right. Could you spell the street name for me?",
+                  action: 'ask'
+                };
+              }
+              return {
+                nextState: currentState,
+                prompt: "I didn't catch that clearly. Could you repeat the street address, including the house number and street name?",
+                action: 'ask'
+              };
+            }
           } else if (overallConf.level === CONFIDENCE.MEDIUM) {
+            // For medium confidence, ask for clarification on specific parts
+            let clarificationNeeded = [];
+            
+            if (addressConf.level === CONFIDENCE.MEDIUM) {
+              const hasStreetName = /\b(road|rd|street|st|avenue|ave|drive|dr|lane|ln|way|court|ct|boulevard|blvd)\b/i.test(addressParts.address);
+              if (hasStreetName) {
+                clarificationNeeded.push('street name');
+              } else {
+                clarificationNeeded.push('street address');
+              }
+            }
+            if (!addressParts.city || (cityConf && cityConf.level === CONFIDENCE.MEDIUM)) {
+              clarificationNeeded.push('city');
+            }
+            if (zipConf.level === CONFIDENCE.MEDIUM) {
+              clarificationNeeded.push('zip code');
+            }
+            
+            // If we need clarification on specific parts, ask for them
+            if (clarificationNeeded.length > 0) {
+              if (clarificationNeeded.includes('street name')) {
+                return {
+                  nextState: currentState,
+                  prompt: "I want to make sure I have the street name right. Could you spell the street name for me?",
+                  action: 'ask'
+                };
+              }
+              if (clarificationNeeded.includes('city')) {
+                return {
+                  nextState: currentState,
+                  prompt: "Could you repeat the city name?",
+                  action: 'ask'
+                };
+              }
+            }
+            
+            // Otherwise, confirm what we heard
             pendingClarification = {
               field: 'address',
               value: addressParts,
@@ -845,6 +923,7 @@ function createCallStateMachine() {
             };
             let confirmPrompt = `I heard ${addressParts.address}`;
             if (addressParts.city) confirmPrompt += `, ${addressParts.city}`;
+            if (addressParts.state) confirmPrompt += `, ${addressParts.state}`;
             if (addressParts.zip) confirmPrompt += `, ${addressParts.zip}`;
             confirmPrompt += `. Is that correct?`;
             return {
@@ -857,6 +936,7 @@ function createCallStateMachine() {
           // High confidence
           data.address = addressParts.address;
           data.city = addressParts.city;
+          data.state = addressParts.state;
           data.zip = addressParts.zip;
           return {
             nextState: transitionTo(STATES.AVAILABILITY),
@@ -1043,6 +1123,17 @@ function createCallStateMachine() {
       'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'
     ];
     
+    // Reject if it contains symptom/problem descriptions
+    const symptomPatterns = [
+      /\b(blowing|heating|cooling|not working|broken|issue|problem|symptom|error|fault)\b/i,
+      /\b(lukewarm|warm|cold|hot|air|unit|system|hvac|furnace|boiler)\b/i,
+      /\b(just|only|really|very|quite|pretty)\s+(blowing|heating|cooling|working)/i
+    ];
+    
+    if (symptomPatterns.some(pattern => pattern.test(text))) {
+      return false;
+    }
+    
     // Check if it's just one of these words
     if (notNames.includes(lowerText)) return false;
     
@@ -1183,6 +1274,28 @@ function createCallStateMachine() {
       .replace(/^(that would be|that's|it's|it is|my email is|email is|you can reach me at|reach me at|it's|the email is)\s*/gi, '')
       .trim();
     
+    // Extract spelling instructions (e.g., "with two m's", "double m", "two m's")
+    const spellingInstructions = [];
+    const twoMsPattern = /\b(with\s+)?(two|2)\s+m'?s?\b/i;
+    const doubleMPattern = /\b(double|two)\s+m\b/i;
+    
+    if (twoMsPattern.test(text) || doubleMPattern.test(text)) {
+      spellingInstructions.push({ letter: 'm', count: 2 });
+      email = email.replace(twoMsPattern, '').replace(doubleMPattern, '').trim();
+    }
+    
+    // Extract other spelling patterns like "with two e's", "double t", etc.
+    const letterCountPattern = /\b(with\s+)?(two|2|double)\s+([a-z])'?s?\b/gi;
+    let match;
+    while ((match = letterCountPattern.exec(text)) !== null) {
+      const letter = match[3].toLowerCase();
+      if (!spellingInstructions.some(inst => inst.letter === letter)) {
+        spellingInstructions.push({ letter, count: 2 });
+      }
+      // Remove from email text
+      email = email.replace(new RegExp(`\\b(with\\s+)?(two|2|double)\\s+${letter}'?s?\\b`, 'gi'), '').trim();
+    }
+    
     // Convert spoken "at" and "dot" to symbols
     // Handle cases like "john dot miller at email dot com"
     email = email
@@ -1193,6 +1306,40 @@ function createCallStateMachine() {
       .replace(/\s+/g, '')        // Remove any remaining spaces in email
       .toLowerCase()
       .trim();
+    
+    // Apply spelling instructions
+    if (spellingInstructions.length > 0) {
+      // Find the local part (before @)
+      const atIndex = email.indexOf('@');
+      if (atIndex > 0) {
+        let localPart = email.substring(0, atIndex);
+        const domain = email.substring(atIndex);
+        
+        // Apply each spelling instruction
+        for (const instruction of spellingInstructions) {
+          const { letter, count } = instruction;
+          // Find occurrences of the letter and double the first one found
+          // Look for single letter (not already doubled/tripled)
+          const letterIndex = localPart.indexOf(letter);
+          if (letterIndex >= 0) {
+            // Check if it's already doubled
+            const charAt = localPart[letterIndex];
+            const nextChar = localPart[letterIndex + 1];
+            if (nextChar !== charAt) {
+              // Insert the letter count-1 more times
+              localPart = localPart.substring(0, letterIndex + 1) + 
+                         charAt.repeat(count - 1) + 
+                         localPart.substring(letterIndex + 1);
+            }
+          }
+        }
+        
+        email = localPart + domain;
+      }
+    }
+    
+    // Clean up any remaining artifacts
+    email = email.replace(/[^a-z0-9@._-]/gi, '').toLowerCase();
     
     return email;
   }
@@ -1223,14 +1370,62 @@ function createCallStateMachine() {
   }
   
   function extractAddress(text) {
-    // Basic address extraction - look for zip and city patterns
-    const zipMatch = text.match(/\b\d{5}(-\d{4})?\b/);
-    const zip = zipMatch ? zipMatch[0] : null;
+    // Remove common prefixes
+    let address = text
+      .replace(/^(that would be|that's|it's|it is|the address is|address is|my address is)\s*/gi, '')
+      .trim();
     
-    // Very basic - in production would use a geocoding API
+    // Extract zip code (5 digits, optionally with -4 extension)
+    const zipMatch = address.match(/\b(\d{5}(-\d{4})?)\b/);
+    const zip = zipMatch ? zipMatch[1] : null;
+    
+    // Remove zip from text for further parsing
+    if (zip) {
+      address = address.replace(zipMatch[0], '').trim();
+    }
+    
+    // Extract state (common state abbreviations and full names)
+    const statePattern = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New\s+Hampshire|New\s+Jersey|New\s+Mexico|New\s+York|North\s+Carolina|North\s+Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode\s+Island|South\s+Carolina|South\s+Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West\s+Virginia|Wisconsin|Wyoming)\b/i;
+    const stateMatch = address.match(statePattern);
+    const state = stateMatch ? stateMatch[1] : null;
+    
+    // Remove state from text
+    if (state) {
+      address = address.replace(stateMatch[0], '').trim();
+    }
+    
+    // Extract city (usually before state, often capitalized or has comma)
+    let city = null;
+    if (state) {
+      // Look for city before state (often ends with comma or is last word before state)
+      const beforeState = address.substring(0, address.indexOf(stateMatch[0])).trim();
+      // Split by comma or take last significant word/phrase
+      const cityParts = beforeState.split(',').map(s => s.trim()).filter(s => s.length > 0);
+      if (cityParts.length > 0) {
+        city = cityParts[cityParts.length - 1]; // Take last part before state
+      }
+    }
+    
+    // Remove city from address text
+    if (city) {
+      address = address.replace(city, '').trim();
+    }
+    
+    // Clean up address (remove extra commas, spaces)
+    address = address.replace(/^[,.\s]+|[,.\s]+$/g, '').trim();
+    
+    // If address is empty but we have other parts, reconstruct
+    if (!address && (city || state || zip)) {
+      address = text.replace(/\b\d{5}(-\d{4})?\b/, '').trim();
+      if (state) address = address.replace(statePattern, '').trim();
+      if (city) address = address.replace(city, '').trim();
+      address = address.replace(/^[,.\s]+|[,.\s]+$/g, '').trim();
+    }
+    
     return {
-      address: text,
-      city: null,  // Would need NLP to extract
+      address: address || text,  // Fallback to full text if parsing fails
+      city: city,
+      state: state,
       zip: zip
     };
   }
