@@ -1243,8 +1243,8 @@ function createCallStateMachine() {
     let name = text
       // Remove leading filler words with optional punctuation
       .replace(/^(yeah,?\s*|yes,?\s*|oh,?\s*|um,?\s*|uh,?\s*|so,?\s*|well,?\s*)+/gi, '')
-      // Remove "it's", "this is", "my name is", etc.
-      .replace(/^(it's|it is|this is|i'm|i am|my name is|the name is|name's)\s*/gi, '')
+      // Remove "that would be", "it's", "this is", "my name is", etc.
+      .replace(/^(that\s+would\s+be|it'?s|it\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '')
       // Remove trailing punctuation
       .replace(/[.,!?]+$/g, '')
       // Remove leading/trailing punctuation and whitespace
