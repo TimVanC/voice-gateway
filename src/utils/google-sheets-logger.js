@@ -82,27 +82,27 @@ function removeFillerPhrases(text) {
 function normalizeSpelling(text) {
   if (!text || typeof text !== 'string') return '';
   
-  // Pattern: Match sequences of single uppercase letters separated by spaces, dashes, or periods
-  // Examples: "E L F", "E-L-F", "E. L. F.", "11 E L F Road"
-  // Match 2-15 single letters in a row, separated by spaces/dashes/periods
-  // Use a simpler approach: find sequences like "E L F" or "E-L-F"
-  const spelledWordPattern = /\b([A-Z])(?:\s*[-.\s]+\s*([A-Z]))(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?\b/g;
+  // Find sequences of single uppercase letters separated by spaces, dashes, or periods
+  // Pattern: Match "E L F", "E-L-F", "E. L. F." etc.
+  // We'll use a simpler iterative approach
+  let result = text;
   
-  return text.replace(spelledWordPattern, (match) => {
-    // Extract all uppercase letters from the match
-    const allLetters = (match.match(/[A-Z]/g) || []).filter((letter, index, arr) => {
-      // Only include if it's a single letter (not part of a word)
-      return letter.length === 1;
-    });
-    
-    if (allLetters && allLetters.length >= 2 && allLetters.length <= 15) {
-      // Combine letters into word
-      const word = allLetters.join('').toLowerCase();
-      // Capitalize first letter
+  // Match pattern: single letter, then 1-14 more single letters separated by spaces/dashes/periods
+  // Example: "E L F" or "E-L-F" or "E. L. F."
+  const pattern = /\b([A-Z])(?:\s*[-.\s]+\s*([A-Z]))(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?\b/g;
+  
+  result = result.replace(pattern, (match) => {
+    // Extract all single uppercase letters
+    const letters = match.match(/\b[A-Z]\b/g);
+    if (letters && letters.length >= 2 && letters.length <= 15) {
+      // Combine into word and capitalize first letter
+      const word = letters.join('').toLowerCase();
       return word.charAt(0).toUpperCase() + word.slice(1);
     }
     return match;
   });
+  
+  return result;
 }
 
 /**
