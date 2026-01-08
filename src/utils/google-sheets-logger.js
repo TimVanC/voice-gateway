@@ -42,6 +42,237 @@ const COLUMN_HEADERS = [
 ];
 
 // ============================================================================
+// VALIDATION AND NORMALIZATION FUNCTIONS
+// ============================================================================
+
+/**
+ * Remove filler phrases and partial utterances from text
+ * Examples: "yeah it's", "uh", "um", "that would be", etc.
+ */
+function removeFillerPhrases(text) {
+  if (!text || typeof text !== 'string') return '';
+  
+  let cleaned = text.trim();
+  
+  // Common filler phrases to remove
+  const fillerPatterns = [
+    /^(yeah\s*,?\s*)?(it'?s|it\s+is|that'?s|that\s+is|that\s+would\s+be|so\s+the|the)\s+/gi,
+    /^(um|uh|er|ah|oh|well|so|like)\s*,?\s*/gi,
+    /^(okay|ok|alright|right|sure|yeah|yes|yep|yup)\s*,?\s*/gi,
+    /\s+(um|uh|er|ah|oh|well|so|like)\s*$/gi,
+    /\s+(okay|ok|alright|right|sure|yeah|yes|yep|yup)\s*$/gi,
+    /^(i\s+think|i\s+guess|i\s+mean|you\s+know)\s*,?\s*/gi,
+    /\s+(i\s+think|i\s+guess|i\s+mean|you\s+know)\s*$/gi
+  ];
+  
+  fillerPatterns.forEach(pattern => {
+    cleaned = cleaned.replace(pattern, '');
+  });
+  
+  // Remove multiple spaces
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  return cleaned;
+}
+
+/**
+ * Normalize spelled-out words (E L F → Elf)
+ * Handles patterns like "E L F", "E-L-F", "E. L. F.", "E L F Road"
+ */
+function normalizeSpelling(text) {
+  if (!text || typeof text !== 'string') return '';
+  
+  // Pattern: Match sequences of single uppercase letters separated by spaces, dashes, or periods
+  // Examples: "E L F", "E-L-F", "E. L. F.", "11 E L F Road"
+  // Match 2-15 single letters in a row, separated by spaces/dashes/periods
+  // Use a simpler approach: find sequences like "E L F" or "E-L-F"
+  const spelledWordPattern = /\b([A-Z])(?:\s*[-.\s]+\s*([A-Z]))(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?\b/g;
+  
+  return text.replace(spelledWordPattern, (match) => {
+    // Extract all uppercase letters from the match
+    const allLetters = (match.match(/[A-Z]/g) || []).filter((letter, index, arr) => {
+      // Only include if it's a single letter (not part of a word)
+      return letter.length === 1;
+    });
+    
+    if (allLetters && allLetters.length >= 2 && allLetters.length <= 15) {
+      // Combine letters into word
+      const word = allLetters.join('').toLowerCase();
+      // Capitalize first letter
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    }
+    return match;
+  });
+}
+
+/**
+ * Validate and normalize phone number
+ * Returns normalized phone (10 digits) or empty string if invalid
+ */
+function validateAndNormalizePhone(phone) {
+  if (!phone) return '';
+  
+  // Remove filler phrases first
+  let cleaned = removeFillerPhrases(phone);
+  
+  // Extract digits only
+  const digits = cleaned.replace(/\D/g, '');
+  
+  // Must be exactly 10 digits (US phone number)
+  if (digits.length === 10) {
+    // Format as XXX-XXX-XXXX
+    return `${digits.slice(0,3)}-${digits.slice(3,6)}-${digits.slice(6)}`;
+  }
+  
+  // If 11 digits and starts with 1, use last 10
+  if (digits.length === 11 && digits.startsWith('1')) {
+    const last10 = digits.slice(1);
+    return `${last10.slice(0,3)}-${last10.slice(3,6)}-${last10.slice(6)}`;
+  }
+  
+  // Invalid - return empty string
+  console.log(`⚠️  Invalid phone number: "${phone}" (${digits.length} digits)`);
+  return '';
+}
+
+/**
+ * Validate and normalize email
+ * Returns normalized email or empty string if invalid
+ */
+function validateAndNormalizeEmail(email) {
+  if (!email) return '';
+  
+  // Remove filler phrases first
+  let cleaned = removeFillerPhrases(email);
+  
+  // Normalize spelling in email (handle spelled-out domains)
+  cleaned = normalizeSpelling(cleaned);
+  
+  // Convert "at" and "dot" to symbols
+  cleaned = cleaned
+    .replace(/\s+at\s+/gi, '@')
+    .replace(/\s+dot\s+/gi, '.')
+    .replace(/\s+/g, '') // Remove all spaces
+    .toLowerCase()
+    .trim();
+  
+  // Basic email validation
+  // Must have exactly one @
+  const atCount = (cleaned.match(/@/g) || []).length;
+  if (atCount !== 1) {
+    console.log(`⚠️  Invalid email: "${email}" (${atCount} @ symbols)`);
+    return '';
+  }
+  
+  // Must have domain and extension
+  const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+  if (!emailRegex.test(cleaned)) {
+    console.log(`⚠️  Invalid email format: "${email}"`);
+    return '';
+  }
+  
+  return cleaned;
+}
+
+/**
+ * Validate and normalize service address
+ * Returns normalized address or empty string if invalid
+ */
+function validateAndNormalizeAddress(address) {
+  if (!address) return '';
+  
+  // Remove filler phrases first
+  let cleaned = removeFillerPhrases(address);
+  
+  // Normalize spelling (E L F → Elf)
+  cleaned = normalizeSpelling(cleaned);
+  
+  // Must look like a real address
+  // Should have a street number and street name
+  const hasNumber = /^\s*\d{1,6}\s+/.test(cleaned);
+  const hasStreetType = /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|place|pl|terrace|terr)\b/i.test(cleaned);
+  
+  if (!hasNumber || !hasStreetType) {
+    console.log(`⚠️  Invalid address format: "${address}"`);
+    return '';
+  }
+  
+  // Reject if it contains symptom/problem descriptions
+  const symptomPatterns = [
+    /\b(blowing|heating|cooling|not working|broken|issue|problem|symptom|error|fault)\b/i,
+    /\b(lukewarm|warm|cold|hot|air|unit|system|hvac|furnace|boiler|running|still)\b/i,
+    /\b(just|only)\s+(blowing|heating|cooling|working|running)\b/i,
+    /\b(no|not)\s+(hot|cold|warm|air|heat|cooling)\s+(coming|blowing|out)\b/i
+  ];
+  
+  if (symptomPatterns.some(pattern => pattern.test(cleaned))) {
+    console.log(`⚠️  Address contains symptom description: "${address}"`);
+    return '';
+  }
+  
+  // Capitalize first letter of each word (proper address format)
+  cleaned = cleaned.split(' ').map(word => {
+    if (word.length === 0) return word;
+    // Don't capitalize common words
+    const lower = word.toLowerCase();
+    if (['the', 'of', 'and', 'a', 'an', 'in', 'on', 'at', 'to', 'for'].includes(lower)) {
+      return lower;
+    }
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  }).join(' ');
+  
+  return cleaned;
+}
+
+/**
+ * Clean and make call summary semantic
+ * Removes filler words and rephrases into operational language
+ */
+function cleanCallSummary(summary) {
+  if (!summary) return '';
+  
+  // Remove common filler words
+  const fillerWords = ['uh', 'um', 'er', 'ah', 'oh', 'like', 'you know', 'i mean', 'i think', 'i guess'];
+  let cleaned = summary;
+  
+  fillerWords.forEach(filler => {
+    const regex = new RegExp(`\\b${filler}\\b`, 'gi');
+    cleaned = cleaned.replace(regex, '');
+  });
+  
+  // Remove filler phrases
+  cleaned = removeFillerPhrases(cleaned);
+  
+  // Normalize spelling
+  cleaned = normalizeSpelling(cleaned);
+  
+  // Clean up multiple spaces
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  // Rephrase common patterns into operational language
+  cleaned = cleaned
+    .replace(/\b(no|not|isn'?t|isn't|doesn'?t|doesn't|won'?t|won't)\s+(hot|warm|air|heat|cooling)\s+(coming|blowing|out)\b/gi, 'no warm air')
+    .replace(/\b(blowing|pushing)\s+(out|out of)\s+(lukewarm|warm|cold|hot)\s+air\b/gi, 'blowing warm air')
+    .replace(/\b(just|only)\s+(blowing|heating|cooling|working|running)\b/gi, 'operating')
+    .replace(/\b(not|no)\s+(working|heating|cooling|running)\b/gi, 'not functioning')
+    .replace(/\b(issue|problem|trouble)\s+with\b/gi, 'issue with')
+    .replace(/\b(reported|said|mentioned)\s+that\b/gi, 'reported');
+  
+  // Ensure it's 1-2 sentences
+  const sentences = cleaned.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  if (sentences.length > 2) {
+    cleaned = sentences.slice(0, 2).join('. ') + '.';
+  }
+  
+  // Ensure it ends with punctuation
+  if (!cleaned.match(/[.!?]$/)) {
+    cleaned += '.';
+  }
+  
+  return cleaned;
+}
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
@@ -121,6 +352,7 @@ function getSheetsClient() {
  * Generate human-readable call summary (1-2 sentences plain English)
  * For completed calls: Include system type and key symptoms if provided
  * For incomplete calls: Summarize collected information and note early disconnect
+ * Summary is cleaned and semantic (no filler words)
  */
 function generateCallSummary(callData, callStatus) {
   const {
@@ -134,21 +366,16 @@ function generateCallSummary(callData, callStatus) {
   // Build summary based on available details
   let summary = '';
   
-  // Start with system type if available
-  if (systemType) {
-    summary = systemType;
-  }
-  
-  // Add the issue/problem description
+  // Add the issue/problem description (clean it first)
   let issueText = '';
   if (details.symptoms) {
-    issueText = details.symptoms.trim();
+    issueText = cleanCallSummary(details.symptoms);
   } else if (details.issueDescription) {
-    issueText = details.issueDescription.trim();
+    issueText = cleanCallSummary(details.issueDescription);
   } else if (details.generatorIssue) {
-    issueText = details.generatorIssue.trim();
+    issueText = cleanCallSummary(details.generatorIssue);
   } else if (details.helpNeeded) {
-    issueText = details.helpNeeded.trim();
+    issueText = cleanCallSummary(details.helpNeeded);
   }
   
   // Truncate issue text if too long
@@ -191,10 +418,13 @@ function generateCallSummary(callData, callStatus) {
     return 'Caller requested service outside of scope.';
   }
   
+  // Clean the final summary (remove any remaining fillers)
+  summary = cleanCallSummary(summary);
+  
   // Ensure it's 1-2 sentences (split if too long)
   const sentences = summary.split(/[.!?]+/).filter(s => s.trim().length > 0);
   if (sentences.length > 2) {
-    return sentences.slice(0, 2).join('. ') + '.';
+    summary = sentences.slice(0, 2).join('. ') + '.';
   }
   
   // Ensure it ends with punctuation
@@ -269,14 +499,36 @@ function normalizeIntent(intent, callData = {}) {
 
 /**
  * Build service address from address components
+ * Validates and normalizes the address before returning
  */
 function buildServiceAddress(callData) {
   const { address, city, zip } = callData;
   
-  const parts = [];
-  if (address) parts.push(address);
-  if (city) parts.push(city);
-  if (zip) parts.push(zip);
+  // Validate and normalize the street address
+  const normalizedAddress = address ? validateAndNormalizeAddress(address) : '';
+  
+  // Only build full address if we have a valid street address
+  if (!normalizedAddress) {
+    return '';
+  }
+  
+  const parts = [normalizedAddress];
+  
+  // Add city if provided (normalize spelling)
+  if (city) {
+    const normalizedCity = normalizeSpelling(removeFillerPhrases(city));
+    if (normalizedCity) {
+      parts.push(normalizedCity);
+    }
+  }
+  
+  // Add zip if provided (validate it's numeric)
+  if (zip) {
+    const zipDigits = zip.replace(/\D/g, '');
+    if (zipDigits.length === 5 || zipDigits.length === 9) {
+      parts.push(zipDigits);
+    }
+  }
   
   return parts.join(', ') || '';
 }
@@ -383,6 +635,7 @@ function determineCallStatus(currentState, callData) {
  * For completed: Log all fields including availability and address
  * 
  * Only leave fields blank if they were never collected.
+ * All fields are validated and normalized before persisting.
  */
 function transformCallDataToRow(callData, currentState, metadata = {}) {
   const {
@@ -404,25 +657,37 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
   // Normalize intent to canonical value (only if intent was collected)
   const normalizedIntent = intent ? normalizeIntent(intent, callData) : '';
   
+  // Validate and normalize phone number
   // Use phone from callData, or fallback to callerNumber from metadata
-  const phoneNumber = phone || metadata.callerNumber || '';
+  const rawPhone = phone || metadata.callerNumber || '';
+  const phoneNumber = rawPhone ? validateAndNormalizePhone(rawPhone) : '';
   
-  // Build service address (partial or full - whatever was collected)
+  // Validate and normalize email
+  const normalizedEmail = email ? validateAndNormalizeEmail(email) : '';
+  
+  // Build and validate service address
   const serviceAddress = buildServiceAddress(callData);
   
+  // Clean availability notes (remove fillers)
+  const availabilityNotes = availability ? removeFillerPhrases(availability) : '';
+  
+  // Clean names (remove fillers, normalize spelling)
+  const cleanFirstName = firstName ? normalizeSpelling(removeFillerPhrases(firstName)) : '';
+  const cleanLastName = lastName ? normalizeSpelling(removeFillerPhrases(lastName)) : '';
+  
   // For all calls (complete and incomplete): Log all collected data
-  // Only leave fields blank if they were never collected
+  // Only leave fields blank if they were never collected or failed validation
   return [
     callId,
     timestamp,
-    firstName || '', // Log if collected
-    lastName || '', // Log if collected
-    phoneNumber, // Always log (from caller number if not provided)
-    email || '', // Log if collected
-    normalizedIntent, // Log if collected (normalized to canonical value)
-    serviceAddress, // Log if collected (partial or full)
-    availability || '', // Log if collected
-    generateCallSummary(callData, callStatus), // Summary based on collected data
+    cleanFirstName, // Validated and cleaned
+    cleanLastName, // Validated and cleaned
+    phoneNumber, // Validated (10 digits) or empty if invalid
+    normalizedEmail, // Validated (proper format) or empty if invalid
+    normalizedIntent, // Normalized to canonical value
+    serviceAddress, // Validated (real address) or empty if invalid
+    availabilityNotes, // Cleaned (filler phrases removed)
+    generateCallSummary(callData, callStatus), // Cleaned and semantic
     callStatus
   ];
 }
@@ -452,6 +717,7 @@ function shouldLogCall(currentState, callData) {
 
 /**
  * Ensure sheet exists and has headers
+ * Also handles schema evolution - adds missing columns if schema changes
  */
 async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
   try {
@@ -493,7 +759,7 @@ async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
       // Check if headers exist (read first row)
       const firstRow = await sheets.spreadsheets.values.get({
         spreadsheetId,
-        range: `${sheetName}!A1:K1` // 11 columns (added call_status)
+        range: `${sheetName}!A1:Z1` // Read more columns to check for schema evolution
       });
       
       if (!firstRow.data.values || firstRow.data.values.length === 0) {
@@ -508,11 +774,62 @@ async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
         });
         
         console.log(`✅ Added v1 headers to sheet "${sheetName}"`);
+      } else {
+        // Schema evolution: Check if we need to add missing columns
+        const existingHeaders = firstRow.data.values[0] || [];
+        const missingHeaders = COLUMN_HEADERS.filter((header, index) => {
+          return !existingHeaders.includes(header);
+        });
+        
+        if (missingHeaders.length > 0) {
+          console.log(`📊 Schema evolution: Adding ${missingHeaders.length} missing columns: ${missingHeaders.join(', ')}`);
+          
+          // Add missing columns by appending to the header row
+          const lastColumn = String.fromCharCode(64 + existingHeaders.length); // Convert to column letter
+          const newHeaders = existingHeaders.concat(missingHeaders);
+          
+          await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: `${sheetName}!A1`,
+            valueInputOption: 'RAW',
+            requestBody: {
+              values: [newHeaders]
+            }
+          });
+          
+          console.log(`✅ Added missing columns to sheet "${sheetName}"`);
+        }
       }
     }
   } catch (error) {
     console.error('❌ Error setting up sheet:', error.message);
     throw error;
+  }
+}
+
+/**
+ * Check if a call_id already exists in the sheet (idempotency check)
+ * Returns true if call_id exists, false otherwise
+ */
+async function callIdExists(sheets, spreadsheetId, sheetName, callId) {
+  try {
+    // Read all call_id values from column A (skip header row)
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A2:A`, // Column A, starting from row 2
+    });
+    
+    if (!response.data.values) {
+      return false;
+    }
+    
+    // Flatten array and check if callId exists
+    const existingCallIds = response.data.values.flat();
+    return existingCallIds.includes(callId);
+  } catch (error) {
+    console.error(`⚠️  Error checking for duplicate call_id: ${error.message}`);
+    // If check fails, allow the write (better to have duplicates than miss data)
+    return false;
   }
 }
 
@@ -562,12 +879,28 @@ async function logCallIntake(callData, currentState, metadata = {}) {
       return { success: false, error: error.message };
     }
     
-    // Ensure sheet exists with headers
+    // Ensure sheet exists with headers (and handle schema evolution)
     await ensureSheetSetup(sheets, SPREADSHEET_ID, SHEET_NAME);
     
-    // Transform data to row format
+    // Generate call_id
+    const callId = metadata.callId || `CALL-${Date.now()}`;
+    
+    // Idempotency check: Prevent duplicate rows for the same call_id
+    const alreadyExists = await callIdExists(sheets, SPREADSHEET_ID, SHEET_NAME, callId);
+    if (alreadyExists) {
+      console.log(`⏭️  Call ${callId} already logged - skipping duplicate`);
+      return {
+        success: true,
+        skipped: true,
+        reason: 'duplicate_call_id',
+        callId
+      };
+    }
+    
+    // Transform data to row format (with validation and normalization)
     const row = transformCallDataToRow(callData, currentState, {
       ...metadata,
+      callId,
       timestamp: metadata.timestamp || new Date().toISOString()
     });
     
@@ -582,11 +915,12 @@ async function logCallIntake(callData, currentState, metadata = {}) {
       }
     });
     
-    console.log(`✅ Call intake logged to Google Sheets (row ${response.data.updates.updatedRows})`);
+    console.log(`✅ Call intake logged to Google Sheets (row ${response.data.updates.updatedRows}, call_id: ${callId})`);
     
     return {
       success: true,
       rowNumber: response.data.updates.updatedRows,
+      callId,
       spreadsheetId: SPREADSHEET_ID,
       sheetName: SHEET_NAME
     };
