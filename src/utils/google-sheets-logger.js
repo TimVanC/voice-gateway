@@ -119,72 +119,50 @@ function getSheetsClient() {
 
 /**
  * Generate human-readable call summary (1-2 sentences plain English)
- * For completed calls: based on collected details
- * For incomplete_hangup: "Caller disconnected before completing intake."
- * For out_of_scope_only: "Caller requested service outside of scope."
+ * For completed calls: Include system type and key symptoms if provided
+ * For incomplete calls: Summarize collected information and note early disconnect
  */
 function generateCallSummary(callData, callStatus) {
-  // For incomplete hangups, use standard message
-  if (callStatus === 'incomplete_hangup') {
-    return 'Caller disconnected before completing intake.';
-  }
-  
-  // For out of scope calls
-  if (callStatus === 'out_of_scope_only') {
-    return 'Caller requested service outside of scope.';
-  }
-  
-  // For completed calls, build detailed summary
   const {
     intent,
-    firstName,
-    lastName,
-    situationSummary,
-    availability,
     details = {}
   } = callData;
   
   const normalizedIntent = normalizeIntent(intent, callData);
+  const systemType = normalizeSystemType(details.systemType);
   
-  // Build summary based on intent and available details
+  // Build summary based on available details
   let summary = '';
   
-  // Start with the issue/problem description
+  // Start with system type if available
+  if (systemType) {
+    summary = systemType;
+  }
+  
+  // Add the issue/problem description
+  let issueText = '';
   if (details.symptoms) {
-    const symptoms = details.symptoms.trim();
-    if (symptoms.length > 200) {
-      summary = symptoms.substring(0, 200) + '...';
-    } else {
-      summary = symptoms;
-    }
-  } else if (situationSummary) {
-    const summaryText = situationSummary.trim();
-    if (summaryText.length > 200) {
-      summary = summaryText.substring(0, 200) + '...';
-    } else {
-      summary = summaryText;
-    }
+    issueText = details.symptoms.trim();
   } else if (details.issueDescription) {
-    const issue = details.issueDescription.trim();
-    if (issue.length > 200) {
-      summary = issue.substring(0, 200) + '...';
-    } else {
-      summary = issue;
-    }
+    issueText = details.issueDescription.trim();
   } else if (details.generatorIssue) {
-    const issue = details.generatorIssue.trim();
-    if (issue.length > 200) {
-      summary = issue.substring(0, 200) + '...';
-    } else {
-      summary = issue;
-    }
+    issueText = details.generatorIssue.trim();
   } else if (details.helpNeeded) {
-    const help = details.helpNeeded.trim();
-    if (help.length > 200) {
-      summary = help.substring(0, 200) + '...';
-    } else {
-      summary = help;
-    }
+    issueText = details.helpNeeded.trim();
+  }
+  
+  // Truncate issue text if too long
+  if (issueText.length > 150) {
+    issueText = issueText.substring(0, 150) + '...';
+  }
+  
+  // Combine system type and issue
+  if (systemType && issueText) {
+    summary = `Caller reported ${issueText} from a ${systemType}.`;
+  } else if (systemType) {
+    summary = `Caller reported issue with a ${systemType}.`;
+  } else if (issueText) {
+    summary = `Caller reported ${issueText}.`;
   } else {
     // Fallback: basic intent description
     const intentDescriptions = {
@@ -198,14 +176,19 @@ function generateCallSummary(callData, callStatus) {
     summary = intentDescriptions[normalizedIntent] || 'Service request';
   }
   
-  // Add system type if available
-  if (details.systemType && !summary.toLowerCase().includes(details.systemType.toLowerCase())) {
-    summary = `${details.systemType}. ${summary}`;
-  }
-  
   // Add safety status if relevant
   if (callData.isSafetyRisk === false && normalizedIntent === 'hvac_service') {
     summary += ' No safety issues reported.';
+  }
+  
+  // For incomplete calls, explicitly note early disconnect
+  if (callStatus === 'incomplete_hangup') {
+    summary += ' Call ended before intake was completed.';
+  }
+  
+  // For out of scope calls
+  if (callStatus === 'out_of_scope_only') {
+    return 'Caller requested service outside of scope.';
   }
   
   // Ensure it's 1-2 sentences (split if too long)
@@ -299,8 +282,76 @@ function buildServiceAddress(callData) {
 }
 
 /**
+ * Normalize system type to lowercase canonical values
+ * Examples: furnace, boiler, central air, heat pump, mini split, rooftop unit, etc.
+ * If multiple systems mentioned, returns comma-separated list
+ */
+function normalizeSystemType(systemType) {
+  if (!systemType) return '';
+  
+  const normalized = systemType.toLowerCase().trim();
+  
+  // Map common variations to canonical values
+  const systemTypeMap = {
+    'furnace': 'furnace',
+    'boiler': 'boiler',
+    'central air': 'central air',
+    'central air conditioning': 'central air',
+    'central ac': 'central air',
+    'heat pump': 'heat pump',
+    'mini split': 'mini split',
+    'mini-split': 'mini split',
+    'ductless': 'mini split',
+    'rooftop unit': 'rooftop unit',
+    'rtu': 'rooftop unit',
+    'packaged unit': 'packaged unit',
+    'package unit': 'packaged unit',
+    'generator standby': 'generator standby',
+    'standby generator': 'generator standby',
+    'generator portable': 'generator portable',
+    'portable generator': 'generator portable',
+    'ac': 'central air',
+    'air conditioning': 'central air',
+    'air conditioner': 'central air'
+  };
+  
+  // Check for exact matches first
+  if (systemTypeMap[normalized]) {
+    return systemTypeMap[normalized];
+  }
+  
+  // Check for partial matches (e.g., "gas furnace" contains "furnace")
+  for (const [key, value] of Object.entries(systemTypeMap)) {
+    if (normalized.includes(key) || key.includes(normalized)) {
+      return value;
+    }
+  }
+  
+  // If multiple systems mentioned (comma-separated), normalize each
+  if (normalized.includes(',')) {
+    const systems = normalized.split(',').map(s => s.trim());
+    const normalizedSystems = systems.map(s => {
+      for (const [key, value] of Object.entries(systemTypeMap)) {
+        if (s.includes(key) || key.includes(s)) {
+          return value;
+        }
+      }
+      return s; // Return as-is if no match
+    });
+    return normalizedSystems.filter(s => s).join(', ');
+  }
+  
+  // Return as-is if no normalization found
+  return normalized;
+}
+
+/**
  * Determine call completion status
  * Returns canonical values: completed, incomplete_hangup, emergency_redirect, out_of_scope_only
+ * 
+ * Distinction is based only on flow completion:
+ * - completed: confirmation step reached and accepted (CLOSE state)
+ * - incomplete_hangup: caller disconnected before confirmation
  */
 function determineCallStatus(currentState, callData) {
   const { STATES, INTENT_TYPES } = require('../scripts/rse-script');
@@ -315,29 +366,23 @@ function determineCallStatus(currentState, callData) {
     return 'out_of_scope_only';
   }
   
-  // Complete - reached CLOSE state with required data
+  // Complete - reached CLOSE state (confirmation accepted)
   if (currentState === STATES.CLOSE) {
-    const hasRequiredData = callData.firstName && 
-                            callData.lastName && 
-                            callData.phone && 
-                            callData.intent;
-    if (hasRequiredData) {
-      return 'completed';
-    }
-    // Missing required data - downgrade to incomplete
-    return 'incomplete_hangup';
+    return 'completed';
   }
   
-  // All other cases are incomplete hangups
+  // All other cases are incomplete hangups (didn't reach confirmation)
   return 'incomplete_hangup';
 }
 
 /**
  * Transform call data to v1 row format
  * 
- * For incomplete_hangup: Only populate call_id, call_timestamp, phone_number, call_status
- * For completed: Require first_name, last_name, phone_number, primary_intent
- *                If missing, downgrade to incomplete_hangup
+ * Progressive data capture: Log all information successfully collected before disconnect.
+ * For incomplete_hangup: Log all collected data (first_name, last_name, phone, email, intent, etc.)
+ * For completed: Log all fields including availability and address
+ * 
+ * Only leave fields blank if they were never collected.
  */
 function transformCallDataToRow(callData, currentState, metadata = {}) {
   const {
@@ -354,70 +399,30 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
   
   const callId = metadata.callId || `CALL-${Date.now()}`;
   const timestamp = metadata.timestamp || new Date().toISOString();
-  let callStatus = determineCallStatus(currentState, callData);
+  const callStatus = determineCallStatus(currentState, callData);
   
-  // For incomplete_hangup and out_of_scope_only: Only log minimal fields
-  if (callStatus === 'incomplete_hangup' || callStatus === 'out_of_scope_only') {
-    // Use phone from callData, or fallback to callerNumber from metadata
-    const phoneNumber = phone || metadata.callerNumber || '';
-    return [
-      callId,
-      timestamp,
-      '', // first_name
-      '', // last_name
-      phoneNumber, // phone_number
-      '', // email
-      '', // primary_intent
-      '', // service_address
-      '', // availability_notes
-      generateCallSummary(callData, callStatus), // call_summary
-      callStatus
-    ];
-  }
+  // Normalize intent to canonical value (only if intent was collected)
+  const normalizedIntent = intent ? normalizeIntent(intent, callData) : '';
   
-  // For completed calls: Validate required fields
-  if (callStatus === 'completed') {
-    const hasRequiredFields = firstName && lastName && phone && intent;
-    if (!hasRequiredFields) {
-      // Downgrade to incomplete_hangup if missing required fields
-      callStatus = 'incomplete_hangup';
-      const phoneNumber = phone || metadata.callerNumber || '';
-      return [
-        callId,
-        timestamp,
-        '', // first_name
-        '', // last_name
-        phoneNumber, // phone_number
-        '', // email
-        '', // primary_intent
-        '', // service_address
-        '', // availability_notes
-        generateCallSummary(callData, callStatus), // call_summary
-        callStatus
-      ];
-    }
-  }
+  // Use phone from callData, or fallback to callerNumber from metadata
+  const phoneNumber = phone || metadata.callerNumber || '';
   
-  // For completed calls: Populate all fields
-  // Normalize intent to canonical value
-  const normalizedIntent = normalizeIntent(intent, callData);
+  // Build service address (partial or full - whatever was collected)
+  const serviceAddress = buildServiceAddress(callData);
   
-  // Only populate availability_notes and service_address for completed calls
-  const serviceAddress = callStatus === 'completed' ? buildServiceAddress(callData) : '';
-  const availabilityNotes = callStatus === 'completed' ? (availability || '') : '';
-  
-  // Build row matching COLUMN_HEADERS order
+  // For all calls (complete and incomplete): Log all collected data
+  // Only leave fields blank if they were never collected
   return [
     callId,
     timestamp,
-    firstName || '',
-    lastName || '',
-    phone || '',
-    email || '', // Email is optional even for completed calls
-    normalizedIntent, // Normalized canonical intent value
-    serviceAddress,
-    availabilityNotes,
-    generateCallSummary(callData, callStatus),
+    firstName || '', // Log if collected
+    lastName || '', // Log if collected
+    phoneNumber, // Always log (from caller number if not provided)
+    email || '', // Log if collected
+    normalizedIntent, // Log if collected (normalized to canonical value)
+    serviceAddress, // Log if collected (partial or full)
+    availability || '', // Log if collected
+    generateCallSummary(callData, callStatus), // Summary based on collected data
     callStatus
   ];
 }
