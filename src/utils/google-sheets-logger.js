@@ -156,6 +156,9 @@ function validateAndNormalizeEmail(email) {
     .toLowerCase()
     .trim();
   
+  // Remove trailing periods and other punctuation
+  cleaned = cleaned.replace(/[.,;:!?]+$/, '');
+  
   // Basic email validation
   // Must have exactly one @
   const atCount = (cleaned.match(/@/g) || []).length;

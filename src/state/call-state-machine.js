@@ -522,17 +522,48 @@ function createCallStateMachine() {
           } else {
             // We asked for spelling - treat the response as a spelled name
             const { firstName, lastName } = extractName(transcript);
-            if (firstName && lastName) {
+            
+            // If we have a stored firstName from the previous attempt, use it
+            const storedFirstName = pendingClarification.value?.firstName || firstName;
+            
+            if (storedFirstName && lastName) {
               // Store the spelled name
-              data.firstName = firstName;
+              data.firstName = storedFirstName;
               data.lastName = lastName;
-              console.log(`✅ Name spelled: ${data.firstName} ${data.lastName}`);
+              console.log(`✅ Name spelled: ${data.firstName} ${data.lastName} (confidence: high, reason: spelled by user)`);
               clearPendingClarification();
               return {
                 nextState: transitionTo(STATES.PHONE),
                 prompt: CALLER_INFO.phone,
                 action: 'ask'
               };
+            } else if (lastName) {
+              // Only last name spelled - use stored first name or ask for it
+              if (pendingClarification.value?.firstName) {
+                data.firstName = pendingClarification.value.firstName;
+                data.lastName = lastName;
+                console.log(`✅ Name spelled: ${data.firstName} ${data.lastName} (confidence: high, reason: spelled by user)`);
+                clearPendingClarification();
+                return {
+                  nextState: transitionTo(STATES.PHONE),
+                  prompt: CALLER_INFO.phone,
+                  action: 'ask'
+                };
+              } else {
+                // No first name stored, ask for it
+                data.lastName = lastName;
+                pendingClarification = {
+                  field: 'name',
+                  value: { firstName: '', lastName },
+                  confidence: { level: CONFIDENCE.MEDIUM },
+                  awaitingConfirmation: false
+                };
+                return {
+                  nextState: currentState,
+                  prompt: "Got it. What's your first name?",
+                  action: 'ask'
+                };
+              }
             } else if (firstName) {
               // Only first name - ask for last name spelling
               data.firstName = firstName;
@@ -947,11 +978,16 @@ function createCallStateMachine() {
           // Check confidence for each part
           const addressConf = estimateAddressConfidence(addressParts.address || transcript);
           const cityConf = addressParts.city ? estimateCityConfidence(addressParts.city) : { level: CONFIDENCE.HIGH };
+          const stateConf = addressParts.state ? { level: CONFIDENCE.HIGH } : { level: CONFIDENCE.HIGH };
           const zipConf = addressParts.zip ? estimateZipConfidence(addressParts.zip) : { level: CONFIDENCE.HIGH };
           
           const overallConf = getLowestConfidence(addressConf, cityConf, zipConf);
           
-          console.log(`📋 Address: ${addressParts.address} (confidence: ${overallConf.level})`);
+          console.log(`📋 Address: ${addressParts.address || 'N/A'} (confidence: ${addressConf.level}, reason: ${addressConf.reason || 'N/A'})`);
+          if (addressParts.city) console.log(`📋 City: ${addressParts.city} (confidence: ${cityConf.level}, reason: ${cityConf.reason || 'N/A'})`);
+          if (addressParts.state) console.log(`📋 State: ${addressParts.state} (confidence: ${stateConf.level})`);
+          if (addressParts.zip) console.log(`📋 Zip: ${addressParts.zip} (confidence: ${zipConf.level}, reason: ${zipConf.reason || 'N/A'})`);
+          console.log(`📋 Overall Address Confidence: ${overallConf.level}, reason: ${overallConf.reason || 'N/A'}`);
           
           if (overallConf.level === CONFIDENCE.LOW) {
             // Determine which part needs clarification
@@ -1277,14 +1313,21 @@ function createCallStateMachine() {
   function looksLikeAddress(text) {
     if (!text || text.length < 5) return false;
     
-    const lowerText = text.toLowerCase().trim();
+    // Remove filler phrases first (like "That would be", "yeah it's", etc.)
+    let cleaned = text
+      .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|so\s+the|the)\s+/gi, '')
+      .trim();
     
-    // Must have a street number (1-6 digits at start)
-    const hasNumber = /^\s*\d{1,6}\s+/.test(text);
+    if (cleaned.length < 5) return false;
+    
+    const lowerText = cleaned.toLowerCase();
+    
+    // Must have a street number (1-6 digits at start, or after filler removal)
+    const hasNumber = /\d{1,6}\s+/.test(cleaned);
     if (!hasNumber) return false;
     
     // Must have a street type indicator
-    const hasStreetType = /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|place|pl|terrace|terr)\b/i.test(text);
+    const hasStreetType = /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|place|pl|terrace|terr)\b/i.test(cleaned);
     if (!hasStreetType) return false;
     
     // Reject if it contains symptom/problem descriptions
@@ -1328,12 +1371,45 @@ function createCallStateMachine() {
   }
   
   function extractName(text) {
+    // Handle spelled names (e.g., "V-A-N space C-A-U-W-E-N-B-E-R-G-E")
+    // First check if this is a spelled name
+    const spelledPattern = /\b([A-Z])(?:\s*[-.\s]+\s*([A-Z]))+(?:\s+space\s+([A-Z])(?:\s*[-.\s]+\s*([A-Z]))+)?/i;
+    const spelledMatch = text.match(spelledPattern);
+    
+    if (spelledMatch) {
+      // Extract all letters from the match
+      const allLetters = text.match(/[A-Z]/gi) || [];
+      if (allLetters.length >= 2) {
+        // Check if there's a "space" separator indicating first and last name
+        const spaceIndex = text.toLowerCase().indexOf(' space ');
+        if (spaceIndex > 0) {
+          const firstPart = text.substring(0, spaceIndex);
+          const lastPart = text.substring(spaceIndex + 7); // " space " is 7 chars
+          const firstNameLetters = firstPart.match(/[A-Z]/gi) || [];
+          const lastNameLetters = lastPart.match(/[A-Z]/gi) || [];
+          
+          if (firstNameLetters.length > 0 && lastNameLetters.length > 0) {
+            return {
+              firstName: firstNameLetters.join(''),
+              lastName: lastNameLetters.join('')
+            };
+          }
+        }
+        // No space separator, assume it's all last name
+        // But we need to get the first name from context (should be stored already)
+        return {
+          firstName: '', // Will be filled from context
+          lastName: allLetters.join('')
+        };
+      }
+    }
+    
     // Remove common prefixes and their punctuation variations
     let name = text
       // Remove leading filler words with optional punctuation
       .replace(/^(yeah,?\s*|yes,?\s*|oh,?\s*|um,?\s*|uh,?\s*|so,?\s*|well,?\s*)+/gi, '')
-      // Remove "that would be", "it's", "this is", "my name is", etc.
-      .replace(/^(that\s+would\s+be|it'?s|it\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '')
+      // Remove "that would be", "it's", "this is", "my name is", "that's", etc.
+      .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '')
       // Remove trailing punctuation
       .replace(/[.,!?]+$/g, '')
       // Remove leading/trailing punctuation and whitespace
@@ -1579,7 +1655,7 @@ function createCallStateMachine() {
   function extractAddress(text) {
     // Remove common prefixes
     let address = text
-      .replace(/^(that would be|that's|it's|it is|the address is|address is|my address is)\s*/gi, '')
+      .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|the\s+address\s+is|address\s+is|my\s+address\s+is)\s*/gi, '')
       .trim();
     
     // Extract zip code (5 digits, optionally with -4 extension)
@@ -1601,32 +1677,63 @@ function createCallStateMachine() {
       address = address.replace(stateMatch[0], '').trim();
     }
     
-    // Extract city (usually before state, often capitalized or has comma)
+    // Extract city (usually before state, often separated by comma)
     let city = null;
-    if (state) {
-      // Look for city before state (often ends with comma or is last word before state)
+    // Split by comma first
+    const parts = address.split(',').map(s => s.trim()).filter(s => s.length > 0);
+    
+    if (parts.length >= 2) {
+      // If we have multiple parts, the last part before state is likely the city
+      // Or if no state, the second-to-last part might be city
+      if (state) {
+        // Find which part contains the state (should be last)
+        const stateIndex = parts.findIndex(p => statePattern.test(p));
+        if (stateIndex > 0) {
+          city = parts[stateIndex - 1];
+        } else if (parts.length >= 2) {
+          // State not in parts, take second-to-last as city
+          city = parts[parts.length - 2];
+        }
+      } else {
+        // No state found, assume second-to-last part is city
+        if (parts.length >= 2) {
+          city = parts[parts.length - 2];
+        }
+      }
+    }
+    
+    // If no city found via comma split, try to extract it from before state
+    if (!city && state) {
       const beforeState = address.substring(0, address.indexOf(stateMatch[0])).trim();
-      // Split by comma or take last significant word/phrase
-      const cityParts = beforeState.split(',').map(s => s.trim()).filter(s => s.length > 0);
-      if (cityParts.length > 0) {
-        city = cityParts[cityParts.length - 1]; // Take last part before state
+      const beforeParts = beforeState.split(',').map(s => s.trim()).filter(s => s.length > 0);
+      if (beforeParts.length > 0) {
+        city = beforeParts[beforeParts.length - 1];
       }
     }
     
     // Remove city from address text
     if (city) {
       address = address.replace(city, '').trim();
+      // Also remove comma if it's still there
+      address = address.replace(/^,\s*|,\s*$/g, '').trim();
     }
     
-    // Clean up address (remove extra commas, spaces)
+    // Clean up address (remove extra commas, spaces, trailing punctuation)
     address = address.replace(/^[,.\s]+|[,.\s]+$/g, '').trim();
     
-    // If address is empty but we have other parts, reconstruct
+    // If address is empty but we have other parts, reconstruct from original text
     if (!address && (city || state || zip)) {
-      address = text.replace(/\b\d{5}(-\d{4})?\b/, '').trim();
-      if (state) address = address.replace(statePattern, '').trim();
-      if (city) address = address.replace(city, '').trim();
-      address = address.replace(/^[,.\s]+|[,.\s]+$/g, '').trim();
+      // Reconstruct: remove city, state, zip from original
+      let reconstructed = text
+        .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|the\s+address\s+is|address\s+is|my\s+address\s+is)\s*/gi, '')
+        .trim();
+      if (zip) reconstructed = reconstructed.replace(zipMatch[0], '').trim();
+      if (state) reconstructed = reconstructed.replace(statePattern, '').trim();
+      if (city) {
+        reconstructed = reconstructed.replace(new RegExp(city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '').trim();
+        reconstructed = reconstructed.replace(/^,\s*|,\s*$/g, '').trim();
+      }
+      address = reconstructed.replace(/^[,.\s]+|[,.\s]+$/g, '').trim();
     }
     
     return {
