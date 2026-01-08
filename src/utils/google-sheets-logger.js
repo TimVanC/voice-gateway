@@ -234,8 +234,10 @@ function validateAndNormalizeAddress(address) {
 function cleanCallSummary(summary) {
   if (!summary) return '';
   
-  // Remove common filler words
-  const fillerWords = ['uh', 'um', 'er', 'ah', 'oh', 'like', 'you know', 'i mean', 'i think', 'i guess'];
+  // Remove common filler words (expanded list)
+  const fillerWords = ['uh', 'um', 'er', 'ah', 'oh', 'like', 'you know', 'i mean', 'i think', 'i guess', 
+                       'yeah', 'yes', 'yep', 'yup', 'just', 'only', 'really', 'very', 'quite', 'pretty',
+                       'well', 'so', 'okay', 'ok', 'alright', 'right', 'sure'];
   let cleaned = summary;
   
   fillerWords.forEach(filler => {
@@ -381,6 +383,12 @@ function generateCallSummary(callData, callStatus) {
     issueText = cleanCallSummary(details.helpNeeded);
   }
   
+  // Clean issue text: remove filler words like "uh", "yeah", "just"
+  issueText = issueText
+    .replace(/\b(uh|um|er|ah|oh|yeah|yes|yep|yup|just|only|really|very|quite|pretty)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
   // Truncate issue text if too long
   if (issueText.length > 150) {
     issueText = issueText.substring(0, 150) + '...';
@@ -394,7 +402,7 @@ function generateCallSummary(callData, callStatus) {
   } else if (issueText) {
     summary = `Caller reported ${issueText}.`;
   } else {
-    // Fallback: basic intent description
+    // Fallback: basic intent description (clean and semantic)
     const intentDescriptions = {
       'hvac_service': 'HVAC service request',
       'hvac_installation': 'HVAC installation request',
@@ -404,6 +412,17 @@ function generateCallSummary(callData, callStatus) {
       'existing_project': 'Existing project inquiry'
     };
     summary = intentDescriptions[normalizedIntent] || 'Service request';
+    
+    // For generator_existing, add issue if available
+    if (normalizedIntent === 'generator_existing' && details.generatorIssue) {
+      const cleanIssue = cleanCallSummary(details.generatorIssue)
+        .replace(/\b(uh|um|er|ah|oh|yeah|yes|yep|yup|just|only|really|very|quite|pretty)\b/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (cleanIssue) {
+        summary = `Caller reported an existing generator that ${cleanIssue}.`;
+      }
+    }
   }
   
   // Add safety status if relevant
@@ -605,8 +624,8 @@ function normalizeSystemType(systemType) {
  * Returns canonical values: completed, incomplete_hangup, emergency_redirect, out_of_scope_only
  * 
  * Distinction is based only on flow completion:
- * - completed: confirmation step reached and accepted (CLOSE state)
- * - incomplete_hangup: caller disconnected before confirmation
+ * - completed: CLOSE state reached (closing message delivered) - regardless of who hangs up
+ * - incomplete_hangup: caller disconnected before CLOSE state
  */
 function determineCallStatus(currentState, callData) {
   const { STATES, INTENT_TYPES } = require('../scripts/rse-script');
@@ -621,12 +640,13 @@ function determineCallStatus(currentState, callData) {
     return 'out_of_scope_only';
   }
   
-  // Complete - reached CLOSE state (confirmation accepted)
-  if (currentState === STATES.CLOSE) {
+  // Complete - reached CLOSE state (closing message delivered)
+  // Hanging up after CLOSE is still a completed call
+  if (currentState === STATES.CLOSE || currentState === STATES.ENDED) {
     return 'completed';
   }
   
-  // All other cases are incomplete hangups (didn't reach confirmation)
+  // All other cases are incomplete hangups (didn't reach CLOSE state)
   return 'incomplete_hangup';
 }
 

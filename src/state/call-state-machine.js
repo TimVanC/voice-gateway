@@ -712,7 +712,24 @@ function createCallStateMachine() {
           const phone = extractPhone(transcript);
           const phoneConf = estimatePhoneConfidence(transcript);
           
-          console.log(`📋 Phone: ${phone} (confidence: ${phoneConf.level}, reason: ${phoneConf.reason || 'N/A'})`);
+          // Strict validation: must be exactly 10 digits
+          const digits = phone.replace(/\D/g, '');
+          const isValidPhone = digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
+          
+          if (!isValidPhone) {
+            console.log(`⚠️  Invalid phone number: "${phone}" (${digits.length} digits)`);
+            return {
+              nextState: currentState,
+              prompt: "I need a complete 10-digit phone number. Could you repeat it?",
+              action: 'ask'
+            };
+          }
+          
+          // Normalize to 10 digits
+          const normalizedPhone = digits.length === 11 ? digits.slice(1) : digits;
+          const formattedPhone = `${normalizedPhone.slice(0,3)}-${normalizedPhone.slice(3,6)}-${normalizedPhone.slice(6)}`;
+          
+          console.log(`📋 Phone: ${formattedPhone} (confidence: ${phoneConf.level}, reason: ${phoneConf.reason || 'N/A'})`);
           
           if (phoneConf.level === CONFIDENCE.LOW) {
             return {
@@ -722,10 +739,10 @@ function createCallStateMachine() {
             };
           } else if (phoneConf.level === CONFIDENCE.MEDIUM) {
             // Always read back phone numbers for confirmation
-            const formatted = formatPhoneForConfirmation(phone);
+            const formatted = formatPhoneForConfirmation(formattedPhone);
             pendingClarification = {
               field: 'phone',
-              value: phone,
+              value: formattedPhone,
               confidence: phoneConf,
               awaitingConfirmation: true
             };
@@ -737,8 +754,8 @@ function createCallStateMachine() {
           }
           
           // High confidence - still read back phone for verification
-          const formatted = formatPhoneForConfirmation(phone);
-          data.phone = phone;
+          const formatted = formatPhoneForConfirmation(formattedPhone);
+          data.phone = formattedPhone;
           return {
             nextState: transitionTo(STATES.EMAIL),
             prompt: `Got it, ${formatted}. ${CALLER_INFO.email.primary}`,
@@ -861,6 +878,36 @@ function createCallStateMachine() {
               action: 'ask'
             };
           }
+          
+          // Validate email format: must have exactly one @, domain, and extension
+          const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+          const isValidEmail = emailRegex.test(email);
+          
+          if (!isValidEmail) {
+            console.log(`⚠️  Invalid email format: "${email}"`);
+            // Track email validation attempts
+            if (!data._emailAttempts) data._emailAttempts = 0;
+            data._emailAttempts++;
+            
+            if (data._emailAttempts >= 2) {
+              // Already tried once, accept and move on (but don't persist invalid email)
+              console.log(`⚠️  Email validation failed after 2 attempts, moving on without email`);
+              return {
+                nextState: transitionTo(STATES.DETAILS_BRANCH),
+                prompt: getDetailsPrompt(),
+                action: 'ask'
+              };
+            }
+            
+            return {
+              nextState: currentState,
+              prompt: "I'm having trouble with that email format. Could you spell it out again, one letter at a time?",
+              action: 'ask'
+            };
+          }
+          
+          // Valid email - reset attempts and proceed
+          data._emailAttempts = 0;
           
           const emailConf = estimateEmailConfidence(email);
           
@@ -1022,57 +1069,16 @@ function createCallStateMachine() {
               };
             }
           } else if (overallConf.level === CONFIDENCE.MEDIUM) {
-            // For medium confidence, ask for clarification on specific parts
-            let clarificationNeeded = [];
-            
-            if (addressConf.level === CONFIDENCE.MEDIUM) {
-              const hasStreetName = /\b(road|rd|street|st|avenue|ave|drive|dr|lane|ln|way|court|ct|boulevard|blvd)\b/i.test(addressParts.address);
-              if (hasStreetName) {
-                clarificationNeeded.push('street name');
-              } else {
-                clarificationNeeded.push('street address');
-              }
-            }
-            if (!addressParts.city || (cityConf && cityConf.level === CONFIDENCE.MEDIUM)) {
-              clarificationNeeded.push('city');
-            }
-            if (zipConf.level === CONFIDENCE.MEDIUM) {
-              clarificationNeeded.push('zip code');
-            }
-            
-            // If we need clarification on specific parts, ask for them
-            if (clarificationNeeded.length > 0) {
-              if (clarificationNeeded.includes('street name')) {
-                return {
-                  nextState: currentState,
-                  prompt: "I want to make sure I have the street name right. Could you spell the street name for me?",
-                  action: 'ask'
-                };
-              }
-              if (clarificationNeeded.includes('city')) {
-                return {
-                  nextState: currentState,
-                  prompt: "Could you repeat the city name?",
-                  action: 'ask'
-                };
-              }
-            }
-            
-            // Otherwise, confirm what we heard
-            pendingClarification = {
-              field: 'address',
-              value: addressParts,
-              confidence: overallConf,
-              awaitingConfirmation: true
-            };
-            let confirmPrompt = `I heard ${addressParts.address}`;
-            if (addressParts.city) confirmPrompt += `, ${addressParts.city}`;
-            if (addressParts.state) confirmPrompt += `, ${addressParts.state}`;
-            if (addressParts.zip) confirmPrompt += `, ${addressParts.zip}`;
-            confirmPrompt += `. Is that correct?`;
+            // For medium confidence, accept and move on (don't hard-fail)
+            // Store what we have and continue
+            data.address = addressParts.address;
+            data.city = addressParts.city;
+            data.state = addressParts.state;
+            data.zip = addressParts.zip;
+            console.log(`✅ Address accepted with medium confidence: ${addressParts.address}`);
             return {
-              nextState: currentState,
-              prompt: confirmPrompt,
+              nextState: transitionTo(STATES.AVAILABILITY),
+              prompt: AVAILABILITY.ask,
               action: 'ask'
             };
           }
@@ -1370,38 +1376,66 @@ function createCallStateMachine() {
     return emergencyKeywords.some(kw => text.includes(kw));
   }
   
-  function extractName(text) {
-    // Handle spelled names (e.g., "V-A-N space C-A-U-W-E-N-B-E-R-G-E")
-    // First check if this is a spelled name
-    const spelledPattern = /\b([A-Z])(?:\s*[-.\s]+\s*([A-Z]))+(?:\s+space\s+([A-Z])(?:\s*[-.\s]+\s*([A-Z]))+)?/i;
-    const spelledMatch = text.match(spelledPattern);
+  /**
+   * Normalize spelled name: convert "V-A-N space C-A-U-W-E-N-B-E-R-G-E" to "Van Cauwenberge"
+   */
+  function normalizeSpelledName(text) {
+    if (!text) return '';
     
-    if (spelledMatch) {
-      // Extract all letters from the match
-      const allLetters = text.match(/[A-Z]/gi) || [];
-      if (allLetters.length >= 2) {
-        // Check if there's a "space" separator indicating first and last name
-        const spaceIndex = text.toLowerCase().indexOf(' space ');
+    // Remove filler phrases first
+    let cleaned = text
+      .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|this\s+is|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '')
+      .trim();
+    
+    // Check if this contains spelled letters (pattern: single letters separated by spaces, dashes, or periods)
+    // Also handle "space" as a word separator
+    const hasSpelledPattern = /([A-Z])(?:\s*[-.\s]+\s*([A-Z]))+/i.test(cleaned) || 
+                               /\b([A-Z])\s+([A-Z])\s+([A-Z])\b/i.test(cleaned);
+    
+    if (hasSpelledPattern) {
+      // Replace "space" with actual space for word boundaries
+      cleaned = cleaned.replace(/\s+space\s+/gi, ' ');
+      
+      // Extract all letters (single uppercase letters)
+      const letterMatches = cleaned.match(/\b([A-Z])\b/g);
+      if (letterMatches && letterMatches.length >= 2) {
+        // Group letters into words (separated by "space" or when pattern breaks)
+        // Look for "space" or natural word boundaries
+        const spaceIndex = cleaned.toLowerCase().indexOf(' space ');
         if (spaceIndex > 0) {
-          const firstPart = text.substring(0, spaceIndex);
-          const lastPart = text.substring(spaceIndex + 7); // " space " is 7 chars
-          const firstNameLetters = firstPart.match(/[A-Z]/gi) || [];
-          const lastNameLetters = lastPart.match(/[A-Z]/gi) || [];
+          const firstPart = cleaned.substring(0, spaceIndex);
+          const lastPart = cleaned.substring(spaceIndex + 7);
+          const firstNameLetters = firstPart.match(/\b([A-Z])\b/g) || [];
+          const lastNameLetters = lastPart.match(/\b([A-Z])\b/g) || [];
           
           if (firstNameLetters.length > 0 && lastNameLetters.length > 0) {
+            const firstName = firstNameLetters.join('');
+            const lastName = lastNameLetters.join('');
+            // Capitalize first letter, lowercase rest
             return {
-              firstName: firstNameLetters.join(''),
-              lastName: lastNameLetters.join('')
+              firstName: firstName.charAt(0) + firstName.slice(1).toLowerCase(),
+              lastName: lastName.charAt(0) + lastName.slice(1).toLowerCase()
             };
           }
         }
-        // No space separator, assume it's all last name
-        // But we need to get the first name from context (should be stored already)
+        
+        // No space separator, assume all letters are one name
+        const allLetters = letterMatches.join('');
         return {
-          firstName: '', // Will be filled from context
-          lastName: allLetters.join('')
+          firstName: '',
+          lastName: allLetters.charAt(0) + allLetters.slice(1).toLowerCase()
         };
       }
+    }
+    
+    return null; // Not a spelled name
+  }
+  
+  function extractName(text) {
+    // First, try to normalize if it's a spelled name
+    const spelledResult = normalizeSpelledName(text);
+    if (spelledResult) {
+      return spelledResult;
     }
     
     // Remove common prefixes and their punctuation variations
@@ -1410,6 +1444,8 @@ function createCallStateMachine() {
       .replace(/^(yeah,?\s*|yes,?\s*|oh,?\s*|um,?\s*|uh,?\s*|so,?\s*|well,?\s*)+/gi, '')
       // Remove "that would be", "it's", "this is", "my name is", "that's", etc.
       .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '')
+      // Remove tokens like "space", "dash", "hyphen" that might be left over
+      .replace(/\b(space|dash|hyphen)\b/gi, '')
       // Remove trailing punctuation
       .replace(/[.,!?]+$/g, '')
       // Remove leading/trailing punctuation and whitespace
@@ -1584,6 +1620,9 @@ function createCallStateMachine() {
       .toLowerCase()
       .trim();
     
+    // Trim trailing punctuation (periods, commas, etc.)
+    email = email.replace(/[.,;:!?]+$/, '');
+    
     // Clean up common artifacts - remove prefixes that might be stuck
     // Remove "wouldbe", "would", "that", "so", "the" if they appear at the start
     // Also remove "wouldbe" if it appears anywhere (from "would be" being concatenated)
@@ -1652,11 +1691,49 @@ function createCallStateMachine() {
     return readbackPatterns.some(p => text.includes(p));
   }
   
+  /**
+   * Normalize spelled words in address text (e.g., "E L F" → "Elf", "ELF" → "Elf")
+   */
+  function normalizeSpelledWordsInAddress(text) {
+    if (!text) return text;
+    
+    // Pattern: Match sequences of single uppercase letters separated by spaces, dashes, or periods
+    // Examples: "E L F", "E-L-F", "E. L. F.", "ELF" (all caps)
+    const pattern = /\b([A-Z])(?:\s*[-.\s]+\s*([A-Z]))(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?(?:\s*[-.\s]+\s*([A-Z]))?\b/g;
+    
+    let result = text;
+    
+    // First, handle all-caps words that might be spelled (like "ELF")
+    result = result.replace(/\b([A-Z]{2,15})\b/g, (match) => {
+      // If it's a short all-caps word (likely spelled), normalize it
+      if (match.length >= 2 && match.length <= 15) {
+        return match.charAt(0) + match.slice(1).toLowerCase();
+      }
+      return match;
+    });
+    
+    // Then handle spaced/dashed spelled words
+    result = result.replace(pattern, (match) => {
+      const letters = match.match(/\b([A-Z])\b/g);
+      if (letters && letters.length >= 2 && letters.length <= 15) {
+        const word = letters.join('').toLowerCase();
+        return word.charAt(0).toUpperCase() + word.slice(1);
+      }
+      return match;
+    });
+    
+    return result;
+  }
+  
   function extractAddress(text) {
     // Remove common prefixes
     let address = text
       .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|the\s+address\s+is|address\s+is|my\s+address\s+is)\s*/gi, '')
       .trim();
+    
+    // Normalize spelled words in address (e.g., "E L F" → "Elf")
+    // This handles cases like "11 Elf ELF Road" where "ELF" is spelled out
+    address = normalizeSpelledWordsInAddress(address);
     
     // Extract zip code (5 digits, optionally with -4 extension)
     const zipMatch = address.match(/\b(\d{5}(-\d{4})?)\b/);
