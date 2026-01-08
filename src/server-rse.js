@@ -233,8 +233,13 @@ wss.on("connection", (twilioWs, req) => {
         const elapsed = Date.now() - lastActivityTime;
         console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()})`);
         
-        if (elapsed > 10000) {
+        if (elapsed > 20000) {
           console.error(`⚠️ No OpenAI activity for ${elapsed}ms!`);
+          // If we've been waiting too long and no response is in progress, send recovery prompt
+          if (!responseInProgress && elapsed > 20000) {
+            console.log(`🔄 Recovery: System went nonverbal, sending next prompt`);
+            sendNextPromptIfNeeded();
+          }
           // Try to send a ping to keep connection alive
           try {
             openaiWs.ping();
@@ -426,12 +431,27 @@ wss.on("connection", (twilioWs, req) => {
         // but the transcription takes 1-2 seconds to arrive. If we don't
         // cancel, the AI will respond with a generic "please continue" before
         // we even know what the user said.
+        // 
+        // EXCEPTION: If speech was very short (< 1 second), user might still
+        // be thinking or about to continue. Wait a bit before canceling.
         // ===================================================================
         if (openaiWs?.readyState === WebSocket.OPEN) {
-          console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response`);
-          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-          // Mark that we're waiting for transcription
-          waitingForTranscription = true;
+          if (speechDuration < 1000) {
+            // Very short speech - wait a bit in case user continues
+            setTimeout(() => {
+              if (openaiWs?.readyState === WebSocket.OPEN && !speechStartTime) {
+                console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response (after short speech delay)`);
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                waitingForTranscription = true;
+              }
+            }, 500); // Wait 500ms to see if user continues
+          } else {
+            // Normal length speech - cancel immediately
+            console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response`);
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            // Mark that we're waiting for transcription
+            waitingForTranscription = true;
+          }
         }
         break;
         

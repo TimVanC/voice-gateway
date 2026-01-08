@@ -500,21 +500,55 @@ function createCallStateMachine() {
         };
         
       case STATES.NAME:
-        // Handle clarification confirmation
-        if (pendingClarification.field === 'name' && pendingClarification.awaitingConfirmation) {
-          if (isConfirmation(lowerTranscript)) {
-            // User confirmed - accept the value
-            data.firstName = pendingClarification.value.firstName;
-            data.lastName = pendingClarification.value.lastName;
-            console.log(`✅ Name confirmed: ${data.firstName} ${data.lastName}`);
-            clearPendingClarification();
-            return {
-              nextState: transitionTo(STATES.PHONE),
-              prompt: CALLER_INFO.phone,
-              action: 'ask'
-            };
+        // Handle clarification confirmation or spelling
+        if (pendingClarification.field === 'name') {
+          if (pendingClarification.awaitingConfirmation) {
+            // We asked "Is that correct?" - handle yes/no
+            if (isConfirmation(lowerTranscript)) {
+              // User confirmed - accept the value
+              data.firstName = pendingClarification.value.firstName;
+              data.lastName = pendingClarification.value.lastName;
+              console.log(`✅ Name confirmed: ${data.firstName} ${data.lastName}`);
+              clearPendingClarification();
+              return {
+                nextState: transitionTo(STATES.PHONE),
+                prompt: CALLER_INFO.phone,
+                action: 'ask'
+              };
+            } else {
+              // User said no or gave new name - treat as new input
+              clearPendingClarification();
+            }
           } else {
-            // User said no or gave new name - treat as new input
+            // We asked for spelling - treat the response as a spelled name
+            const { firstName, lastName } = extractName(transcript);
+            if (firstName && lastName) {
+              // Store the spelled name
+              data.firstName = firstName;
+              data.lastName = lastName;
+              console.log(`✅ Name spelled: ${data.firstName} ${data.lastName}`);
+              clearPendingClarification();
+              return {
+                nextState: transitionTo(STATES.PHONE),
+                prompt: CALLER_INFO.phone,
+                action: 'ask'
+              };
+            } else if (firstName) {
+              // Only first name - ask for last name spelling
+              data.firstName = firstName;
+              pendingClarification = {
+                field: 'name',
+                value: { firstName, lastName: '' },
+                confidence: { level: CONFIDENCE.MEDIUM },
+                awaitingConfirmation: false
+              };
+              return {
+                nextState: currentState,
+                prompt: "Got it. Could you spell your last name for me?",
+                action: 'ask'
+              };
+            }
+            // If we still don't have a good name, clear and re-ask
             clearPendingClarification();
           }
         }
@@ -571,7 +605,7 @@ function createCallStateMachine() {
           // Use the lower confidence level
           const overallConf = getLowestConfidence(firstNameConf, lastNameConf);
           
-          console.log(`📋 Name: ${firstName} ${lastName} (confidence: ${overallConf.level})`);
+          console.log(`📋 Name: ${firstName} ${lastName} (confidence: ${overallConf.level}, reason: ${overallConf.reason || 'N/A'})`);
           
           if (overallConf.level === CONFIDENCE.LOW) {
             // Ask to repeat
@@ -581,16 +615,16 @@ function createCallStateMachine() {
               action: 'ask'
             };
           } else if (overallConf.level === CONFIDENCE.MEDIUM || (lastName && lastName.length > 8)) {
-            // Store pending and ask for confirmation
+            // For medium confidence or long names, ask to spell it out
             pendingClarification = {
               field: 'name',
               value: { firstName, lastName },
               confidence: overallConf,
-              awaitingConfirmation: true
+              awaitingConfirmation: false  // We're asking for spelling, not confirmation
             };
             return {
               nextState: currentState,
-              prompt: `I heard ${firstName} ${lastName}. Is that correct?`,
+              prompt: `I want to make sure I have that right. Could you spell your last name for me?`,
               action: 'ask'
             };
           }
@@ -647,7 +681,7 @@ function createCallStateMachine() {
           const phone = extractPhone(transcript);
           const phoneConf = estimatePhoneConfidence(transcript);
           
-          console.log(`📋 Phone: ${phone} (confidence: ${phoneConf.level})`);
+          console.log(`📋 Phone: ${phone} (confidence: ${phoneConf.level}, reason: ${phoneConf.reason || 'N/A'})`);
           
           if (phoneConf.level === CONFIDENCE.LOW) {
             return {
@@ -799,7 +833,7 @@ function createCallStateMachine() {
           
           const emailConf = estimateEmailConfidence(email);
           
-          console.log(`📋 Email: ${email} (confidence: ${emailConf.level})`);
+          console.log(`📋 Email: ${email} (confidence: ${emailConf.level}, reason: ${emailConf.reason || 'N/A'})`);
           
           // If spelling instruction detected, always confirm with spelling
           if (hasSpellingInstruction) {
@@ -898,6 +932,16 @@ function createCallStateMachine() {
         }
         
         if (transcript.length > 2) {
+          // First check if this actually looks like an address
+          if (!looksLikeAddress(transcript)) {
+            console.log(`📋 Response doesn't look like an address: "${transcript}" - re-asking`);
+            return {
+              nextState: currentState,
+              prompt: ADDRESS.ask,
+              action: 'ask'
+            };
+          }
+          
           const addressParts = extractAddress(transcript);
           
           // Check confidence for each part
@@ -1223,6 +1267,47 @@ function createCallStateMachine() {
     // Names usually start with uppercase and are relatively short
     // Reject very long phrases (likely not a name)
     if (text.length > 30) return false;
+    
+    return true;
+  }
+  
+  /**
+   * Check if text looks like an actual address (not symptoms, troubleshooting answers, etc.)
+   */
+  function looksLikeAddress(text) {
+    if (!text || text.length < 5) return false;
+    
+    const lowerText = text.toLowerCase().trim();
+    
+    // Must have a street number (1-6 digits at start)
+    const hasNumber = /^\s*\d{1,6}\s+/.test(text);
+    if (!hasNumber) return false;
+    
+    // Must have a street type indicator
+    const hasStreetType = /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|place|pl|terrace|terr)\b/i.test(text);
+    if (!hasStreetType) return false;
+    
+    // Reject if it contains symptom/problem descriptions
+    const symptomPatterns = [
+      /\b(blowing|heating|cooling|not working|broken|issue|problem|symptom|error|fault)\b/i,
+      /\b(lukewarm|warm|cold|hot|air|unit|system|hvac|furnace|boiler|running|still)\b/i,
+      /\b(just|only|really|very|quite|pretty)\s+(blowing|heating|cooling|working|running)\b/i,
+      /\b(pushing|pushing out|blowing out)\s+(lukewarm|warm|cold|hot|air)\b/i,
+      /\b(no|not)\s+(hot|cold|warm|air|heat|cooling)\s+(coming|blowing|out)\b/i,
+      /\b(has|have|had)\s+(not|no)\b/i,
+      /\b(send|sending|technician|someone|person)\b/i,
+      /\b(troubleshooting|thermostat|filter|filters)\b/i
+    ];
+    
+    if (symptomPatterns.some(pattern => pattern.test(text))) {
+      return false;
+    }
+    
+    // Reject if it's a short answer like "I have not" or "You can send someone"
+    const shortAnswers = ['i have not', 'i have', 'you can', 'send someone', 'send', 'someone else'];
+    if (shortAnswers.some(answer => lowerText.includes(answer) && text.length < 30)) {
+      return false;
+    }
     
     return true;
   }
