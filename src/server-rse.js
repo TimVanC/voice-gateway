@@ -332,6 +332,24 @@ wss.on("connection", (twilioWs, req) => {
           // Either waiting for transcription, or user barged in
         } else if (status === "incomplete") {
           console.log(`⚠️ Response INCOMPLETE`);
+          
+          // CRITICAL: During CONFIRMATION or CLOSE states, do NOT interrupt with recovery
+          // The confirmation prompt must be delivered as uninterrupted as possible
+          if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE) {
+            const audioSeconds = totalAudioBytesSent / 8000;
+            console.log(`⏸️ User heard ${audioSeconds.toFixed(1)}s of audio in ${currentState} state - waiting for response without recovery`);
+            // Mark that confirmation was attempted (for completion tracking)
+            const callData = stateMachine.getData();
+            if (currentState === STATES.CONFIRMATION && audioSeconds > 5) {
+              // If we got 5+ seconds of confirmation audio, mark as delivered
+              callData._confirmationDelivered = true;
+            }
+            // NO recovery timer - just wait for user to respond naturally
+            responseInProgress = false;
+            audioStreamingStarted = false;
+            return; // Don't start recovery timer
+          }
+          
           if (!audioStreamingStarted || totalAudioBytesSent === 0) {
             // No audio was sent at all - retry immediately
             console.log(`🔄 No audio was sent - will retry prompt`);
@@ -348,7 +366,7 @@ wss.on("connection", (twilioWs, req) => {
               console.log(`⏸️ User heard ${audioSeconds.toFixed(1)}s of audio - waiting for response`);
               // No recovery timer - just wait for user to respond naturally
             } else {
-              // Short audio - use recovery timer
+              // Short audio - use recovery timer (but NOT in confirmation/close)
               console.log(`⏰ Only ${audioSeconds.toFixed(1)}s of audio sent - starting recovery timer`);
               startSilenceRecoveryTimer();
             }
@@ -356,6 +374,17 @@ wss.on("connection", (twilioWs, req) => {
         } else {
           console.log(`✅ Response complete (state: ${currentState})`);
           assistantTurnCount++;  // Track for filler spacing
+          
+          // If confirmation prompt was delivered and completed, mark it
+          if (currentState === STATES.CONFIRMATION) {
+            const callData = stateMachine.getData();
+            callData._confirmationDelivered = true;
+          }
+          // If close state reached, mark it
+          if (currentState === STATES.CLOSE) {
+            const callData = stateMachine.getData();
+            callData._closeStateReached = true;
+          }
         }
         responseInProgress = false;
         audioStreamingStarted = false;  // Reset for next response
@@ -522,8 +551,23 @@ wss.on("connection", (twilioWs, req) => {
       clearTimeout(silenceRecoveryTimer);
     }
     
+    // CRITICAL: Do NOT start recovery timer during CONFIRMATION or CLOSE states
+    // These states need uninterrupted audio delivery
+    const currentState = stateMachine.getState();
+    if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE) {
+      console.log(`⏸️  Silence recovery disabled in ${currentState} state - waiting for user response`);
+      return;
+    }
+    
     silenceRecoveryTimer = setTimeout(() => {
       silenceRecoveryTimer = null;
+      
+      // Double-check state hasn't changed
+      const state = stateMachine.getState();
+      if (state === STATES.CONFIRMATION || state === STATES.CLOSE) {
+        console.log(`⏸️  Silence recovery cancelled - now in ${state} state`);
+        return;
+      }
       
       // Only prompt if we're not already in a response and user isn't speaking
       if (!responseInProgress && !speechStartTime) {
@@ -861,16 +905,58 @@ Sound polite and helpful, not dismissive.`,
   // SEND STATE PROMPT
   // ============================================================================
   function sendStatePrompt(prompt) {
-    if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
-      console.log(`🗣️ State prompt: "${prompt}"`);
-      responseInProgress = true;
-      
-      // Use extremely forceful instructions - the AI tends to ignore them otherwise
-      openaiWs.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          instructions: `OUTPUT REQUIRED - MANDATORY VERBATIM:
+    if (openaiWs?.readyState !== WebSocket.OPEN) return;
+    if (responseInProgress) {
+      console.log(`⏳ Skipping prompt - response in progress`);
+      return;
+    }
+    
+    const currentState = stateMachine.getState();
+    console.log(`🗣️ State prompt: "${prompt}"`);
+    responseInProgress = true;
+    
+    // CRITICAL: For CONFIRMATION and CLOSE states, use STRICT instructions
+    // Do NOT allow AI to go off-script or continue beyond the prompt
+    let instructions = '';
+    let maxTokens = 500;
+    
+    if (currentState === STATES.CONFIRMATION) {
+      // Confirmation prompt must be delivered completely and uninterrupted
+      // After user confirms, IMMEDIATELY proceed - no additional commentary
+      instructions = `CRITICAL - CONFIRMATION STATE:
+
+Say EXACTLY this text word-for-word:
+"${prompt}"
+
+STRICT RULES:
+- Say ONLY the text above, nothing else
+- DO NOT add commentary, thanks, or additional questions
+- DO NOT say "Great, I've got that" or "We'll be in touch" - that comes AFTER confirmation
+- DO NOT continue beyond this prompt
+- After saying the text, STOP and wait for user confirmation
+- If user says YES: Immediately proceed to "Is there anything else I can help with today?"
+- If user says NO: Ask what needs correction
+
+DO NOT DEVIATE FROM THE SCRIPT.`;
+      maxTokens = 800; // More tokens for confirmation prompt
+    } else if (currentState === STATES.CLOSE) {
+      // Close state - deliver goodbye cleanly
+      instructions = `CRITICAL - CLOSE STATE:
+
+Say EXACTLY this text word-for-word:
+"${prompt}"
+
+STRICT RULES:
+- Say ONLY the text above, nothing else
+- DO NOT add commentary or continue beyond this prompt
+- After saying the text, the call is complete
+- If user hangs up, that's expected behavior
+
+DO NOT DEVIATE FROM THE SCRIPT.`;
+      maxTokens = 300;
+    } else {
+      // Other states - standard instructions
+      instructions = `OUTPUT REQUIRED - MANDATORY VERBATIM:
 
 >>>
 ${prompt}
@@ -884,13 +970,18 @@ INSTRUCTIONS:
 - DO NOT improvise or add helpful questions
 - Say the scripted text and STOP
 
-IGNORE conversation context. ONLY say the scripted text above.`,
-          max_output_tokens: 500  // Increased for confirmation prompts
-        }
-      }));
-    } else if (responseInProgress) {
-      console.log(`⏳ Skipping prompt - response in progress`);
+IGNORE conversation context. ONLY say the scripted text above.`;
+      maxTokens = 500;
     }
+    
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        instructions: instructions,
+        max_output_tokens: maxTokens
+      }
+    }));
   }
   
   // ============================================================================

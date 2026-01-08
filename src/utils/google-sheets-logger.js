@@ -228,6 +228,42 @@ function validateAndNormalizeAddress(address) {
 }
 
 /**
+ * Clean name: remove fillers and normalize spelling, but preserve spaces
+ * Examples: "that's Tim" → "Tim", "V-A-N space C-A-U-W-E-N-B-E-R-G-E" → "Van Cauwenberge"
+ */
+function cleanName(name) {
+  if (!name) return '';
+  
+  // Remove filler phrases first
+  let cleaned = removeFillerPhrases(name);
+  
+  // Remove tokens like "space", "dash", "hyphen" that might be left over from spelled names
+  cleaned = cleaned.replace(/\b(space|dash|hyphen)\b/gi, ' ');
+  
+  // Normalize spelling: convert "E L F" → "Elf", but preserve existing spaces
+  // Don't collapse multiple spaces that are part of the name structure
+  cleaned = normalizeSpelling(cleaned);
+  
+  // Clean up multiple spaces but preserve single spaces (for names like "Van Cauwenberge")
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  return cleaned;
+}
+
+/**
+ * Clean availability notes: remove filler phrases
+ */
+function cleanAvailabilityNotes(availability) {
+  if (!availability) return '';
+  
+  return availability
+    .replace(/^(i'?d\s+say|i\s+think|probably|maybe|uh|um|er|ah|oh)\s*,?\s*/gi, '')
+    .replace(/\s+(i'?d\s+say|probably|maybe)\s+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Clean and make call summary semantic
  * Removes filler words and rephrases into operational language
  */
@@ -237,7 +273,7 @@ function cleanCallSummary(summary) {
   // Remove common filler words (expanded list)
   const fillerWords = ['uh', 'um', 'er', 'ah', 'oh', 'like', 'you know', 'i mean', 'i think', 'i guess', 
                        'yeah', 'yes', 'yep', 'yup', 'just', 'only', 'really', 'very', 'quite', 'pretty',
-                       'well', 'so', 'okay', 'ok', 'alright', 'right', 'sure'];
+                       'well', 'so', 'okay', 'ok', 'alright', 'right', 'sure', 'there\'s', 'there is'];
   let cleaned = summary;
   
   fillerWords.forEach(filler => {
@@ -394,13 +430,30 @@ function generateCallSummary(callData, callStatus) {
     issueText = issueText.substring(0, 150) + '...';
   }
   
-  // Combine system type and issue
+  // Combine system type and issue (make semantic, not verbatim)
   if (systemType && issueText) {
-    summary = `Caller reported ${issueText} from a ${systemType}.`;
+    // Clean issue text: remove filler words and rephrase
+    const cleanedIssue = issueText
+      .replace(/\b(there'?s|there\s+is|there'?s\s+no)\s+/gi, 'no ')
+      .replace(/\b(no|not)\s+(hot|warm|air|heat|cooling)\s+(coming|blowing|out|from)\b/gi, 'no warm air')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    summary = `Caller reported no warm air coming from a ${systemType} system.`;
+    
+    // If we have more specific info, use it
+    if (cleanedIssue && cleanedIssue.length > 10 && cleanedIssue !== 'no warm air') {
+      summary = `Caller reported ${cleanedIssue} from a ${systemType} system.`;
+    }
   } else if (systemType) {
-    summary = `Caller reported issue with a ${systemType}.`;
+    summary = `Caller reported issue with a ${systemType} system.`;
   } else if (issueText) {
-    summary = `Caller reported ${issueText}.`;
+    // Clean and simplify issue text
+    const cleanedIssue = issueText
+      .replace(/\b(there'?s|there\s+is)\s+(no)\s+/gi, 'no ')
+      .replace(/\b(no|not)\s+(hot|warm|air|heat|cooling)\s+(coming|blowing|out)\b/gi, 'no warm air')
+      .trim();
+    summary = `Caller reported ${cleanedIssue}.`;
   } else {
     // Fallback: basic intent description (clean and semantic)
     const intentDescriptions = {
@@ -624,8 +677,8 @@ function normalizeSystemType(systemType) {
  * Returns canonical values: completed, incomplete_hangup, emergency_redirect, out_of_scope_only
  * 
  * Distinction is based only on flow completion:
- * - completed: CLOSE state reached (closing message delivered) - regardless of who hangs up
- * - incomplete_hangup: caller disconnected before CLOSE state
+ * - completed: CLOSE state reached OR confirmation prompt was delivered (regardless of who hangs up)
+ * - incomplete_hangup: caller disconnected before confirmation was delivered
  */
 function determineCallStatus(currentState, callData) {
   const { STATES, INTENT_TYPES } = require('../scripts/rse-script');
@@ -640,13 +693,13 @@ function determineCallStatus(currentState, callData) {
     return 'out_of_scope_only';
   }
   
-  // Complete - reached CLOSE state (closing message delivered)
-  // Hanging up after CLOSE is still a completed call
-  if (currentState === STATES.CLOSE || currentState === STATES.ENDED) {
+  // Complete - reached CLOSE state or confirmation was delivered
+  // If confirmation prompt was delivered, the call is complete even if user hangs up
+  if (currentState === STATES.CLOSE || currentState === STATES.ENDED || callData._confirmationDelivered || callData._closeStateReached) {
     return 'completed';
   }
   
-  // All other cases are incomplete hangups (didn't reach CLOSE state)
+  // All other cases are incomplete hangups (didn't reach confirmation)
   return 'incomplete_hangup';
 }
 
@@ -691,12 +744,14 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
   // Build and validate service address
   const serviceAddress = buildServiceAddress(callData);
   
-  // Clean availability notes (remove fillers)
-  const availabilityNotes = availability ? removeFillerPhrases(availability) : '';
+  // Clean availability notes (remove fillers like "I'd say", "probably")
+  const availabilityNotes = availability ? cleanAvailabilityNotes(availability) : '';
   
   // Clean names (remove fillers, normalize spelling)
-  const cleanFirstName = firstName ? normalizeSpelling(removeFillerPhrases(firstName)) : '';
-  const cleanLastName = lastName ? normalizeSpelling(removeFillerPhrases(lastName)) : '';
+  // CRITICAL: normalizeSpelling should preserve spaces in names like "Van Cauwenberge"
+  // Don't remove spaces - they're part of the name structure
+  const cleanFirstName = firstName ? cleanName(firstName) : '';
+  const cleanLastName = lastName ? cleanName(lastName) : '';
   
   // For all calls (complete and incomplete): Log all collected data
   // Only leave fields blank if they were never collected or failed validation
@@ -808,19 +863,33 @@ async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
           console.log(`📊 Schema evolution: Adding ${missingHeaders.length} missing columns: ${missingHeaders.join(', ')}`);
           
           // Add missing columns by appending to the header row
-          const lastColumn = String.fromCharCode(64 + existingHeaders.length); // Convert to column letter
           const newHeaders = existingHeaders.concat(missingHeaders);
           
+          // Calculate the end column letter for the full header row
+          // A=1, B=2, ... Z=26, AA=27, etc.
+          function columnNumberToLetter(n) {
+            let result = '';
+            while (n > 0) {
+              n--;
+              result = String.fromCharCode(65 + (n % 26)) + result;
+              n = Math.floor(n / 26);
+            }
+            return result;
+          }
+          
+          const endColumn = columnNumberToLetter(newHeaders.length);
+          
+          // Update header row with all columns
           await sheets.spreadsheets.values.update({
             spreadsheetId,
-            range: `${sheetName}!A1`,
+            range: `${sheetName}!A1:${endColumn}1`, // Full range including new columns
             valueInputOption: 'RAW',
             requestBody: {
               values: [newHeaders]
             }
           });
           
-          console.log(`✅ Added missing columns to sheet "${sheetName}"`);
+          console.log(`✅ Added ${missingHeaders.length} missing columns to sheet "${sheetName}": ${missingHeaders.join(', ')}`);
         }
       }
     }
@@ -926,6 +995,19 @@ async function logCallIntake(callData, currentState, metadata = {}) {
       callId,
       timestamp: metadata.timestamp || new Date().toISOString()
     });
+    
+    // Get current header count to ensure row matches column count
+    const currentHeaders = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1:Z1`
+    });
+    
+    const headerCount = currentHeaders.data.values?.[0]?.length || COLUMN_HEADERS.length;
+    
+    // Pad row to match header count (in case schema evolved)
+    while (row.length < headerCount) {
+      row.push('');
+    }
     
     // Append row to sheet (append-only, never overwrite)
     const response = await sheets.spreadsheets.values.append({

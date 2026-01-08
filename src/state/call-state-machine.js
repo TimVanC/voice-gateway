@@ -230,7 +230,8 @@ function createCallStateMachine() {
       ? CONFIRMATION.correction_reread 
       : CONFIRMATION.intro;
     
-    // Build the read-back - use shorter format to avoid cutting off
+    // Build the read-back - use SHORT format to avoid cutting off
+    // Keep it under 15 seconds of audio
     let parts = [intro];
     
     // First and last name together (not spelled out)
@@ -254,28 +255,73 @@ function createCallStateMachine() {
       parts.push(`Email, ${formatted}.`);
     }
     
-    // Address
+    // Address (simplified)
     if (data.address) {
-      let addressPart = `Service address, ${data.address}`;
+      let addressPart = `${data.address}`;
       if (data.city) addressPart += `, ${data.city}`;
-      if (data.zip) addressPart += `, ${data.zip}`;
-      parts.push(addressPart + '.');
+      parts.push(`Address, ${addressPart}.`);
     }
     
-    // Availability
+    // Availability (cleaned)
     if (data.availability) {
-      parts.push(`Best availability, ${data.availability}.`);
+      const cleaned = cleanAvailabilityNotes(data.availability);
+      parts.push(`Availability, ${cleaned}.`);
     }
     
-    // Issue summary (shortened)
-    const summary = getIssueSummary();
+    // Issue summary (very short - one sentence max)
+    const summary = getIssueSummaryShort();
     if (summary) {
-      parts.push(summary);
+      parts.push(`Issue, ${summary}.`);
     }
     
     parts.push(CONFIRMATION.verify);
     
-    return parts.join(' ');
+    const fullPrompt = parts.join(' ');
+    
+    // If prompt is too long, truncate issue summary
+    if (fullPrompt.length > 200) {
+      parts = parts.slice(0, -2); // Remove issue and verify
+      parts.push(`Issue noted. ${CONFIRMATION.verify}`);
+      return parts.join(' ');
+    }
+    
+    return fullPrompt;
+  }
+  
+  /**
+   * Get very short issue summary for confirmation prompt
+   */
+  function getIssueSummaryShort() {
+    const { details = {} } = data;
+    
+    // Try to get one key symptom or issue
+    let issue = '';
+    if (details.symptoms) {
+      issue = details.symptoms.split(/[.!?]/)[0].trim(); // First sentence only
+      // Remove filler words
+      issue = issue.replace(/\b(yeah|uh|um|er|ah|oh|there's|there is)\b/gi, '').trim();
+      if (issue.length > 50) issue = issue.substring(0, 50) + '...';
+    } else if (details.issueDescription) {
+      issue = details.issueDescription.split(/[.!?]/)[0].trim();
+      if (issue.length > 50) issue = issue.substring(0, 50) + '...';
+    } else if (details.generatorIssue) {
+      issue = details.generatorIssue.split(/[.!?]/)[0].trim();
+      if (issue.length > 50) issue = issue.substring(0, 50) + '...';
+    }
+    
+    return issue || null;
+  }
+  
+  /**
+   * Clean availability notes: remove filler phrases
+   */
+  function cleanAvailabilityNotes(availability) {
+    if (!availability) return '';
+    
+    return availability
+      .replace(/^(i'?d\s+say|i\s+think|probably|maybe|uh|um|er|ah|oh)\s*,?\s*/gi, '')
+      .replace(/\s+(i'?d\s+say|probably|maybe)\s+/gi, ' ')
+      .trim();
   }
   
   /**
@@ -1125,7 +1171,11 @@ function createCallStateMachine() {
         };
         
       case STATES.CONFIRMATION:
+        // Mark that confirmation prompt was delivered (for completion tracking)
+        data._confirmationDelivered = true;
+        
         if (isConfirmation(lowerTranscript)) {
+          // User confirmed - immediately proceed to CLOSE
           return {
             nextState: transitionTo(STATES.CLOSE),
             prompt: CLOSE.anything_else,
@@ -1140,6 +1190,15 @@ function createCallStateMachine() {
             action: 'handle_correction'
           };
         }
+        // If user says "no" or gives a partial response, re-ask verification
+        if (lowerTranscript.includes('no') || lowerTranscript.includes('not') || lowerTranscript.length < 3) {
+          return {
+            nextState: currentState,
+            prompt: CONFIRMATION.verify,
+            action: 'ask'
+          };
+        }
+        // Default: wait for clearer confirmation
         return {
           nextState: currentState,
           prompt: CONFIRMATION.verify,
@@ -1147,6 +1206,9 @@ function createCallStateMachine() {
         };
         
       case STATES.CLOSE:
+        // Mark that close state was reached
+        data._closeStateReached = true;
+        
         if (hasMoreQuestions(lowerTranscript)) {
           return {
             nextState: currentState,
@@ -1154,6 +1216,27 @@ function createCallStateMachine() {
             action: 'answer_question'
           };
         }
+        // If user says no, nothing else, or gives a short response, deliver goodbye immediately
+        if (lowerTranscript.includes('no') || lowerTranscript.includes('nothing') || 
+            lowerTranscript === 'no thanks' || lowerTranscript === 'no thank you' ||
+            lowerTranscript.length < 3) {
+          return {
+            nextState: transitionTo(STATES.ENDED),
+            prompt: CLOSE.goodbye,
+            action: 'end_call'
+          };
+        }
+        // If user says yes, wait to see what they need, otherwise deliver goodbye after a pause
+        // For now, default to goodbye after asking once
+        if (lowerTranscript.length > 3) {
+          // User has more questions - answer it (handled by answer_question action)
+          return {
+            nextState: currentState,
+            prompt: null,
+            action: 'answer_question'
+          };
+        }
+        // Default: deliver goodbye
         return {
           nextState: transitionTo(STATES.ENDED),
           prompt: CLOSE.goodbye,
@@ -1393,37 +1476,77 @@ function createCallStateMachine() {
                                /\b([A-Z])\s+([A-Z])\s+([A-Z])\b/i.test(cleaned);
     
     if (hasSpelledPattern) {
-      // Replace "space" with actual space for word boundaries
-      cleaned = cleaned.replace(/\s+space\s+/gi, ' ');
-      
-      // Extract all letters (single uppercase letters)
-      const letterMatches = cleaned.match(/\b([A-Z])\b/g);
-      if (letterMatches && letterMatches.length >= 2) {
-        // Group letters into words (separated by "space" or when pattern breaks)
-        // Look for "space" or natural word boundaries
-        const spaceIndex = cleaned.toLowerCase().indexOf(' space ');
-        if (spaceIndex > 0) {
-          const firstPart = cleaned.substring(0, spaceIndex);
-          const lastPart = cleaned.substring(spaceIndex + 7);
-          const firstNameLetters = firstPart.match(/\b([A-Z])\b/g) || [];
-          const lastNameLetters = lastPart.match(/\b([A-Z])\b/g) || [];
-          
-          if (firstNameLetters.length > 0 && lastNameLetters.length > 0) {
-            const firstName = firstNameLetters.join('');
-            const lastName = lastNameLetters.join('');
-            // Capitalize first letter, lowercase rest
-            return {
-              firstName: firstName.charAt(0) + firstName.slice(1).toLowerCase(),
-              lastName: lastName.charAt(0) + lastName.slice(1).toLowerCase()
-            };
+      // CRITICAL: Handle "space" as word separator
+      // "V-A-N space C-A-U-W-E-N-B-E-R-G-E" should become lastName: "Van Cauwenberge" (two words)
+      const spaceIndex = cleaned.toLowerCase().indexOf(' space ');
+      if (spaceIndex > 0) {
+        // Split at "space"
+        const firstPart = cleaned.substring(0, spaceIndex);
+        const lastPart = cleaned.substring(spaceIndex + 7); // " space " is 7 chars
+        
+        // Extract letters from first part (if provided, usually empty if user already gave first name)
+        const firstNameLetters = firstPart.match(/[A-Z]/gi) || [];
+        
+        // Extract letters from last part - handle spaces within last name (e.g., "C-A-U W-E-N B-E-R-G-E")
+        // Split last part by spaces to preserve word boundaries
+        const lastPartWords = lastPart.split(/\s+/).filter(w => w.trim().length > 0);
+        const lastNameParts = [];
+        
+        for (const word of lastPartWords) {
+          // Extract letters from this word segment
+          const letters = word.match(/[A-Z]/gi) || [];
+          if (letters.length > 0) {
+            const combined = letters.join('');
+            const formatted = combined.charAt(0).toUpperCase() + combined.slice(1).toLowerCase();
+            lastNameParts.push(formatted);
           }
         }
         
-        // No space separator, assume all letters are one name
-        const allLetters = letterMatches.join('');
+        const formattedFirstName = firstNameLetters.length > 0
+          ? firstNameLetters.join('').charAt(0).toUpperCase() + firstNameLetters.join('').slice(1).toLowerCase()
+          : '';
+        const formattedLastName = lastNameParts.join(' ');
+        
+        if (formattedFirstName && formattedLastName) {
+          return {
+            firstName: formattedFirstName,
+            lastName: formattedLastName
+          };
+        } else if (formattedLastName) {
+          // Only last name (first name was already provided)
+          return {
+            firstName: '',
+            lastName: formattedLastName
+          };
+        }
+      }
+      
+      // No "space" separator - extract all letters as one name
+      // But check for natural word boundaries (spaces within the spelled portion)
+      const words = cleaned.split(/\s+/).filter(w => w.trim().length > 0);
+      if (words.length > 1) {
+        // Multiple words detected - last word is likely the last name
+        const allLetters = words.flatMap(w => w.match(/[A-Z]/gi) || []);
+        const lastWord = words[words.length - 1];
+        const lastWordLetters = lastWord.match(/[A-Z]/gi) || [];
+        
+        if (lastWordLetters.length > 0) {
+          const formattedLastName = lastWordLetters.join('').charAt(0).toUpperCase() + 
+                                    lastWordLetters.join('').slice(1).toLowerCase();
+          return {
+            firstName: '',
+            lastName: formattedLastName
+          };
+        }
+      }
+      
+      // Single word - extract all letters
+      const allLetters = cleaned.match(/[A-Z]/gi) || [];
+      if (allLetters.length >= 2) {
+        const combined = allLetters.join('');
         return {
           firstName: '',
-          lastName: allLetters.charAt(0) + allLetters.slice(1).toLowerCase()
+          lastName: combined.charAt(0).toUpperCase() + combined.slice(1).toLowerCase()
         };
       }
     }
@@ -1836,13 +1959,67 @@ function createCallStateMachine() {
            !text.includes('evening');
   }
   
+  /**
+   * Normalize system type: clean up filler phrases and map to canonical values
+   * Examples: "Oh, it's central here" → "central air", "central ac" → "central air"
+   */
+  function normalizeSystemType(systemType) {
+    if (!systemType) return '';
+    
+    // Remove filler phrases first
+    let cleaned = systemType
+      .replace(/^(oh|uh|um|er|ah|yeah|yes|well|so)\s*,?\s*/gi, '')
+      .replace(/\b(it'?s|it\s+is|that'?s|that\s+is|here|there)\b/gi, '')
+      .trim();
+    
+    const normalized = cleaned.toLowerCase();
+    
+    // Map common variations to canonical values
+    const systemTypeMap = {
+      'furnace': 'furnace',
+      'boiler': 'boiler',
+      'central air': 'central air',
+      'central air conditioning': 'central air',
+      'central ac': 'central air',
+      'central': 'central air',  // "central here" → "central air"
+      'heat pump': 'heat pump',
+      'mini split': 'mini split',
+      'mini-split': 'mini split',
+      'ductless': 'mini split',
+      'rooftop unit': 'rooftop unit',
+      'rtu': 'rooftop unit',
+      'packaged unit': 'packaged unit',
+      'package unit': 'packaged unit',
+      'ac': 'central air',
+      'air conditioning': 'central air',
+      'air conditioner': 'central air',
+      'air': 'central air'  // If just "air", assume central air
+    };
+    
+    // Check for exact matches first
+    if (systemTypeMap[normalized]) {
+      return systemTypeMap[normalized];
+    }
+    
+    // Check for partial matches (e.g., "central here" contains "central")
+    for (const [key, value] of Object.entries(systemTypeMap)) {
+      if (normalized.includes(key) || key.includes(normalized)) {
+        return value;
+      }
+    }
+    
+    // Return cleaned version if no match
+    return cleaned;
+  }
+  
   function storeDetailAnswer(text, analysis) {
     const questions = getDetailQuestions();
     const currentQuestion = questions[detailsQuestionIndex];
     
     if (data.intent === INTENT_TYPES.HVAC_SERVICE) {
       if (currentQuestion === DETAILS.hvac_service.system_type) {
-        data.details.systemType = text;
+        // Normalize system type: "Oh, it's central here" → "central air"
+        data.details.systemType = normalizeSystemType(text);
       } else if (currentQuestion === DETAILS.hvac_service.symptoms) {
         data.details.symptoms = text;
       } else if (currentQuestion === DETAILS.hvac_service.start_time) {
@@ -1854,7 +2031,8 @@ function createCallStateMachine() {
       if (currentQuestion === DETAILS.hvac_installation.project_type) {
         data.details.projectType = text;
       } else if (currentQuestion === DETAILS.hvac_installation.system_type) {
-        data.details.systemType = text;
+        // Normalize system type
+        data.details.systemType = normalizeSystemType(text);
       } else if (currentQuestion === DETAILS.hvac_installation.property_type) {
         data.details.propertyType = text;
       }
