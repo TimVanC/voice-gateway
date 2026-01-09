@@ -225,41 +225,75 @@ function createCallStateMachine() {
   /**
    * Generate confirmation prompt with spelled-out fields
    */
+  /**
+   * Spell out a word letter by letter (e.g., "Tim" → "T-I-M")
+   */
+  function spellOutWord(word) {
+    if (!word) return '';
+    return word.split('').filter(c => /[a-zA-Z0-9]/.test(c)).join('-').toUpperCase();
+  }
+  
+  /**
+   * Spell out an address component
+   */
+  function spellOutAddress(address) {
+    if (!address) return '';
+    // Split by spaces and spell out each word
+    const words = address.split(/\s+/);
+    return words.map(w => spellOutWord(w)).join(' space ');
+  }
+  
   function getConfirmationPrompt() {
     const intro = confirmationAttempts > 0 
       ? CONFIRMATION.correction_reread 
       : CONFIRMATION.intro;
     
-    // Build the read-back - use SHORT format to avoid cutting off
-    // Keep it under 15 seconds of audio
+    // Build the read-back - SPELL OUT everything for clarity
     let parts = [intro];
     
-    // First and last name together (not spelled out)
+    // First and last name - SPELL OUT
     if (data.firstName && data.lastName) {
-      parts.push(`Name, ${data.firstName} ${data.lastName}.`);
+      const firstNameSpelled = spellOutWord(data.firstName);
+      const lastNameSpelled = spellOutWord(data.lastName);
+      parts.push(`First name, ${firstNameSpelled}. Last name, ${lastNameSpelled}.`);
     } else if (data.firstName) {
-      parts.push(`First name, ${data.firstName}.`);
+      parts.push(`First name, ${spellOutWord(data.firstName)}.`);
     } else if (data.lastName) {
-      parts.push(`Last name, ${data.lastName}.`);
+      parts.push(`Last name, ${spellOutWord(data.lastName)}.`);
     }
     
-    // Phone (grouped, not digit by digit)
+    // Phone - SPELL OUT each digit
     if (data.phone) {
       const formatted = formatPhoneForConfirmation(data.phone);
       parts.push(`Phone, ${formatted}.`);
     }
     
-    // Email (formatted, not spelled out letter by letter)
+    // Email - SPELL OUT letter by letter
     if (data.email) {
-      const formatted = formatEmailForConfirmation(data.email);
-      parts.push(`Email, ${formatted}.`);
+      const emailSpelled = data.email.split('').map(c => {
+        if (c === '@') return 'at';
+        if (c === '.') return 'dot';
+        if (/[a-zA-Z0-9]/.test(c)) return c.toUpperCase();
+        return '';
+      }).filter(c => c).join(' ');
+      parts.push(`Email, ${emailSpelled}.`);
     }
     
-    // Address (simplified)
+    // Address - SPELL OUT
     if (data.address) {
-      let addressPart = `${data.address}`;
-      if (data.city) addressPart += `, ${data.city}`;
-      parts.push(`Address, ${addressPart}.`);
+      const addressSpelled = spellOutAddress(data.address);
+      if (data.city) {
+        const citySpelled = spellOutAddress(data.city);
+        parts.push(`Address, ${addressSpelled}, ${citySpelled}.`);
+      } else {
+        parts.push(`Address, ${addressSpelled}.`);
+      }
+      if (data.state) {
+        parts.push(`State, ${spellOutWord(data.state)}.`);
+      }
+      if (data.zip) {
+        parts.push(`Zip, ${data.zip.split('').join(' ')}.`);
+      }
     }
     
     // Availability (cleaned)
@@ -276,16 +310,7 @@ function createCallStateMachine() {
     
     parts.push(CONFIRMATION.verify);
     
-    const fullPrompt = parts.join(' ');
-    
-    // If prompt is too long, truncate issue summary
-    if (fullPrompt.length > 200) {
-      parts = parts.slice(0, -2); // Remove issue and verify
-      parts.push(`Issue noted. ${CONFIRMATION.verify}`);
-      return parts.join(' ');
-    }
-    
-    return fullPrompt;
+    return parts.join(' ');
   }
   
   /**
@@ -707,15 +732,30 @@ function createCallStateMachine() {
           // Check if extracted firstName looks valid
           if (!firstName || !looksLikeName(firstName)) {
             console.log(`⚠️  firstName validation failed: "${firstName}" (from "${transcript}")`);
-            // If we have lastName but no firstName, maybe it's reversed or single name
-            if (lastName && looksLikeName(lastName)) {
+            // CRITICAL: Don't treat lastName as full name if it contains a known prefix (Van, De, etc.)
+            // This prevents "Van Kallenberg" from being split incorrectly
+            const prefixes = ['van', 'de', 'la', 'le', 'du', 'von', 'der', 'da', 'di', 'del', 'della', 'dos', 'das', 'do', 'mac', 'mc', 'o\'', 'o'];
+            const lastNameHasPrefix = lastName && lastName.split(/\s+/).some(word => prefixes.includes(word.toLowerCase()));
+            
+            // If we have lastName but no firstName, and lastName doesn't have a prefix, maybe it's reversed or single name
+            if (lastName && looksLikeName(lastName) && !lastNameHasPrefix) {
               // Maybe they gave last name first, or it's just one name
               console.log(`🔄 lastName looks valid, treating as full name: "${lastName}"`);
-              data.firstName = lastName.split(' ')[0] || lastName;
-              data.lastName = lastName.split(' ').slice(1).join(' ') || '';
+              const lastNameParts = lastName.split(' ');
+              data.firstName = lastNameParts[0] || lastName;
+              data.lastName = lastNameParts.slice(1).join(' ') || '';
               return {
                 nextState: transitionTo(STATES.PHONE),
                 prompt: CALLER_INFO.phone,
+                action: 'ask'
+              };
+            }
+            // If lastName has a prefix, it's likely part of a multi-part name - ask to repeat
+            if (lastNameHasPrefix) {
+              console.log(`⚠️  lastName "${lastName}" contains prefix - likely multi-part name, asking to repeat`);
+              return {
+                nextState: currentState,
+                prompt: "I want to make sure I have that right. Could you say your first and last name again?",
                 action: 'ask'
               };
             }
@@ -1281,6 +1321,28 @@ function createCallStateMachine() {
             data.state = addressParts.state;
             data.zip = addressParts.zip;
             console.log(`✅ Address accepted with medium confidence: ${finalAddress}, ${finalCity || 'no city'}`);
+            
+            // Check if state/zip are missing - ask for them if needed
+            if (!data.state && !data.zip) {
+              return {
+                nextState: currentState,
+                prompt: "Could you also provide the state and zip code?",
+                action: 'ask'
+              };
+            } else if (!data.state) {
+              return {
+                nextState: currentState,
+                prompt: "Could you also provide the state?",
+                action: 'ask'
+              };
+            } else if (!data.zip) {
+              return {
+                nextState: currentState,
+                prompt: "Could you also provide the zip code?",
+                action: 'ask'
+              };
+            }
+            
             return {
               nextState: transitionTo(STATES.AVAILABILITY),
               prompt: AVAILABILITY.ask,
@@ -1305,6 +1367,28 @@ function createCallStateMachine() {
           data.city = finalCity;
           data.state = addressParts.state;
           data.zip = addressParts.zip;
+          
+          // Check if state/zip are missing - ask for them if needed
+          if (!data.state && !data.zip) {
+            return {
+              nextState: currentState,
+              prompt: "Could you also provide the state and zip code?",
+              action: 'ask'
+            };
+          } else if (!data.state) {
+            return {
+              nextState: currentState,
+              prompt: "Could you also provide the state?",
+              action: 'ask'
+            };
+          } else if (!data.zip) {
+            return {
+              nextState: currentState,
+              prompt: "Could you also provide the zip code?",
+              action: 'ask'
+            };
+          }
+          
           return {
             nextState: transitionTo(STATES.AVAILABILITY),
             prompt: AVAILABILITY.ask,
@@ -1393,12 +1477,19 @@ function createCallStateMachine() {
         // Mark that confirmation prompt was delivered (for completion tracking)
         data._confirmationDelivered = true;
         
-        // CRITICAL: Handle specific corrections (e.g., "The first name is Tim")
-        if (lowerTranscript.includes('first name') || lowerTranscript.includes('firstname')) {
+        // CRITICAL: Handle corrections more intelligently
+        // Check for "My first name is X, last name is Y" pattern first
+        if (/my\s+first\s+name\s+is/i.test(transcript) || /first\s+name\s+is/i.test(transcript)) {
           const nameExtract = extractName(transcript);
           if (nameExtract.firstName) {
             data.firstName = nameExtract.firstName;
             console.log(`✅ First name corrected to: ${data.firstName}`);
+          }
+          if (nameExtract.lastName) {
+            data.lastName = nameExtract.lastName;
+            console.log(`✅ Last name corrected to: ${data.lastName}`);
+          }
+          if (nameExtract.firstName || nameExtract.lastName) {
             return {
               nextState: currentState,
               prompt: getConfirmationPrompt(),
@@ -1406,10 +1497,29 @@ function createCallStateMachine() {
             };
           }
         }
-        if (lowerTranscript.includes('last name') || lowerTranscript.includes('lastname')) {
-          const nameExtract = extractName(transcript);
-          if (nameExtract.lastName) {
-            data.lastName = nameExtract.lastName;
+        
+        // Handle "last name is X" separately
+        if ((lowerTranscript.includes('last name') || lowerTranscript.includes('lastname')) && 
+            !lowerTranscript.includes('first name')) {
+          // Extract just the last name part
+          const lastNameMatch = transcript.match(/(?:last\s+name\s+is|lastname\s+is)\s+([^,]+)/i);
+          if (lastNameMatch) {
+            const lastNameText = lastNameMatch[1].trim().replace(/[.,!?]+$/, '');
+            // If it contains "and my address", split it
+            if (lastNameText.includes(' and ')) {
+              const parts = lastNameText.split(/\s+and\s+/i);
+              data.lastName = parts[0].trim();
+              // Check if second part is address
+              if (parts[1] && (parts[1].includes('address') || parts[1].includes('road') || parts[1].includes('street'))) {
+                const addressParts = extractAddress(parts[1]);
+                if (addressParts.address) {
+                  data.address = addressParts.address;
+                  data.city = addressParts.city || data.city;
+                }
+              }
+            } else {
+              data.lastName = lastNameText;
+            }
             console.log(`✅ Last name corrected to: ${data.lastName}`);
             return {
               nextState: currentState,
@@ -1418,20 +1528,25 @@ function createCallStateMachine() {
             };
           }
         }
+        
+        // Handle address corrections
         if (lowerTranscript.includes('address') || lowerTranscript.includes('street') || lowerTranscript.includes('road')) {
-          // Address correction
-          const addressParts = extractAddress(transcript);
-          if (addressParts.address) {
-            data.address = addressParts.address;
-            data.city = addressParts.city || data.city;
-            data.state = addressParts.state || data.state;
-            data.zip = addressParts.zip || data.zip;
-            console.log(`✅ Address corrected: ${data.address}, ${data.city}`);
-            return {
-              nextState: currentState,
-              prompt: getConfirmationPrompt(),
-              action: 'confirm'
-            };
+          // Extract address from transcript, but be careful not to extract name parts
+          const addressMatch = transcript.match(/(?:address\s+is|street\s+is|road\s+is|my\s+address\s+is)\s+([^,]+)/i);
+          if (addressMatch) {
+            const addressParts = extractAddress(addressMatch[1]);
+            if (addressParts.address) {
+              data.address = addressParts.address;
+              data.city = addressParts.city || data.city;
+              data.state = addressParts.state || data.state;
+              data.zip = addressParts.zip || data.zip;
+              console.log(`✅ Address corrected: ${data.address}, ${data.city}`);
+              return {
+                nextState: currentState,
+                prompt: getConfirmationPrompt(),
+                action: 'confirm'
+              };
+            }
           }
         }
         
@@ -1832,6 +1947,19 @@ function createCallStateMachine() {
     
     // Then remove "it's", "that's", "that would be", etc. (AFTER removing initial fillers)
     // CRITICAL: Must handle "it's" as a standalone word, not just "is"
+    // Also handle "My first name is X, last name is Y" pattern
+    if (/my\s+first\s+name\s+is/i.test(name)) {
+      // Extract from "My first name is Tim, last name is Van Kallenberg"
+      const firstNameMatch = name.match(/first\s+name\s+is\s+([^,]+)/i);
+      const lastNameMatch = name.match(/last\s+name\s+is\s+([^,]+)/i);
+      if (firstNameMatch && lastNameMatch) {
+        return {
+          firstName: firstNameMatch[1].trim().replace(/[.,!?]+$/g, ''),
+          lastName: lastNameMatch[1].trim().replace(/[.,!?]+$/g, '')
+        };
+      }
+    }
+    
     name = name.replace(/^(it'?s|it\s+is|that'?s|that\s+would\s+be|that\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '');
     
     // Remove tokens like "space", "dash", "hyphen" that might be left over
@@ -1855,7 +1983,7 @@ function createCallStateMachine() {
       // Check if second part is a common name prefix (Van, De, La, etc.)
       // This handles names like: "Tim Van Kallenberg", "John De La Cruz", "Mary Von Habsburg"
       const prefixes = ['van', 'de', 'la', 'le', 'du', 'von', 'der', 'da', 'di', 'del', 'della', 'dos', 'das', 'do', 'mac', 'mc', 'o\'', 'o'];
-      const secondWord = parts[1].toLowerCase();
+      const secondWord = parts[1].toLowerCase().replace(/[.,!?]+$/, '');
       
       if (prefixes.includes(secondWord) && parts.length >= 3) {
         // Multi-part last name with prefix: "Tim Van Kallenberg" → firstName: "Tim", lastName: "Van Kallenberg"
@@ -2168,9 +2296,26 @@ function createCallStateMachine() {
       .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|the\s+address\s+is|address\s+is|my\s+address\s+is)\s*/gi, '')
       .trim();
     
+    // Remove "as in" and similar phrases (e.g., "1111, as in 1111 Elf")
+    address = address.replace(/\s*,\s*as\s+in\s+/gi, ', ');
+    address = address.replace(/\s+as\s+in\s+/gi, ' ');
+    
     // Normalize spelled words in address (e.g., "E L F" → "Elf")
     // This handles cases like "11 Elf ELF Road" where "ELF" is spelled out
     address = normalizeSpelledWordsInAddress(address);
+    
+    // Remove duplicate words (e.g., "1111, as  1111 Elf, Elf, Road" → "1111 Elf Road")
+    const words = address.split(/\s+/);
+    const cleanedWords = [];
+    let lastWord = '';
+    for (const word of words) {
+      const normalizedWord = word.toLowerCase().replace(/[.,!?]+$/, '');
+      if (normalizedWord !== lastWord.toLowerCase() || !lastWord) {
+        cleanedWords.push(word);
+        lastWord = word;
+      }
+    }
+    address = cleanedWords.join(' ');
     
     // Extract zip code (5 digits, optionally with -4 extension)
     const zipMatch = address.match(/\b(\d{5}(-\d{4})?)\b/);
