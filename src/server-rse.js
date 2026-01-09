@@ -766,13 +766,28 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     
     // Generate appropriate response based on state machine result
     if (result.prompt) {
+      // CRITICAL: Always use scripted prompts, never let AI go off-script
+      // This ensures AI follows the state machine exactly
       sendStatePrompt(result.prompt);
     } else if (result.action === 'redirect_out_of_scope') {
       // Handle out-of-scope request with polite redirect
       sendOutOfScopeResponse(transcript);
-    } else if (result.action === 'classify_intent' || result.action === 'answer_question' || result.action === 'handle_correction') {
-      // Let the model generate a natural response
+    } else if (result.action === 'classify_intent') {
+      // Only for intent classification (greeting -> intent transition)
+      // Use natural response but keep it brief and on-topic
       sendNaturalResponse(transcript, result.action);
+    } else if (result.action === 'answer_question' || result.action === 'handle_correction') {
+      // These actions should NOT happen in normal flow
+      // If they do, default to asking for the required info
+      console.log(`⚠️  Unexpected action: ${result.action} - falling back to state prompt`);
+      const currentState = stateMachine.getState();
+      const fallbackPrompt = stateMachine.getPromptForState(currentState);
+      if (fallbackPrompt) {
+        sendStatePrompt(fallbackPrompt);
+      } else {
+        // Last resort: use natural response but keep it brief
+        sendNaturalResponse(transcript, result.action);
+      }
     }
   }
   

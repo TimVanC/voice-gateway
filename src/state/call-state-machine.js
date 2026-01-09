@@ -663,26 +663,71 @@ function createCallStateMachine() {
         }
         
         if (transcript.length > 0) {
-          const { firstName, lastName } = extractName(transcript);
+          // Extract name FIRST
+          const extracted = extractName(transcript);
+          const { firstName, lastName } = extracted;
           
-          // Check if this looks like a name at all
-          if (!looksLikeName(firstName)) {
-            console.log(`📋 Doesn't look like a name: "${firstName}"`);
+          // Log extraction result immediately (for debugging)
+          console.log(`📋 Name extraction: firstName="${firstName}", lastName="${lastName}", raw="${transcript.substring(0, 50)}"`);
+          
+          // Check confidence BEFORE validation (so we always log it)
+          const firstNameConf = firstName ? estimateFirstNameConfidence(firstName) : { level: CONFIDENCE.LOW, reason: 'firstName empty after extraction' };
+          const lastNameConf = lastName ? estimateLastNameConfidence(lastName) : (firstName ? { level: CONFIDENCE.HIGH } : { level: CONFIDENCE.LOW, reason: 'lastName missing' });
+          const overallConf = getLowestConfidence(firstNameConf, lastNameConf);
+          
+          // Log confidence IMMEDIATELY (before any validation)
+          console.log(`📋 Name confidence: firstName="${firstName}" (${firstNameConf.level}, ${firstNameConf.reason || 'N/A'}), lastName="${lastName}" (${lastNameConf.level}, ${lastNameConf.reason || 'N/A'}), overall=${overallConf.level}`);
+          
+          // If extraction failed completely, check raw transcript
+          if (!firstName && !lastName) {
+            console.log(`⚠️  Name extraction failed completely for: "${transcript}"`);
+            // Try to extract from raw transcript (maybe it's a single word name or has unusual format)
+            const rawParts = transcript.split(/\s+/).filter(p => p.length > 1 && !/\b(yeah|yes|it'?s|that'?s|would|be)\b/i.test(p));
+            if (rawParts.length >= 2) {
+              // Try again with cleaned parts
+              const cleanedName = rawParts.join(' ');
+              const retryExtract = extractName(cleanedName);
+              if (retryExtract.firstName) {
+                console.log(`🔄 Retry extraction succeeded: ${retryExtract.firstName} ${retryExtract.lastName}`);
+                // Continue with retry extraction
+                return {
+                  nextState: currentState,
+                  prompt: `Got it. Just to confirm, is that ${retryExtract.firstName} ${retryExtract.lastName || '(last name)'}?`,
+                  action: 'ask'
+                };
+              }
+            }
             return {
               nextState: currentState,
-              prompt: CALLER_INFO.name,
+              prompt: "I didn't catch that clearly. Could you say your first and last name again?",
               action: 'ask'
             };
           }
           
-          // Check confidence for first name
-          const firstNameConf = estimateFirstNameConfidence(firstName || transcript);
-          const lastNameConf = lastName ? estimateLastNameConfidence(lastName) : { level: CONFIDENCE.HIGH };
+          // Check if extracted firstName looks valid
+          if (!firstName || !looksLikeName(firstName)) {
+            console.log(`⚠️  firstName validation failed: "${firstName}" (from "${transcript}")`);
+            // If we have lastName but no firstName, maybe it's reversed or single name
+            if (lastName && looksLikeName(lastName)) {
+              // Maybe they gave last name first, or it's just one name
+              console.log(`🔄 lastName looks valid, treating as full name: "${lastName}"`);
+              data.firstName = lastName.split(' ')[0] || lastName;
+              data.lastName = lastName.split(' ').slice(1).join(' ') || '';
+              return {
+                nextState: transitionTo(STATES.PHONE),
+                prompt: CALLER_INFO.phone,
+                action: 'ask'
+              };
+            }
+            return {
+              nextState: currentState,
+              prompt: "I want to make sure I have that right. Could you spell your first and last name for me?",
+              action: 'ask'
+            };
+          }
           
-          // Use the lower confidence level
-          const overallConf = getLowestConfidence(firstNameConf, lastNameConf);
-          
-          console.log(`📋 Name: ${firstName} ${lastName} (confidence: ${overallConf.level}, reason: ${overallConf.reason || 'N/A'})`);
+          // Log final extracted name
+          console.log(`📋 Name extracted: ${firstName} ${lastName} (confidence: ${overallConf.level}, reason: ${overallConf.reason || 'N/A'})`);
           
           if (overallConf.level === CONFIDENCE.LOW) {
             // Ask to repeat
@@ -752,6 +797,108 @@ function createCallStateMachine() {
         if (isBacktrackRequest(lowerTranscript)) {
           console.log(`📋 Backtrack request detected`);
           return handleBacktrackRequest(transcript);
+        }
+        
+        // CRITICAL: Check if this is city/state being provided to complete an address
+        // User might say "Orange, New Jersey" to complete "11 Elf Road"
+        if (data.address && !data.city) {
+          const addressParts = extractAddress(transcript);
+          if (addressParts.city || addressParts.state) {
+            console.log(`📋 City/State detected in PHONE state: city="${addressParts.city}", state="${addressParts.state}"`);
+            // Update address with city/state
+            data.city = addressParts.city || data.city;
+            data.state = addressParts.state || data.state;
+            data.zip = addressParts.zip || data.zip;
+            // If phone is already set, move to email/availability
+            if (data.phone || metadata?.callerNumber) {
+              // Check if we still need email
+              if (!data.email) {
+                return {
+                  nextState: transitionTo(STATES.EMAIL),
+                  prompt: CALLER_INFO.email.primary,
+                  action: 'ask'
+                };
+              }
+              // If we have everything, check what's next
+              if (!data.availability) {
+                return {
+                  nextState: transitionTo(STATES.AVAILABILITY),
+                  prompt: AVAILABILITY.ask,
+                  action: 'ask'
+                };
+              }
+              // If we have everything, go to confirmation
+              return {
+                nextState: transitionTo(STATES.CONFIRMATION),
+                prompt: getConfirmationPrompt(),
+                action: 'confirm'
+              };
+            }
+            // Otherwise, still need phone
+            return {
+              nextState: currentState,
+              prompt: CALLER_INFO.phone,
+              action: 'ask'
+            };
+          }
+        }
+        
+        // CRITICAL: Check if user said they already provided the phone (e.g., "we already went over that")
+        // Or if they gave availability instead of phone
+        if (isAlreadyProvidedResponse(lowerTranscript) || lowerTranscript.includes('already') || lowerTranscript.includes('went over')) {
+          // They already gave phone or are providing availability/other info
+          // If phone is already set, move to email
+          if (data.phone || metadata?.callerNumber) {
+            console.log(`✅ Phone already collected, moving to email`);
+            return {
+              nextState: transitionTo(STATES.EMAIL),
+              prompt: CALLER_INFO.email.primary,
+              action: 'ask'
+            };
+          }
+          // Otherwise, remind them we need phone
+          return {
+            nextState: currentState,
+            prompt: "I still need your phone number. What's the best number to reach you?",
+            action: 'ask'
+          };
+        }
+        
+        // Check if this looks like availability instead of phone (cross-state detection)
+        if (looksLikeAvailability(lowerTranscript)) {
+          console.log(`📋 Availability detected in PHONE state: "${transcript}"`);
+          // If phone is already collected, treat as availability and move forward
+          if (data.phone || metadata?.callerNumber) {
+            data.availability = extractAvailability(transcript);
+            console.log(`📋 Availability: ${data.availability}`);
+            // Check what we still need
+            if (!data.email) {
+              return {
+                nextState: transitionTo(STATES.EMAIL),
+                prompt: CALLER_INFO.email.primary,
+                action: 'ask'
+              };
+            }
+            if (!data.address || !data.city) {
+              return {
+                nextState: transitionTo(STATES.ADDRESS),
+                prompt: ADDRESS.ask,
+                action: 'ask'
+              };
+            }
+            // If we have everything, go to confirmation
+            return {
+              nextState: transitionTo(STATES.CONFIRMATION),
+              prompt: getConfirmationPrompt(),
+              action: 'confirm'
+            };
+          }
+          // Otherwise, ask for phone first
+          return {
+            nextState: currentState,
+            prompt: "I still need your phone number first. What's the best number to reach you?",
+            action: 'ask'
+          };
         }
         
         if (hasPhoneNumber(lowerTranscript)) {
@@ -1562,18 +1709,24 @@ function createCallStateMachine() {
     }
     
     // Remove common prefixes and their punctuation variations
-    let name = text
-      // Remove leading filler words with optional punctuation
-      .replace(/^(yeah,?\s*|yes,?\s*|oh,?\s*|um,?\s*|uh,?\s*|so,?\s*|well,?\s*)+/gi, '')
-      // Remove "that would be", "it's", "this is", "my name is", "that's", etc.
-      .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '')
-      // Remove tokens like "space", "dash", "hyphen" that might be left over
-      .replace(/\b(space|dash|hyphen)\b/gi, '')
-      // Remove trailing punctuation
-      .replace(/[.,!?]+$/g, '')
-      // Remove leading/trailing punctuation and whitespace
-      .replace(/^[,.\s]+|[,.\s]+$/g, '')
-      .trim();
+    // CRITICAL: Handle "Yeah, it's" pattern - must match in order
+    let name = text.trim();
+    
+    // Remove leading filler words first
+    name = name.replace(/^(yeah,?\s*|yes,?\s*|oh,?\s*|um,?\s*|uh,?\s*|so,?\s*|well,?\s*)+/gi, '');
+    
+    // Then remove "it's", "that's", "that would be", etc. (AFTER removing initial fillers)
+    // CRITICAL: Must handle "it's" as a standalone word, not just "is"
+    name = name.replace(/^(it'?s|it\s+is|that'?s|that\s+would\s+be|that\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '');
+    
+    // Remove tokens like "space", "dash", "hyphen" that might be left over
+    name = name.replace(/\b(space|dash|hyphen)\b/gi, '');
+    
+    // Remove trailing punctuation
+    name = name.replace(/[.,!?]+$/g, '');
+    
+    // Remove leading/trailing punctuation and whitespace
+    name = name.replace(/^[,.\s]+|[,.\s]+$/g, '').trim();
     
     // If we stripped everything, return empty
     if (!name || name.length < 2) {
@@ -1947,8 +2100,44 @@ function createCallStateMachine() {
   function extractAvailability(text) {
     // Clean up and normalize availability
     return text
-      .replace(/^(i'm available|i can do|works for me|best for me is)\s*/gi, '')
+      .replace(/^(i'm available|i can do|works for me|best for me is|a\s+weekday|weekday)\s*/gi, '')
       .trim();
+  }
+  
+  function looksLikeAvailability(text) {
+    if (!text || text.length < 3) return false;
+    
+    const lower = text.toLowerCase();
+    
+    // Patterns that indicate availability
+    const availabilityPatterns = [
+      /\b(weekday|weekdays|monday|tuesday|wednesday|thursday|friday|weekend|saturday|sunday)\b/i,
+      /\b(morning|afternoon|evening|morning|pm|am)\b/i,
+      /\b(after|before|between)\s+\d/i,
+      /\b(available|availability|best time|work|convenient)\b/i,
+      /\b\d+\s*(pm|am|o'clock|oclock)\b/i,
+      /\bnext\s+(week|month)\b/i,
+      /\b(specific time|prefer|preference)\b/i
+    ];
+    
+    return availabilityPatterns.some(pattern => pattern.test(text));
+  }
+  
+  function isAlreadyProvidedResponse(text) {
+    if (!text || text.length < 3) return false;
+    
+    const lower = text.toLowerCase();
+    
+    // Patterns that indicate they already provided info
+    const alreadyPatterns = [
+      /\b(already|already gave|already said|already told|already mentioned)\b/i,
+      /\b(we already|we went over|we covered|we did|we discussed)\b/i,
+      /\b(same|that one|the same|this one)\b/i,
+      /\b(same number|same phone|same address)\b/i,
+      /\b(calling from|number i'm|this number|my number)\b/i
+    ];
+    
+    return alreadyPatterns.some(pattern => pattern.test(text));
   }
   
   function isVagueAvailability(text) {
