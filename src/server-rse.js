@@ -14,7 +14,7 @@ const http = require("http");
 // ============================================================================
 // IMPORTS
 // ============================================================================
-const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL, OUT_OF_SCOPE } = require('./scripts/rse-script');
+const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL, OUT_OF_SCOPE, CLOSE } = require('./scripts/rse-script');
 const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = require('./config/vad-config');
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
@@ -822,7 +822,12 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     console.log(`📍 State machine result: nextState=${result.nextState}, action=${result.action}`);
     
     // Generate appropriate response based on state machine result
-    if (result.prompt) {
+    if (result.action === 'end' || result.action === 'end_call') {
+      // User indicated end of call - deliver goodbye and mark complete
+      console.log(`👋 End of call - delivering goodbye`);
+      stateMachine.updateData('_closeStateReached', true);
+      sendStatePrompt(result.prompt || CLOSE.goodbye);
+    } else if (result.prompt) {
       // CRITICAL: Always use scripted prompts, never let AI go off-script
       // This ensures AI follows the state machine exactly
       sendStatePrompt(result.prompt);
@@ -1033,24 +1038,29 @@ DO NOT DEVIATE FROM THE SCRIPT.`;
     } else {
       // Other states - FORCE EXACT OUTPUT
       // The AI has been going off-script. Use extremely strict formatting.
-      instructions = `YOU MUST SAY THIS EXACT TEXT AND NOTHING ELSE:
+      instructions = `[ROBOT MODE - EXACT OUTPUT ONLY]
 
+YOUR ENTIRE RESPONSE MUST BE:
 "${prompt}"
 
-CRITICAL RULES:
-1. SAY EXACTLY THE TEXT IN QUOTES ABOVE
-2. You may optionally start with "Okay" or "Got it" or "Thanks" - NOTHING ELSE
-3. DO NOT ask about appointments, scheduling, times, or days
-4. DO NOT mention "next week" or "lock in a time" or "confirmation"
-5. DO NOT ask any follow-up questions
-6. DO NOT improvise or add helpful suggestions
-7. STOP IMMEDIATELY after saying the scripted text
-8. NEVER say anything about scheduling - we do NOT schedule appointments
+RULES:
+- You ARE A SCRIPT READER. You read scripts, nothing else.
+- The ONLY words that can come out of your mouth are the exact words in quotes above.
+- You may add "Okay, " or "Thanks, " at the very start. NOTHING ELSE.
+- After saying the script, STOP. Do not say another word.
+- Do NOT add commentary, questions, or helpful information.
+- Do NOT say "You too", "Take care", "We've got all the details", or ANYTHING not in the script.
+- If the script says "What's the service address?" - you say ONLY that.
 
-FORBIDDEN PHRASES: "next week", "lock in", "schedule", "appointment", "what day", "what time", "confirm everything"
+ABSOLUTELY FORBIDDEN - you will be FIRED if you say:
+- "next week" / "this week" / "Thursday" / any day name
+- "lock in a time" / "schedule" / "appointment" / "confirmation"
+- "We've got all the key details" / "our team will follow up"
+- "You too" / "Take care" / any goodbye unless the script says goodbye
+- ANY question that isn't in the script
 
-Say the exact scripted text, then STOP.`;
-      maxTokens = 300; // Reduce tokens to force shorter response
+OUTPUT THE SCRIPT TEXT. THEN STOP. NOTHING MORE.`;
+      maxTokens = 200; // Reduce tokens even more to force very short response
     }
     
     openaiWs.send(JSON.stringify({

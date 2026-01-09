@@ -577,7 +577,7 @@ function normalizeIntent(intent, callData = {}) {
  * Validates and normalizes the address before returning
  */
 function buildServiceAddress(callData) {
-  const { address, city, zip } = callData;
+  const { address, city, state, zip } = callData;
   
   // Validate and normalize the street address
   const normalizedAddress = address ? validateAndNormalizeAddress(address) : '';
@@ -589,11 +589,20 @@ function buildServiceAddress(callData) {
   
   const parts = [normalizedAddress];
   
-  // Add city if provided (normalize spelling)
+  // Add city if provided (normalize spelling, remove trailing period)
   if (city) {
-    const normalizedCity = normalizeSpelling(removeFillerPhrases(city));
+    let normalizedCity = normalizeSpelling(removeFillerPhrases(city));
+    normalizedCity = normalizedCity.replace(/\.+$/, ''); // Remove trailing periods
     if (normalizedCity) {
       parts.push(normalizedCity);
+    }
+  }
+  
+  // Add state if provided
+  if (state) {
+    const normalizedState = state.toUpperCase().trim();
+    if (normalizedState.length === 2) {
+      parts.push(normalizedState);
     }
   }
   

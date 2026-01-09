@@ -1274,8 +1274,52 @@ function createCallStateMachine() {
         }
         
         if (transcript.length > 2) {
+          // CRITICAL: Check if we already have the street address but need state/zip
+          // If we asked "Could you provide state and zip?" - capture that response
+          if (data.address && (!data.state || !data.zip)) {
+            // Try to extract state and zip from response
+            const stateZipResult = extractStateAndZip(transcript);
+            if (stateZipResult.state || stateZipResult.zip) {
+              // Merge with existing data
+              if (stateZipResult.state) data.state = stateZipResult.state;
+              if (stateZipResult.zip) data.zip = stateZipResult.zip;
+              console.log(`✅ State/Zip merged: state="${data.state || 'N/A'}", zip="${data.zip || 'N/A'}"`);
+              
+              // Now check if we have everything
+              if (!data.state) {
+                return {
+                  nextState: currentState,
+                  prompt: "Could you also provide the state?",
+                  action: 'ask'
+                };
+              } else if (!data.zip) {
+                return {
+                  nextState: currentState,
+                  prompt: "Could you also provide the zip code?",
+                  action: 'ask'
+                };
+              }
+              
+              // We have everything - move to availability
+              return {
+                nextState: transitionTo(STATES.AVAILABILITY),
+                prompt: AVAILABILITY.ask,
+                action: 'ask'
+              };
+            }
+          }
+          
           // First check if this actually looks like an address
           if (!looksLikeAddress(transcript)) {
+            // If user says goodbye or thanks, transition to close
+            if (/\b(bye|goodbye|good one|take care|thanks|thank you)\b/i.test(lowerTranscript)) {
+              console.log(`📋 User indicating end of call in ADDRESS state`);
+              return {
+                nextState: transitionTo(STATES.CLOSE),
+                prompt: CLOSE.goodbye,
+                action: 'end'
+              };
+            }
             console.log(`📋 Response doesn't look like an address: "${transcript}" - re-asking`);
             return {
               nextState: currentState,
@@ -2323,6 +2367,59 @@ function createCallStateMachine() {
       }
       return match;
     });
+    
+    return result;
+  }
+  
+  /**
+   * Extract state and zip code from a response
+   * Used when we already have the street address and asked for state/zip
+   */
+  function extractStateAndZip(text) {
+    const result = { state: null, zip: null };
+    
+    // Remove filler phrases
+    let cleaned = text
+      .replace(/^(yeah\s*,?\s*)?(sure\s*,?\s*)?(no\s+problem\s*,?\s*)?(that'?s|it'?s|that\s+would\s+be)\s*/gi, '')
+      .trim();
+    
+    // Extract zip code (5 digits)
+    const zipMatch = cleaned.match(/\b(\d{5})(?:-?\d{4})?\b/);
+    if (zipMatch) {
+      result.zip = zipMatch[1];
+    }
+    
+    // Extract state - check for full names and abbreviations
+    const stateMap = {
+      'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
+      'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
+      'hawaii': 'HI', 'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
+      'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+      'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS', 'missouri': 'MO',
+      'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ',
+      'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH',
+      'oklahoma': 'OK', 'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+      'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT', 'vermont': 'VT',
+      'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV', 'wisconsin': 'WI', 'wyoming': 'WY'
+    };
+    
+    const lowerText = cleaned.toLowerCase();
+    
+    // Check for full state names
+    for (const [fullName, abbrev] of Object.entries(stateMap)) {
+      if (lowerText.includes(fullName)) {
+        result.state = abbrev;
+        break;
+      }
+    }
+    
+    // Check for state abbreviations (2 uppercase letters)
+    if (!result.state) {
+      const abbrevMatch = cleaned.match(/\b([A-Z]{2})\b/);
+      if (abbrevMatch && Object.values(stateMap).includes(abbrevMatch[1])) {
+        result.state = abbrevMatch[1];
+      }
+    }
     
     return result;
   }
