@@ -1031,23 +1031,26 @@ STRICT RULES:
 DO NOT DEVIATE FROM THE SCRIPT.`;
       maxTokens = 300;
     } else {
-      // Other states - standard instructions
-      instructions = `OUTPUT REQUIRED - MANDATORY VERBATIM:
+      // Other states - FORCE EXACT OUTPUT
+      // The AI has been going off-script. Use extremely strict formatting.
+      instructions = `YOU MUST SAY THIS EXACT TEXT AND NOTHING ELSE:
 
->>>
-${prompt}
-<<<
+"${prompt}"
 
-INSTRUCTIONS:
-- Your ONLY job is to say the text between >>> and <<< above
-- You may add "Okay" or "Great" or "Thanks" at the start, nothing else
-- DO NOT ask about thermostats, filters, noises, smells, or anything else
-- DO NOT continue the conversation beyond the scripted text
-- DO NOT improvise or add helpful questions
-- Say the scripted text and STOP
+CRITICAL RULES:
+1. SAY EXACTLY THE TEXT IN QUOTES ABOVE
+2. You may optionally start with "Okay" or "Got it" or "Thanks" - NOTHING ELSE
+3. DO NOT ask about appointments, scheduling, times, or days
+4. DO NOT mention "next week" or "lock in a time" or "confirmation"
+5. DO NOT ask any follow-up questions
+6. DO NOT improvise or add helpful suggestions
+7. STOP IMMEDIATELY after saying the scripted text
+8. NEVER say anything about scheduling - we do NOT schedule appointments
 
-IGNORE conversation context. ONLY say the scripted text above.`;
-      maxTokens = 500;
+FORBIDDEN PHRASES: "next week", "lock in", "schedule", "appointment", "what day", "what time", "confirm everything"
+
+Say the exact scripted text, then STOP.`;
+      maxTokens = 300; // Reduce tokens to force shorter response
     }
     
     openaiWs.send(JSON.stringify({
@@ -1091,6 +1094,19 @@ DO NOT SKIP ANY STEP. DO NOT ASK FOR ADDRESS BEFORE PHONE.`;
     
     let instruction = '';
     
+    // CRITICAL RULES for ALL natural responses
+    const forbiddenRules = `
+FORBIDDEN - NEVER SAY:
+- "next week" or "this week"
+- "lock in a time" or "get you scheduled"
+- "What day does next week work"
+- "Thursday it is" or any day confirmation
+- "we'll confirm everything"
+- "let me pull up available times"
+- Any scheduling language
+
+You do NOT schedule. You only collect information.`;
+
     if (action === 'classify_intent') {
       instruction = `Caller said: "${userInput}"
 
@@ -1109,12 +1125,16 @@ Respond with:
 1. Brief acknowledgement (one short sentence)
 2. One clarifying question about their need
 
+${forbiddenRules}
+
 Keep it SHORT. Two sentences max.`;
     } else if (action === 'answer_question') {
       instruction = `Caller asked: "${userInput}"
 
 Answer briefly. You're intake only - don't schedule or promise times.
 If you don't know specifics, say "I can take your info and have someone follow up."
+
+${forbiddenRules}
 
 Keep it SHORT. Two sentences max.`;
     } else if (action === 'handle_correction') {
@@ -1127,6 +1147,9 @@ Current info:
 - Address: ${data.address || 'not yet'}
 
 Ask what needs fixing, confirm briefly, move on.
+
+${forbiddenRules}
+
 Keep it SHORT.`;
     }
     

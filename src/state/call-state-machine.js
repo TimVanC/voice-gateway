@@ -1205,6 +1205,37 @@ function createCallStateMachine() {
         };
         
       case STATES.DETAILS_BRANCH:
+        // CRITICAL: Check if user gave an address instead of details
+        // "11 Elf Road, West Orange, New Jersey" should be stored as address, not systemType
+        if (looksLikeAddress(transcript)) {
+          console.log(`📋 Address detected in DETAILS_BRANCH state: "${transcript.substring(0, 50)}..."`);
+          const addressParts = extractAddress(transcript);
+          if (addressParts.address) {
+            data.address = addressParts.address;
+            data.city = addressParts.city;
+            data.state = addressParts.state;
+            data.zip = addressParts.zip;
+            console.log(`📋 Address stored: ${data.address}, ${data.city || 'N/A'}, ${data.state || 'N/A'} ${data.zip || 'N/A'}`);
+            // Continue with remaining detail questions if any
+            detailsQuestionIndex++;
+            const nextDetailPrompt = getDetailsPrompt();
+            if (nextDetailPrompt) {
+              return {
+                nextState: currentState,
+                prompt: nextDetailPrompt,
+                action: 'ask'
+              };
+            }
+            // If no more detail questions, skip to availability since we have address
+            return {
+              nextState: transitionTo(STATES.AVAILABILITY),
+              prompt: AVAILABILITY.ask,
+              action: 'ask'
+            };
+          }
+        }
+        
+        // Normal flow: store the detail answer
         storeDetailAnswer(transcript, analysis);
         detailsQuestionIndex++;
         
@@ -1932,26 +1963,31 @@ function createCallStateMachine() {
   }
   
   function extractName(text) {
-    // First, try to normalize if it's a spelled name
-    const spelledResult = normalizeSpelledName(text);
-    if (spelledResult) {
-      return spelledResult;
+    if (!text || text.trim().length < 2) {
+      return { firstName: '', lastName: '' };
     }
     
-    // Remove common prefixes and their punctuation variations
-    // CRITICAL: Handle "Yeah, it's" pattern - must match in order
     let name = text.trim();
     
-    // Remove leading filler words first
-    name = name.replace(/^(yeah,?\s*|yes,?\s*|oh,?\s*|um,?\s*|uh,?\s*|so,?\s*|well,?\s*)+/gi, '');
+    // STEP 1: Remove ALL filler phrases FIRST (combined pass)
+    // This handles: "Yeah, that would be Jimmy Crickets"
+    // Pattern: optional fillers, then optional phrases like "that would be"
+    const fillerPatterns = [
+      /^(yeah|yes|yep|yup|oh|um|uh|so|well|okay|ok|alright|sure)[,.]?\s*/gi,
+      /^(that\s+would\s+be|that'?s|it'?s|it\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi
+    ];
     
-    // Then remove "it's", "that's", "that would be", etc. (AFTER removing initial fillers)
-    // CRITICAL: Must handle "it's" as a standalone word, not just "is"
-    // Also handle "My first name is X, last name is Y" pattern
-    if (/my\s+first\s+name\s+is/i.test(name)) {
-      // Extract from "My first name is Tim, last name is Van Kallenberg"
+    // Apply filler removal multiple times to handle stacked patterns
+    for (let i = 0; i < 3; i++) {
+      for (const pattern of fillerPatterns) {
+        name = name.replace(pattern, '');
+      }
+    }
+    
+    // STEP 2: Check for "My first name is X, last name is Y" pattern
+    if (/first\s+name\s+is/i.test(name) && /last\s+name\s+is/i.test(name)) {
       const firstNameMatch = name.match(/first\s+name\s+is\s+([^,]+)/i);
-      const lastNameMatch = name.match(/last\s+name\s+is\s+([^,]+)/i);
+      const lastNameMatch = name.match(/last\s+name\s+is\s+([^,.\s]+)/i);
       if (firstNameMatch && lastNameMatch) {
         return {
           firstName: firstNameMatch[1].trim().replace(/[.,!?]+$/g, ''),
@@ -1960,42 +1996,43 @@ function createCallStateMachine() {
       }
     }
     
-    name = name.replace(/^(it'?s|it\s+is|that'?s|that\s+would\s+be|that\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi, '');
+    // STEP 3: Check if it's a spelled name (only if it looks like spelled letters)
+    // Pattern: individual letters separated by dashes, spaces, or dots
+    const looksSpelled = /^([A-Z][-.\s]+){2,}/i.test(name) || /\bspace\b/i.test(name);
+    if (looksSpelled) {
+      const spelledResult = normalizeSpelledName(text);
+      if (spelledResult && (spelledResult.firstName || spelledResult.lastName)) {
+        return spelledResult;
+      }
+    }
     
-    // Remove tokens like "space", "dash", "hyphen" that might be left over
-    name = name.replace(/\b(space|dash|hyphen)\b/gi, '');
-    
-    // Remove trailing punctuation
-    name = name.replace(/[.,!?]+$/g, '');
-    
-    // Remove leading/trailing punctuation and whitespace
-    name = name.replace(/^[,.\s]+|[,.\s]+$/g, '').trim();
+    // STEP 4: Clean up remaining artifacts
+    name = name.replace(/\b(space|dash|hyphen)\b/gi, ''); // Remove spelling tokens
+    name = name.replace(/[.,!?]+$/g, '');                 // Remove trailing punctuation
+    name = name.replace(/^[,.\s]+|[,.\s]+$/g, '').trim(); // Clean edges
     
     // If we stripped everything, return empty
     if (!name || name.length < 2) {
       return { firstName: '', lastName: '' };
     }
     
-    // Split into first and last name
-    // CRITICAL: Handle names with "Van", "De", "La", etc. as part of last name
+    // STEP 5: Split into first and last name
     const parts = name.split(/\s+/).filter(p => p.length > 0);
+    
     if (parts.length >= 2) {
       // Check if second part is a common name prefix (Van, De, La, etc.)
-      // This handles names like: "Tim Van Kallenberg", "John De La Cruz", "Mary Von Habsburg"
       const prefixes = ['van', 'de', 'la', 'le', 'du', 'von', 'der', 'da', 'di', 'del', 'della', 'dos', 'das', 'do', 'mac', 'mc', 'o\'', 'o'];
       const secondWord = parts[1].toLowerCase().replace(/[.,!?]+$/, '');
       
       if (prefixes.includes(secondWord) && parts.length >= 3) {
-        // Multi-part last name with prefix: "Tim Van Kallenberg" → firstName: "Tim", lastName: "Van Kallenberg"
-        // Also handles: "John De La Cruz" → firstName: "John", lastName: "De La Cruz"
+        // Multi-part last name with prefix: "Tim Van Kallenberg"
         return {
           firstName: parts[0],
           lastName: parts.slice(1).join(' ')
         };
       }
       
-      // Check for hyphenated last names: "Mary Smith-Jones" → firstName: "Mary", lastName: "Smith-Jones"
-      // Or: "John O'Brien" → firstName: "John", lastName: "O'Brien"
+      // Check for hyphenated last names or O'Brien style
       if (parts.length === 2 && (parts[1].includes('-') || parts[1].includes('\''))) {
         return {
           firstName: parts[0],
@@ -2003,14 +2040,14 @@ function createCallStateMachine() {
         };
       }
       
-      // Normal case: "Tim Smith" or "Mary Elizabeth Watson" → firstName: first word, lastName: rest
+      // Normal case: "Jimmy Crickets" → firstName: "Jimmy", lastName: "Crickets"
       return {
         firstName: parts[0],
         lastName: parts.slice(1).join(' ')
       };
     }
-    // Single word: treat as first name (handles cases like "Madonna", "Prince", etc.)
-    // User will be asked for last name separately if needed
+    
+    // Single word: treat as first name
     return {
       firstName: name,
       lastName: ''
