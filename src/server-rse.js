@@ -144,19 +144,47 @@ wss.on("connection", (twilioWs, req) => {
   function pumpFrames() {
     const FRAME_SIZE = 160;  // 20ms of 8kHz audio
     const FRAME_INTERVAL = 20;
+    const SILENCE_FRAME = Buffer.alloc(FRAME_SIZE, 0xFF);  // μ-law silence
+    
+    // Prevent multiple timers
+    if (paceTimer) {
+      clearInterval(paceTimer);
+    }
     
     paceTimer = setInterval(() => {
-      if (playBuffer.length >= FRAME_SIZE && streamSid && twilioWs.readyState === WebSocket.OPEN) {
-        const frame = playBuffer.slice(0, FRAME_SIZE);
+      if (!streamSid || twilioWs.readyState !== WebSocket.OPEN) {
+        return; // Can't send without stream
+      }
+      
+      let frame;
+      if (playBuffer.length >= FRAME_SIZE) {
+        // Send audio from buffer
+        frame = playBuffer.slice(0, FRAME_SIZE);
         playBuffer = playBuffer.slice(FRAME_SIZE);
-        
+      } else if (playBuffer.length > 0) {
+        // Send partial frame padded with silence
+        frame = Buffer.concat([
+          playBuffer,
+          SILENCE_FRAME.slice(0, FRAME_SIZE - playBuffer.length)
+        ]);
+        playBuffer = Buffer.alloc(0);
+      } else {
+        // Send silence frame
+        frame = SILENCE_FRAME;
+      }
+      
+      try {
         twilioWs.send(JSON.stringify({
           event: "media",
           streamSid,
           media: { payload: frame.toString("base64") }
         }));
+      } catch (err) {
+        console.error("❌ Error sending audio frame to Twilio:", err.message);
       }
     }, FRAME_INTERVAL);
+    
+    console.log("🎵 Audio pump started - will send frames every 20ms");
   }
   
   // ============================================================================
@@ -275,8 +303,16 @@ wss.on("connection", (twilioWs, req) => {
       case "session.updated":
         console.log("✅ Session configured");
         voiceInitialized = true;  // Voice is now locked for this call
-        // Send greeting
-        sendGreeting();
+        // Send greeting ONLY if stream is ready and we haven't sent it yet
+        if (streamSid && twilioWs.readyState === WebSocket.OPEN && !greetingSent) {
+          console.log("✅ Session configured and stream ready - sending greeting");
+          sendGreeting();
+        } else if (!streamSid) {
+          console.log("⏳ Session configured, waiting for stream to start...");
+          // Will send greeting when stream starts (in "start" event handler)
+        } else if (greetingSent) {
+          console.log("✅ Session updated (greeting already sent)");
+        }
         break;
         
       case "response.created":
@@ -1128,12 +1164,23 @@ Keep it SHORT.`;
             stateMachine.updateData('phone', callerNumber);
           }
           
-          // Start audio pump
+          // Start audio pump FIRST
           console.log("🎵 Starting audio pump");
           pumpFrames();
           
           // Connect to OpenAI
           connectToOpenAI();
+          
+                  // Send greeting once stream is ready AND session is configured
+          // If session is already configured, send greeting now
+          // Otherwise, it will be sent when session.updated event arrives
+          if (voiceInitialized && openaiWs?.readyState === WebSocket.OPEN && !greetingSent) {
+            // Session already configured - send greeting now
+            console.log("✅ Stream ready, session configured - sending greeting");
+            sendGreeting();
+          } else if (!voiceInitialized) {
+            console.log("⏳ Stream ready, waiting for session configuration...");
+          }
           break;
           
         case "media":
