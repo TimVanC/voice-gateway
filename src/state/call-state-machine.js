@@ -1852,24 +1852,37 @@ function createCallStateMachine() {
     // CRITICAL: Handle names with "Van", "De", "La", etc. as part of last name
     const parts = name.split(/\s+/).filter(p => p.length > 0);
     if (parts.length >= 2) {
-      // Check if second part is a prefix (Van, De, La, etc.)
-      const prefixes = ['van', 'de', 'la', 'le', 'du', 'von', 'der'];
+      // Check if second part is a common name prefix (Van, De, La, etc.)
+      // This handles names like: "Tim Van Kallenberg", "John De La Cruz", "Mary Von Habsburg"
+      const prefixes = ['van', 'de', 'la', 'le', 'du', 'von', 'der', 'da', 'di', 'del', 'della', 'dos', 'das', 'do', 'mac', 'mc', 'o\'', 'o'];
       const secondWord = parts[1].toLowerCase();
       
       if (prefixes.includes(secondWord) && parts.length >= 3) {
-        // "Tim Van Kallenberg" → firstName: "Tim", lastName: "Van Kallenberg"
+        // Multi-part last name with prefix: "Tim Van Kallenberg" → firstName: "Tim", lastName: "Van Kallenberg"
+        // Also handles: "John De La Cruz" → firstName: "John", lastName: "De La Cruz"
         return {
           firstName: parts[0],
           lastName: parts.slice(1).join(' ')
         };
       }
-      // Normal case: "Tim Smith" → firstName: "Tim", lastName: "Smith"
+      
+      // Check for hyphenated last names: "Mary Smith-Jones" → firstName: "Mary", lastName: "Smith-Jones"
+      // Or: "John O'Brien" → firstName: "John", lastName: "O'Brien"
+      if (parts.length === 2 && (parts[1].includes('-') || parts[1].includes('\''))) {
+        return {
+          firstName: parts[0],
+          lastName: parts[1]
+        };
+      }
+      
+      // Normal case: "Tim Smith" or "Mary Elizabeth Watson" → firstName: first word, lastName: rest
       return {
         firstName: parts[0],
         lastName: parts.slice(1).join(' ')
       };
     }
-    // Single word: treat as first name
+    // Single word: treat as first name (handles cases like "Madonna", "Prince", etc.)
+    // User will be asked for last name separately if needed
     return {
       firstName: name,
       lastName: ''
