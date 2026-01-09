@@ -296,19 +296,11 @@ function createCallStateMachine() {
       }
     }
     
-    // Availability (cleaned)
-    if (data.availability) {
-      const cleaned = cleanAvailabilityNotes(data.availability);
-      parts.push(`Availability, ${cleaned}.`);
-    }
+    // NOTE: We do NOT include availability or issue details in the recap
+    // The user already provided those and doesn't need them read back
     
-    // Issue summary (very short - one sentence max)
-    const summary = getIssueSummaryShort();
-    if (summary) {
-      parts.push(`Issue, ${summary}.`);
-    }
-    
-    parts.push(CONFIRMATION.verify);
+    // Use custom verify question
+    parts.push("Does that all sound correct, or is there anything you'd like to change?");
     
     return parts.join(' ');
   }

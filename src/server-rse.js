@@ -263,11 +263,18 @@ wss.on("connection", (twilioWs, req) => {
         console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()})`);
         
         if (elapsed > 20000) {
-          console.error(`⚠️ No OpenAI activity for ${elapsed}ms!`);
-          // If we've been waiting too long and no response is in progress, send recovery prompt
-          if (!responseInProgress && elapsed > 20000) {
-            console.log(`🔄 Recovery: System went nonverbal, sending next prompt`);
-            sendNextPromptIfNeeded();
+          // CRITICAL: Do NOT trigger recovery during CONFIRMATION or CLOSE states
+          // The user needs time to listen to the full recap (can be 30+ seconds)
+          const state = stateMachine.getState();
+          if (state === STATES.CONFIRMATION || state === STATES.CLOSE || state === STATES.ENDED) {
+            console.log(`⏸️ Keep-alive: Waiting patiently in ${state} state (${elapsed}ms)`);
+          } else {
+            console.error(`⚠️ No OpenAI activity for ${elapsed}ms!`);
+            // If we've been waiting too long and no response is in progress, send recovery prompt
+            if (!responseInProgress && elapsed > 20000) {
+              console.log(`🔄 Recovery: System went nonverbal, sending next prompt`);
+              sendNextPromptIfNeeded();
+            }
           }
           // Try to send a ping to keep connection alive
           try {
@@ -427,6 +434,19 @@ wss.on("connection", (twilioWs, req) => {
           if (currentState === STATES.CLOSE) {
             const callData = stateMachine.getData();
             callData._closeStateReached = true;
+          }
+          
+          // HANG UP after goodbye is delivered in ENDED state
+          if (currentState === STATES.ENDED) {
+            console.log(`📞 Goodbye delivered - hanging up call in 2 seconds`);
+            stateMachine.updateData('_closeStateReached', true);
+            // Give audio time to finish playing before disconnecting
+            setTimeout(() => {
+              console.log(`📞 Disconnecting call`);
+              if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
+                twilioWs.close(1000, 'Call completed');
+              }
+            }, 2000);
           }
         }
         responseInProgress = false;
