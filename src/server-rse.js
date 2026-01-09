@@ -102,6 +102,7 @@ wss.on("connection", (twilioWs, req) => {
   let responseInProgress = false;
   let audioStreamingStarted = false;
   let totalAudioBytesSent = 0;  // Track total audio in current response
+  let currentResponseId = null;  // Track current OpenAI response ID for cancellation
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
   let pendingUserInput = null;  // Queue for input that arrives while response is in progress
   
@@ -279,7 +280,8 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.created":
-        console.log(`🚀 Response started (id: ${event.response?.id})`);
+        currentResponseId = event.response?.id;
+        console.log(`🚀 Response started (id: ${currentResponseId})`);
         // DON'T clear playBuffer here - let existing audio finish playing!
         // Audio from new response will be appended, not replace
         // Only clear on explicit cancellation or barge-in
@@ -325,6 +327,11 @@ wss.on("connection", (twilioWs, req) => {
       case "response.done":
         const status = event.response?.status;
         const currentState = stateMachine.getState();
+        
+        // Clear response ID when response is done
+        if (event.response?.id === currentResponseId) {
+          currentResponseId = null;
+        }
         
         if (status === "cancelled") {
           console.log(`⚠️ Response CANCELLED`);
@@ -415,12 +422,26 @@ wss.on("connection", (twilioWs, req) => {
         // Reset acknowledgement tracking for new user turn
         backchannel.resetTurn();
         
-        // AGGRESSIVE BARGE-IN: Immediately stop assistant audio
+        // AGGRESSIVE BARGE-IN: Immediately stop assistant audio and cancel OpenAI response
         if (playBuffer.length > 0 || responseInProgress) {
           console.log("🛑 Barge-in: stopping assistant audio");
           playBuffer = Buffer.alloc(0);  // Clear audio buffer immediately
           responseInProgress = false;
           audioStreamingStarted = false;
+          
+          // CRITICAL: Also cancel OpenAI's response generation if it's in progress
+          // This prevents OpenAI from continuing to generate audio after user interrupts
+          if (openaiWs?.readyState === WebSocket.OPEN && currentResponseId) {
+            try {
+              openaiWs.send(JSON.stringify({
+                type: "response.cancel",
+                response_id: currentResponseId
+              }));
+              console.log(`🛑 Cancelled OpenAI response: ${currentResponseId}`);
+            } catch (err) {
+              // Ignore cancellation errors (response might already be done)
+            }
+          }
         }
         
         // Start long-speech backchannel timer (4-6 seconds)
@@ -777,16 +798,20 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
       // Use natural response but keep it brief and on-topic
       sendNaturalResponse(transcript, result.action);
     } else if (result.action === 'answer_question' || result.action === 'handle_correction') {
-      // These actions should NOT happen in normal flow
-      // If they do, default to asking for the required info
-      console.log(`⚠️  Unexpected action: ${result.action} - falling back to state prompt`);
-      const currentState = stateMachine.getState();
-      const fallbackPrompt = stateMachine.getPromptForState(currentState);
-      if (fallbackPrompt) {
-        sendStatePrompt(fallbackPrompt);
+      // Handle corrections in confirmation state
+      if (result.action === 'handle_correction' && result.prompt) {
+        // If state machine returned a prompt for correction, use it
+        sendStatePrompt(result.prompt);
       } else {
-        // Last resort: use natural response but keep it brief
-        sendNaturalResponse(transcript, result.action);
+        // Otherwise, get the next prompt from state machine
+        console.log(`⚠️  Unexpected action: ${result.action} - falling back to state prompt`);
+        const fallbackPrompt = stateMachine.getNextPrompt();
+        if (fallbackPrompt) {
+          sendStatePrompt(fallbackPrompt);
+        } else {
+          // Last resort: use natural response but keep it brief
+          sendNaturalResponse(transcript, result.action);
+        }
       }
     }
   }

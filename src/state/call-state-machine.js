@@ -1263,12 +1263,24 @@ function createCallStateMachine() {
             }
           } else if (overallConf.level === CONFIDENCE.MEDIUM) {
             // For medium confidence, accept and move on (don't hard-fail)
+            // CRITICAL: Double-check that address and city aren't swapped
+            let finalAddress = addressParts.address;
+            let finalCity = addressParts.city;
+            
+            // If address doesn't have a number but city does, they're swapped
+            if (finalAddress && finalCity && !/^\d/.test(finalAddress) && /^\d/.test(finalCity)) {
+              console.log(`⚠️  Address and city appear swapped: address="${finalAddress}", city="${finalCity}" - swapping`);
+              const temp = finalAddress;
+              finalAddress = finalCity;
+              finalCity = temp;
+            }
+            
             // Store what we have and continue
-            data.address = addressParts.address;
-            data.city = addressParts.city;
+            data.address = finalAddress;
+            data.city = finalCity;
             data.state = addressParts.state;
             data.zip = addressParts.zip;
-            console.log(`✅ Address accepted with medium confidence: ${addressParts.address}`);
+            console.log(`✅ Address accepted with medium confidence: ${finalAddress}, ${finalCity || 'no city'}`);
             return {
               nextState: transitionTo(STATES.AVAILABILITY),
               prompt: AVAILABILITY.ask,
@@ -1277,8 +1289,20 @@ function createCallStateMachine() {
           }
           
           // High confidence
-          data.address = addressParts.address;
-          data.city = addressParts.city;
+          // CRITICAL: Double-check that address and city aren't swapped
+          let finalAddress = addressParts.address;
+          let finalCity = addressParts.city;
+          
+          // If address doesn't have a number but city does, they're swapped
+          if (finalAddress && finalCity && !/^\d/.test(finalAddress) && /^\d/.test(finalCity)) {
+            console.log(`⚠️  Address and city appear swapped: address="${finalAddress}", city="${finalCity}" - swapping`);
+            const temp = finalAddress;
+            finalAddress = finalCity;
+            finalCity = temp;
+          }
+          
+          data.address = finalAddress;
+          data.city = finalCity;
           data.state = addressParts.state;
           data.zip = addressParts.zip;
           return {
@@ -1294,7 +1318,47 @@ function createCallStateMachine() {
         };
         
       case STATES.AVAILABILITY:
-        if (transcript.length > 2) {
+        // CRITICAL: Check if this is actually an address correction, not availability
+        // User might say "No, no, 11 Elf Road, ELF" which is correcting the address
+        if (looksLikeAddress(transcript) || (transcript.toLowerCase().includes('no') && /\b(road|street|avenue|drive|address|elf|elk)\b/i.test(transcript))) {
+          console.log(`📋 Address correction detected in AVAILABILITY state: "${transcript}"`);
+          // This is an address correction, not availability
+          const addressParts = extractAddress(transcript);
+          // Update address with corrected info
+          if (addressParts.address) {
+            // If address starts with number, it's likely the street
+            if (/^\d/.test(addressParts.address)) {
+              data.address = addressParts.address;
+              data.city = addressParts.city || data.city;
+              data.state = addressParts.state || data.state;
+              data.zip = addressParts.zip || data.zip;
+              console.log(`✅ Address updated: ${data.address}, ${data.city}`);
+              // Ask for availability again
+              return {
+                nextState: currentState,
+                prompt: "Got it. What days and times usually work best for you?",
+                action: 'ask'
+              };
+            } else {
+              // Might be just the street name correction (e.g., "Elf" instead of "Elk")
+              // Update just the street name part
+              const existingAddress = data.address || '';
+              const existingCity = data.city || '';
+              // If we have existing address, try to replace street name
+              if (existingAddress.includes('Elk') && addressParts.address.toLowerCase().includes('elf')) {
+                data.address = existingAddress.replace(/Elk/gi, 'Elf');
+                console.log(`✅ Street name corrected: ${data.address}`);
+                return {
+                  nextState: currentState,
+                  prompt: "Got it, Elf Road. What days and times usually work best for you?",
+                  action: 'ask'
+                };
+              }
+            }
+          }
+        }
+        
+        if (transcript.length > 2 && looksLikeAvailability(lowerTranscript)) {
           data.availability = extractAvailability(transcript);
           console.log(`📋 Availability: ${data.availability}`);
           return {
@@ -1311,6 +1375,14 @@ function createCallStateMachine() {
             action: 'ask'
           };
         }
+        // If doesn't look like availability, ask again
+        if (!looksLikeAvailability(lowerTranscript)) {
+          return {
+            nextState: currentState,
+            prompt: "I didn't catch that. What days and times usually work best for you?",
+            action: 'ask'
+          };
+        }
         return {
           nextState: currentState,
           prompt: AVAILABILITY.ask,
@@ -1320,6 +1392,48 @@ function createCallStateMachine() {
       case STATES.CONFIRMATION:
         // Mark that confirmation prompt was delivered (for completion tracking)
         data._confirmationDelivered = true;
+        
+        // CRITICAL: Handle specific corrections (e.g., "The first name is Tim")
+        if (lowerTranscript.includes('first name') || lowerTranscript.includes('firstname')) {
+          const nameExtract = extractName(transcript);
+          if (nameExtract.firstName) {
+            data.firstName = nameExtract.firstName;
+            console.log(`✅ First name corrected to: ${data.firstName}`);
+            return {
+              nextState: currentState,
+              prompt: getConfirmationPrompt(),
+              action: 'confirm'
+            };
+          }
+        }
+        if (lowerTranscript.includes('last name') || lowerTranscript.includes('lastname')) {
+          const nameExtract = extractName(transcript);
+          if (nameExtract.lastName) {
+            data.lastName = nameExtract.lastName;
+            console.log(`✅ Last name corrected to: ${data.lastName}`);
+            return {
+              nextState: currentState,
+              prompt: getConfirmationPrompt(),
+              action: 'confirm'
+            };
+          }
+        }
+        if (lowerTranscript.includes('address') || lowerTranscript.includes('street') || lowerTranscript.includes('road')) {
+          // Address correction
+          const addressParts = extractAddress(transcript);
+          if (addressParts.address) {
+            data.address = addressParts.address;
+            data.city = addressParts.city || data.city;
+            data.state = addressParts.state || data.state;
+            data.zip = addressParts.zip || data.zip;
+            console.log(`✅ Address corrected: ${data.address}, ${data.city}`);
+            return {
+              nextState: currentState,
+              prompt: getConfirmationPrompt(),
+              action: 'confirm'
+            };
+          }
+        }
         
         if (isConfirmation(lowerTranscript)) {
           // User confirmed - immediately proceed to CLOSE
@@ -1331,10 +1445,11 @@ function createCallStateMachine() {
         }
         if (isCorrection(lowerTranscript)) {
           confirmationAttempts++;
+          // Return a prompt asking what needs to be corrected
           return {
             nextState: currentState,
-            prompt: null,
-            action: 'handle_correction'
+            prompt: "What needs to be corrected?",
+            action: 'ask'
           };
         }
         // If user says "no" or gives a partial response, re-ask verification
@@ -1734,13 +1849,27 @@ function createCallStateMachine() {
     }
     
     // Split into first and last name
+    // CRITICAL: Handle names with "Van", "De", "La", etc. as part of last name
     const parts = name.split(/\s+/).filter(p => p.length > 0);
     if (parts.length >= 2) {
+      // Check if second part is a prefix (Van, De, La, etc.)
+      const prefixes = ['van', 'de', 'la', 'le', 'du', 'von', 'der'];
+      const secondWord = parts[1].toLowerCase();
+      
+      if (prefixes.includes(secondWord) && parts.length >= 3) {
+        // "Tim Van Kallenberg" → firstName: "Tim", lastName: "Van Kallenberg"
+        return {
+          firstName: parts[0],
+          lastName: parts.slice(1).join(' ')
+        };
+      }
+      // Normal case: "Tim Smith" → firstName: "Tim", lastName: "Smith"
       return {
         firstName: parts[0],
         lastName: parts.slice(1).join(' ')
       };
     }
+    // Single word: treat as first name
     return {
       firstName: name,
       lastName: ''
@@ -1776,7 +1905,26 @@ function createCallStateMachine() {
     const digits = phone.replace(/\D/g, '');
     if (digits.length >= 10) {
       const last10 = digits.slice(-10);
-      return `${last10.slice(0,3)}, ${last10.slice(3,6)}, ${last10.slice(6)}`;
+      // CRITICAL: Format to avoid mishearing "973" as "793"
+      // Use clear digit separation: "nine seven three" not "nine hundred seventy three"
+      const area = last10.slice(0,3);
+      const exchange = last10.slice(3,6);
+      const number = last10.slice(6);
+      
+      // Spell out digits individually for clarity, especially for area code
+      const digitNames = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+      
+      // Format area code: "nine seven three" (not "nine seventy three")
+      const formatAreaCode = (code) => {
+        return code.split('').map(d => digitNames[parseInt(d)]).join(' ');
+      };
+      
+      // Format exchange and number: "eight eight five" and "two five two eight"
+      const formatNumber = (num) => {
+        return num.split('').map(d => digitNames[parseInt(d)]).join(' ');
+      };
+      
+      return `${formatAreaCode(area)}, ${formatNumber(exchange)}, ${formatNumber(number)}`;
     }
     return phone;
   }
@@ -2030,27 +2178,30 @@ function createCallStateMachine() {
       address = address.replace(stateMatch[0], '').trim();
     }
     
-    // Extract city (usually before state, often separated by comma)
+    // Extract city (usually after street address, separated by comma)
+    // Format: "[Street Address], [City] [, State] [, Zip]"
     let city = null;
     // Split by comma first
     const parts = address.split(',').map(s => s.trim()).filter(s => s.length > 0);
     
     if (parts.length >= 2) {
-      // If we have multiple parts, the last part before state is likely the city
-      // Or if no state, the second-to-last part might be city
+      // If we have multiple parts, the pattern is: [street], [city], [state], [zip]
       if (state) {
-        // Find which part contains the state (should be last)
+        // State is present - find which part contains it
         const stateIndex = parts.findIndex(p => statePattern.test(p));
         if (stateIndex > 0) {
+          // City is the part immediately before state
           city = parts[stateIndex - 1];
         } else if (parts.length >= 2) {
-          // State not in parts, take second-to-last as city
-          city = parts[parts.length - 2];
+          // State not found in parts but we know it exists, take last non-state part as city
+          // If state was removed earlier, last part should be city
+          city = parts[parts.length - 1];
         }
       } else {
-        // No state found, assume second-to-last part is city
+        // No state found - assume last part is city if we have 2+ parts
+        // "11 Elk Road, West Orange" → street: "11 Elk Road", city: "West Orange"
         if (parts.length >= 2) {
-          city = parts[parts.length - 2];
+          city = parts[parts.length - 1]; // Last part is city
         }
       }
     }
@@ -2065,14 +2216,32 @@ function createCallStateMachine() {
     }
     
     // Remove city from address text
+    // CRITICAL: Use case-insensitive replacement and handle punctuation
     if (city) {
-      address = address.replace(city, '').trim();
+      // Remove city (case-insensitive) and any surrounding punctuation
+      const cityRegex = new RegExp(city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      address = address.replace(cityRegex, '').trim();
       // Also remove comma if it's still there
       address = address.replace(/^,\s*|,\s*$/g, '').trim();
     }
     
     // Clean up address (remove extra commas, spaces, trailing punctuation)
     address = address.replace(/^[,.\s]+|[,.\s]+$/g, '').trim();
+    
+    // CRITICAL: If address and city seem swapped (address has city name, city has street), swap them back
+    // Pattern: if address looks like a city name (no numbers, common city words) and city has numbers (street)
+    if (address && city) {
+      const addressHasStreetNumber = /^\d/.test(address);
+      const cityHasStreetNumber = /^\d/.test(city);
+      
+      if (!addressHasStreetNumber && cityHasStreetNumber) {
+        // Address doesn't have number but city does - they're swapped!
+        console.log(`⚠️  Address and city appear swapped: address="${address}", city="${city}" - swapping`);
+        const temp = address;
+        address = city;
+        city = temp;
+      }
+    }
     
     // If address is empty but we have other parts, reconstruct from original text
     if (!address && (city || state || zip)) {
