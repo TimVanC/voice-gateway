@@ -1019,7 +1019,7 @@ STRICT RULES:
 - If user says NO: Ask what needs correction
 
 DO NOT DEVIATE FROM THE SCRIPT.`;
-      maxTokens = 800; // More tokens for confirmation prompt
+      maxTokens = 1200; // More tokens for long confirmation recap
     } else if (currentState === STATES.CLOSE) {
       // Close state - deliver goodbye cleanly
       instructions = `CRITICAL - CLOSE STATE:
