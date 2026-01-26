@@ -559,7 +559,9 @@ wss.on("connection", (twilioWs, req) => {
             lastAudioDeltaTime = null;
             audioDoneReceived = false;
             actualTranscript = null;
-            playBuffer = Buffer.alloc(0);
+            // CRITICAL: Do NOT clear playBuffer. Unplayed audio is still queued; clearing
+            // drops it. User would hear only the retry (e.g. "today?") and miss the rest.
+            // Let buffer play out; retry audio will be appended via response.audio.delta.
             
             setTimeout(() => {
               if (currentPromptText === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
