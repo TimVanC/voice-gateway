@@ -110,12 +110,6 @@ app.post("/twilio/transfer", (req, res) => {
 wss.on("connection", (twilioWs, req) => {
   console.log("📞 New connection");
   
-  // Determine base URL for transfers
-  if (!baseUrl && req && req.headers && req.headers.host) {
-    const protocol = req.headers.host.includes("localhost") ? "http" : "https";
-    baseUrl = `${protocol}://${req.headers.host}`;
-  }
-  
   // ============================================================================
   // CALL SESSION STATE
   // ============================================================================
@@ -125,6 +119,12 @@ wss.on("connection", (twilioWs, req) => {
   let openaiWs = null;
   let transferRequested = false;  // Track if transfer has been requested
   let baseUrl = process.env.BASE_URL || null;  // Store base URL for transfers
+  
+  // Determine base URL for transfers if not set from environment
+  if (!baseUrl && req && req.headers && req.headers.host) {
+    const protocol = req.headers.host.includes("localhost") ? "http" : "https";
+    baseUrl = `${protocol}://${req.headers.host}`;
+  }
   let paceTimer = null;
   let keepAliveTimer = null;
   let silenceTimer = null;
