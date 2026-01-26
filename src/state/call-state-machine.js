@@ -114,6 +114,12 @@ function createCallStateMachine() {
     awaitingConfirmation: false  // Are we waiting for yes/no?
   };
   
+  // Track which fields have been clarified (enforce once-per-field rule)
+  const clarifiedFields = new Set();  // Track fields that have been clarified
+  
+  // Confidence threshold for asking clarification (below this, ask once)
+  const CONFIDENCE_THRESHOLD = 60;  // 60% - below this, ask for clarification once
+  
   /**
    * Get the next prompt based on current state and data
    */
