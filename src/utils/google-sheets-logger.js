@@ -32,11 +32,16 @@ const COLUMN_HEADERS = [
   'call_timestamp',
   'first_name',
   'last_name',
+  'name_confidence',
   'phone_number',
+  'phone_confidence',
   'email',
+  'email_confidence',
   'primary_intent',
   'service_address',
+  'address_confidence',
   'availability_notes',
+  'availability_confidence',
   'call_summary',
   'call_status'
 ];
@@ -732,7 +737,12 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
     address,
     city,
     zip,
-    availability
+    availability,
+    name_confidence,
+    phone_confidence,
+    email_confidence,
+    address_confidence,
+    availability_confidence
   } = callData;
   
   const callId = metadata.callId || `CALL-${Date.now()}`;
@@ -769,11 +779,16 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
     timestamp,
     cleanFirstName, // Validated and cleaned
     cleanLastName, // Validated and cleaned
+    name_confidence !== null && name_confidence !== undefined ? name_confidence : '', // Confidence percentage (0-100)
     phoneNumber, // Validated (10 digits) or empty if invalid
+    phone_confidence !== null && phone_confidence !== undefined ? phone_confidence : '', // Confidence percentage (0-100)
     normalizedEmail, // Validated (proper format) or empty if invalid
+    email_confidence !== null && email_confidence !== undefined ? email_confidence : '', // Confidence percentage (0-100)
     normalizedIntent, // Normalized to canonical value
     serviceAddress, // Validated (real address) or empty if invalid
+    address_confidence !== null && address_confidence !== undefined ? address_confidence : '', // Confidence percentage (0-100)
     availabilityNotes, // Cleaned (filler phrases removed)
+    availability_confidence !== null && availability_confidence !== undefined ? availability_confidence : '', // Confidence percentage (0-100)
     generateCallSummary(callData, callStatus), // Cleaned and semantic
     callStatus
   ];

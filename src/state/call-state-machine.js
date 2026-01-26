@@ -38,7 +38,9 @@ const {
   estimateCityConfidence,
   estimateZipConfidence,
   getClarificationPrompt,
-  cleanTranscript
+  cleanTranscript,
+  confidenceToPercentage,
+  adjustConfidence
 } = require('../utils/confidence-estimator');
 
 /**
@@ -62,6 +64,13 @@ function createCallStateMachine() {
     zip: null,              // If provided
     availability: null,     // Required - availability window
     situationSummary: null, // One-line issue summary
+    
+    // Confidence scores (0-100 percentage)
+    name_confidence: null,
+    phone_confidence: null,
+    email_confidence: null,
+    address_confidence: null,
+    availability_confidence: null,
     
     // Details based on intent
     details: {
@@ -571,7 +580,10 @@ function createCallStateMachine() {
               // User confirmed - accept the value
               data.firstName = pendingClarification.value.firstName;
               data.lastName = pendingClarification.value.lastName;
-              console.log(`✅ Name confirmed: ${data.firstName} ${data.lastName}`);
+              // Increase confidence due to confirmation
+              const baseConf = data.name_confidence || confidenceToPercentage(pendingClarification.confidence);
+              data.name_confidence = adjustConfidence(baseConf, 'confirmation');
+              console.log(`✅ Name confirmed: ${data.firstName} ${data.lastName} (confidence: ${data.name_confidence}%)`);
               clearPendingClarification();
               return {
                 nextState: transitionTo(STATES.PHONE),
@@ -593,7 +605,10 @@ function createCallStateMachine() {
               // Store the spelled name
               data.firstName = storedFirstName;
               data.lastName = lastName;
-              console.log(`✅ Name spelled: ${data.firstName} ${data.lastName} (confidence: high, reason: spelled by user)`);
+              // High confidence when spelled by user
+              const baseNameConf = data.name_confidence || confidenceToPercentage(pendingClarification.confidence);
+              data.name_confidence = adjustConfidence(baseNameConf, 'spelling');
+              console.log(`✅ Name spelled: ${data.firstName} ${data.lastName} (confidence: ${data.name_confidence}%, reason: spelled by user)`);
               clearPendingClarification();
               return {
                 nextState: transitionTo(STATES.PHONE),
@@ -692,8 +707,18 @@ function createCallStateMachine() {
           const lastNameConf = lastName ? estimateLastNameConfidence(lastName) : (firstName ? { level: CONFIDENCE.HIGH } : { level: CONFIDENCE.LOW, reason: 'lastName missing' });
           const overallConf = getLowestConfidence(firstNameConf, lastNameConf);
           
+          // Calculate base confidence percentage
+          let nameConfidencePercent = confidenceToPercentage(overallConf);
+          
+          // Check for hesitation markers (um, uh, etc.)
+          const lowerTranscript = transcript.toLowerCase();
+          if (/\b(um|uh|er|hmm|like|maybe|i think|i guess)\b/.test(lowerTranscript)) {
+            nameConfidencePercent = adjustConfidence(nameConfidencePercent, 'hesitation');
+            console.log(`📉 Name confidence reduced due to hesitation: ${nameConfidencePercent}%`);
+          }
+          
           // Log confidence IMMEDIATELY (before any validation)
-          console.log(`📋 Name confidence: firstName="${firstName}" (${firstNameConf.level}, ${firstNameConf.reason || 'N/A'}), lastName="${lastName}" (${lastNameConf.level}, ${lastNameConf.reason || 'N/A'}), overall=${overallConf.level}`);
+          console.log(`📋 Name confidence: firstName="${firstName}" (${firstNameConf.level}, ${firstNameConf.reason || 'N/A'}), lastName="${lastName}" (${lastNameConf.level}, ${lastNameConf.reason || 'N/A'}), overall=${overallConf.level}, percentage=${nameConfidencePercent}%`);
           
           // If extraction failed completely, check raw transcript
           if (!firstName && !lastName) {
@@ -759,17 +784,26 @@ function createCallStateMachine() {
           }
           
           // Log final extracted name
-          console.log(`📋 Name extracted: ${firstName} ${lastName} (confidence: ${overallConf.level}, reason: ${overallConf.reason || 'N/A'})`);
+          console.log(`📋 Name extracted: ${firstName} ${lastName} (confidence: ${overallConf.level}, reason: ${overallConf.reason || 'N/A'}, percentage=${nameConfidencePercent}%)`);
           
-          if (overallConf.level === CONFIDENCE.LOW) {
+          // Check if we should ask for clarification (only once per field)
+          const shouldClarify = nameConfidencePercent < CONFIDENCE_THRESHOLD && !clarifiedFields.has('name');
+          
+          if (shouldClarify && overallConf.level === CONFIDENCE.LOW) {
+            // Mark as clarified to prevent asking again
+            clarifiedFields.add('name');
             // Ask to repeat
+            nameConfidencePercent = adjustConfidence(nameConfidencePercent, 'repetition');
             return {
               nextState: currentState,
               prompt: "I didn't catch that clearly. Could you repeat your first and last name?",
               action: 'ask'
             };
-          } else if (overallConf.level === CONFIDENCE.MEDIUM || (lastName && lastName.length > 8)) {
+          } else if (shouldClarify && (overallConf.level === CONFIDENCE.MEDIUM || (lastName && lastName.length > 8))) {
+            // Mark as clarified to prevent asking again
+            clarifiedFields.add('name');
             // For medium confidence or long names, ask to spell it out
+            nameConfidencePercent = adjustConfidence(nameConfidencePercent, 'repetition');
             pendingClarification = {
               field: 'name',
               value: { firstName, lastName },
@@ -786,6 +820,9 @@ function createCallStateMachine() {
           // High confidence - accept silently
           data.firstName = firstName;
           data.lastName = lastName;
+          // Store confidence percentage
+          data.name_confidence = nameConfidencePercent;
+          console.log(`✅ Name stored: ${firstName} ${lastName} (confidence: ${nameConfidencePercent}%)`);
           return {
             nextState: transitionTo(STATES.PHONE),
             prompt: CALLER_INFO.phone,
@@ -803,7 +840,10 @@ function createCallStateMachine() {
         if (pendingClarification.field === 'phone' && pendingClarification.awaitingConfirmation) {
           if (isConfirmation(lowerTranscript)) {
             data.phone = pendingClarification.value;
-            console.log(`✅ Phone confirmed: ${data.phone}`);
+            // Increase confidence due to confirmation
+            const baseConf = data.phone_confidence || confidenceToPercentage(pendingClarification.confidence);
+            data.phone_confidence = adjustConfidence(baseConf, 'confirmation');
+            console.log(`✅ Phone confirmed: ${data.phone} (confidence: ${data.phone_confidence}%)`);
             clearPendingClarification();
             return {
               nextState: transitionTo(STATES.EMAIL),
@@ -811,6 +851,9 @@ function createCallStateMachine() {
               action: 'ask'
             };
           } else {
+            // User corrected - reduce confidence
+            const baseConf = data.phone_confidence || confidenceToPercentage(pendingClarification.confidence);
+            data.phone_confidence = adjustConfidence(baseConf, 'correction');
             clearPendingClarification();
           }
         }
@@ -937,6 +980,15 @@ function createCallStateMachine() {
           const phone = extractPhone(transcript);
           const phoneConf = estimatePhoneConfidence(transcript);
           
+          // Calculate base confidence percentage
+          let phoneConfidencePercent = confidenceToPercentage(phoneConf);
+          
+          // Check for hesitation markers
+          if (/\b(um|uh|er|hmm|like|maybe|i think|i guess)\b/.test(lowerTranscript)) {
+            phoneConfidencePercent = adjustConfidence(phoneConfidencePercent, 'hesitation');
+            console.log(`📉 Phone confidence reduced due to hesitation: ${phoneConfidencePercent}%`);
+          }
+          
           // Strict validation: must be exactly 10 digits
           const digits = phone.replace(/\D/g, '');
           const isValidPhone = digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
@@ -954,15 +1006,22 @@ function createCallStateMachine() {
           const normalizedPhone = digits.length === 11 ? digits.slice(1) : digits;
           const formattedPhone = `${normalizedPhone.slice(0,3)}-${normalizedPhone.slice(3,6)}-${normalizedPhone.slice(6)}`;
           
-          console.log(`📋 Phone: ${formattedPhone} (confidence: ${phoneConf.level}, reason: ${phoneConf.reason || 'N/A'})`);
+          console.log(`📋 Phone: ${formattedPhone} (confidence: ${phoneConf.level}, reason: ${phoneConf.reason || 'N/A'}, percentage=${phoneConfidencePercent}%)`);
           
-          if (phoneConf.level === CONFIDENCE.LOW) {
+          // Check if we should ask for clarification (only once per field)
+          const shouldClarify = phoneConfidencePercent < CONFIDENCE_THRESHOLD && !clarifiedFields.has('phone');
+          
+          if (shouldClarify && phoneConf.level === CONFIDENCE.LOW) {
+            clarifiedFields.add('phone');
+            phoneConfidencePercent = adjustConfidence(phoneConfidencePercent, 'repetition');
             return {
               nextState: currentState,
               prompt: "I may have missed a digit. Could you repeat the phone number slowly?",
               action: 'ask'
             };
-          } else if (phoneConf.level === CONFIDENCE.MEDIUM) {
+          } else if (shouldClarify && phoneConf.level === CONFIDENCE.MEDIUM) {
+            clarifiedFields.add('phone');
+            phoneConfidencePercent = adjustConfidence(phoneConfidencePercent, 'repetition');
             // Always read back phone numbers for confirmation
             const formatted = formatPhoneForConfirmation(formattedPhone);
             pendingClarification = {
@@ -978,9 +1037,11 @@ function createCallStateMachine() {
             };
           }
           
-          // High confidence - still read back phone for verification
+          // High confidence or already clarified - store phone with confidence
           const formatted = formatPhoneForConfirmation(formattedPhone);
           data.phone = formattedPhone;
+          data.phone_confidence = phoneConfidencePercent;
+          console.log(`✅ Phone stored: ${formattedPhone} (confidence: ${phoneConfidencePercent}%)`);
           return {
             nextState: transitionTo(STATES.EMAIL),
             prompt: `Got it, ${formatted}. ${CALLER_INFO.email.primary}`,
@@ -998,7 +1059,10 @@ function createCallStateMachine() {
         if (pendingClarification.field === 'email' && pendingClarification.awaitingConfirmation) {
           if (isConfirmation(lowerTranscript)) {
             data.email = pendingClarification.value;
-            console.log(`✅ Email confirmed: ${data.email}`);
+            // Increase confidence due to confirmation
+            const baseConf = data.email_confidence || confidenceToPercentage(pendingClarification.confidence);
+            data.email_confidence = adjustConfidence(baseConf, 'confirmation');
+            console.log(`✅ Email confirmed: ${data.email} (confidence: ${data.email_confidence}%)`);
             clearPendingClarification();
             return {
               nextState: transitionTo(STATES.DETAILS_BRANCH),
@@ -1027,6 +1091,9 @@ function createCallStateMachine() {
               }
               
               data.email = correctedEmail;
+              // User corrected - reduce confidence
+              const baseConf = data.email_confidence || confidenceToPercentage(pendingClarification.confidence);
+              data.email_confidence = adjustConfidence(baseConf, 'correction');
               pendingClarification.value = correctedEmail;
               const formatted = formatEmailForConfirmation(correctedEmail);
               return {
@@ -1095,6 +1162,16 @@ function createCallStateMachine() {
           
           const email = extractEmail(transcript);
           
+          // Estimate confidence for email
+          const emailConf = estimateEmailConfidence(transcript);
+          let emailConfidencePercent = confidenceToPercentage(emailConf);
+          
+          // Check for hesitation markers
+          if (/\b(um|uh|er|hmm|like|maybe|i think|i guess)\b/.test(lowerTranscript)) {
+            emailConfidencePercent = adjustConfidence(emailConfidencePercent, 'hesitation');
+            console.log(`📉 Email confidence reduced due to hesitation: ${emailConfidencePercent}%`);
+          }
+          
           // If email extraction failed, ask to spell it
           if (!email || !email.includes('@')) {
             return {
@@ -1134,14 +1211,24 @@ function createCallStateMachine() {
           // Valid email - reset attempts and proceed
           data._emailAttempts = 0;
           
-          const emailConf = estimateEmailConfidence(email);
+          // Use the confidence we already calculated (from transcript)
+          // If not calculated yet, estimate from email string
+          if (!emailConfidencePercent) {
+            const emailConf = estimateEmailConfidence(email);
+            emailConfidencePercent = confidenceToPercentage(emailConf);
+          }
           
-          console.log(`📋 Email: ${email} (confidence: ${emailConf.level}, reason: ${emailConf.reason || 'N/A'})`);
+          console.log(`📋 Email: ${email} (confidence: ${emailConfidencePercent}%, percentage=${emailConfidencePercent}%)`);
+          
+          // Check if we should ask for clarification (only once per field)
+          const shouldClarify = emailConfidencePercent < CONFIDENCE_THRESHOLD && !clarifiedFields.has('email');
           
           // If spelling instruction detected, always confirm with spelling
           if (hasSpellingInstruction) {
+            emailConfidencePercent = adjustConfidence(emailConfidencePercent, 'spelling');
             const formatted = formatEmailForConfirmation(email);
             data.email = email;
+            data.email_confidence = emailConfidencePercent;
             pendingClarification = {
               field: 'email',
               value: email,
@@ -1159,20 +1246,25 @@ function createCallStateMachine() {
             };
           }
           
-          if (emailConf.level === CONFIDENCE.LOW) {
+          if (shouldClarify && emailConfidencePercent < 60) {
+            clarifiedFields.add('email');
+            emailConfidencePercent = adjustConfidence(emailConfidencePercent, 'repetition');
             return {
               nextState: currentState,
               prompt: "Could you spell out the email address for me?",
               action: 'ask'
             };
-          } else if (emailConf.level === CONFIDENCE.MEDIUM) {
+          } else if (shouldClarify) {
+            clarifiedFields.add('email');
+            emailConfidencePercent = adjustConfidence(emailConfidencePercent, 'repetition');
             const formatted = formatEmailForConfirmation(email);
             // Store email now so confirmation will work even if AI goes off-script
             data.email = email;
+            data.email_confidence = emailConfidencePercent;
             pendingClarification = {
               field: 'email',
               value: email,
-              confidence: emailConf,
+              confidence: { level: CONFIDENCE.MEDIUM },
               awaitingConfirmation: true
             };
             return {
@@ -1182,8 +1274,10 @@ function createCallStateMachine() {
             };
           }
           
-          // High confidence
+          // High confidence or already clarified
           data.email = email;
+          data.email_confidence = emailConfidencePercent;
+          console.log(`✅ Email stored: ${email} (confidence: ${emailConfidencePercent}%)`);
           return {
             nextState: transitionTo(STATES.DETAILS_BRANCH),
             prompt: getDetailsPrompt(),
@@ -1253,7 +1347,10 @@ function createCallStateMachine() {
             data.address = pendingClarification.value.address;
             data.city = pendingClarification.value.city;
             data.zip = pendingClarification.value.zip;
-            console.log(`✅ Address confirmed: ${data.address}`);
+            // Increase confidence due to confirmation
+            const baseConf = data.address_confidence || confidenceToPercentage(pendingClarification.confidence);
+            data.address_confidence = adjustConfidence(baseConf, 'confirmation');
+            console.log(`✅ Address confirmed: ${data.address} (confidence: ${data.address_confidence}%)`);
             clearPendingClarification();
             return {
               nextState: transitionTo(STATES.AVAILABILITY),
@@ -1261,6 +1358,9 @@ function createCallStateMachine() {
               action: 'ask'
             };
           } else {
+            // User corrected - reduce confidence
+            const baseConf = data.address_confidence || confidenceToPercentage(pendingClarification.confidence);
+            data.address_confidence = adjustConfidence(baseConf, 'correction');
             clearPendingClarification();
           }
         }
@@ -1330,11 +1430,20 @@ function createCallStateMachine() {
           
           const overallConf = getLowestConfidence(addressConf, cityConf, zipConf);
           
-          console.log(`📋 Address: ${addressParts.address || 'N/A'} (confidence: ${addressConf.level}, reason: ${addressConf.reason || 'N/A'})`);
+          // Calculate base confidence percentage
+          let addressConfidencePercent = confidenceToPercentage(overallConf);
+          
+          // Check for hesitation markers
+          if (/\b(um|uh|er|hmm|like|maybe|i think|i guess)\b/.test(lowerTranscript)) {
+            addressConfidencePercent = adjustConfidence(addressConfidencePercent, 'hesitation');
+            console.log(`📉 Address confidence reduced due to hesitation: ${addressConfidencePercent}%`);
+          }
+          
+          console.log(`📋 Address: ${addressParts.address || 'N/A'} (confidence: ${addressConf.level}, reason: ${addressConf.reason || 'N/A'}, percentage=${addressConfidencePercent}%)`);
           if (addressParts.city) console.log(`📋 City: ${addressParts.city} (confidence: ${cityConf.level}, reason: ${cityConf.reason || 'N/A'})`);
           if (addressParts.state) console.log(`📋 State: ${addressParts.state} (confidence: ${stateConf.level})`);
           if (addressParts.zip) console.log(`📋 Zip: ${addressParts.zip} (confidence: ${zipConf.level}, reason: ${zipConf.reason || 'N/A'})`);
-          console.log(`📋 Overall Address Confidence: ${overallConf.level}, reason: ${overallConf.reason || 'N/A'}`);
+          console.log(`📋 Overall Address Confidence: ${overallConf.level}, reason: ${overallConf.reason || 'N/A'}, percentage=${addressConfidencePercent}%`);
           
           if (overallConf.level === CONFIDENCE.LOW) {
             // Determine which part needs clarification
@@ -1387,7 +1496,8 @@ function createCallStateMachine() {
             data.city = finalCity;
             data.state = addressParts.state;
             data.zip = addressParts.zip;
-            console.log(`✅ Address accepted with medium confidence: ${finalAddress}, ${finalCity || 'no city'}`);
+            data.address_confidence = addressConfidencePercent;
+            console.log(`✅ Address accepted with medium confidence: ${finalAddress}, ${finalCity || 'no city'} (confidence: ${addressConfidencePercent}%)`);
             
             // Check if state/zip are missing - ask for them if needed
             if (!data.state && !data.zip) {
@@ -1434,6 +1544,8 @@ function createCallStateMachine() {
           data.city = finalCity;
           data.state = addressParts.state;
           data.zip = addressParts.zip;
+          data.address_confidence = addressConfidencePercent;
+          console.log(`✅ Address stored: ${finalAddress} (confidence: ${addressConfidencePercent}%)`);
           
           // Check if state/zip are missing - ask for them if needed
           if (!data.state && !data.zip) {
@@ -1511,7 +1623,16 @@ function createCallStateMachine() {
         
         if (transcript.length > 2 && looksLikeAvailability(lowerTranscript)) {
           data.availability = extractAvailability(transcript);
-          console.log(`📋 Availability: ${data.availability}`);
+          
+          // Estimate confidence for availability (simpler - just check for hesitation)
+          let availabilityConfidencePercent = 80; // Default to 80% for availability
+          if (/\b(um|uh|er|hmm|like|maybe|i think|i guess)\b/.test(lowerTranscript)) {
+            availabilityConfidencePercent = adjustConfidence(availabilityConfidencePercent, 'hesitation');
+            console.log(`📉 Availability confidence reduced due to hesitation: ${availabilityConfidencePercent}%`);
+          }
+          
+          data.availability_confidence = availabilityConfidencePercent;
+          console.log(`📋 Availability: ${data.availability} (confidence: ${availabilityConfidencePercent}%)`);
           return {
             nextState: transitionTo(STATES.CONFIRMATION),
             prompt: getConfirmationPrompt(),

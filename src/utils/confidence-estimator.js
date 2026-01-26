@@ -386,6 +386,54 @@ function getClarificationPrompt(fieldType, value, confidenceResult) {
 }
 
 // ============================================================================
+// CONFIDENCE PERCENTAGE CONVERSION
+// ============================================================================
+
+/**
+ * Convert confidence level to percentage (0-100)
+ * Base percentages: HIGH=90%, MEDIUM=70%, LOW=50%
+ * 
+ * @param {Object} confidenceResult - Confidence result with level and reason
+ * @returns {number} Confidence percentage (0-100)
+ */
+function confidenceToPercentage(confidenceResult) {
+  if (!confidenceResult || !confidenceResult.level) {
+    return 50; // Default to 50% if no confidence data
+  }
+  
+  const basePercentages = {
+    [CONFIDENCE.HIGH]: 90,
+    [CONFIDENCE.MEDIUM]: 70,
+    [CONFIDENCE.LOW]: 50
+  };
+  
+  return basePercentages[confidenceResult.level] || 50;
+}
+
+/**
+ * Adjust confidence percentage based on user behavior
+ * 
+ * @param {number} currentConfidence - Current confidence percentage (0-100)
+ * @param {string} behavior - Behavior type: 'hesitation', 'correction', 'confirmation', 'spelling', 'repetition'
+ * @returns {number} Adjusted confidence percentage (0-100)
+ */
+function adjustConfidence(currentConfidence, behavior) {
+  const adjustments = {
+    'hesitation': -15,      // User hesitates (um, uh, etc.)
+    'correction': -20,      // User corrects the bot
+    'repetition': -10,      // Bot requests repetition
+    'confirmation': +10,    // User confirms explicitly
+    'spelling': +15         // Spelling provided without correction
+  };
+  
+  const adjustment = adjustments[behavior] || 0;
+  const newConfidence = currentConfidence + adjustment;
+  
+  // Clamp to 0-100 range
+  return Math.max(0, Math.min(100, newConfidence));
+}
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 
@@ -402,6 +450,8 @@ module.exports = {
   formatPhoneForReadback,
   formatEmailForReadback,
   formatZipForReadback,
-  cleanTranscript
+  cleanTranscript,
+  confidenceToPercentage,
+  adjustConfidence
 };
 
