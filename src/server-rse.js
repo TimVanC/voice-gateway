@@ -139,6 +139,16 @@ wss.on("connection", (twilioWs, req) => {
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
   let pendingUserInput = null;  // Queue for input that arrives while response is in progress
   
+  // TTS failure detection and recovery
+  let currentPromptText = null;  // Track the prompt text being sent
+  let promptRetryCount = {};  // Track retry attempts per prompt (by prompt text)
+  let lastAudioDeltaTime = null;  // Track when last audio delta arrived
+  let audioCompletionTimeout = null;  // Timeout to detect if audio stops mid-sentence
+  let expectedTranscript = null;  // Expected transcript for current prompt
+  let audioDoneReceived = false;  // Track if response.audio.done was received
+  const TTS_FAILURE_TIMEOUT_MS = 8000;  // 8 seconds - if no audio for this long, consider it failed
+  const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before transferring to human
+  
   // State machine for this call
   const stateMachine = createCallStateMachine();
   
@@ -170,6 +180,11 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   let silenceRecoveryTimer = null;       // Timer to recover from stuck state
   const SILENCE_RECOVERY_MS = 6000;      // Wait 6 seconds before prompting
+  
+  // Global silence monitor - never leave caller in silence
+  let globalSilenceMonitor = null;
+  let lastAudioPlaybackTime = Date.now();
+  const GLOBAL_SILENCE_TIMEOUT_MS = 15000;  // 15 seconds of total silence = transfer
   
   // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
@@ -212,6 +227,11 @@ wss.on("connection", (twilioWs, req) => {
           streamSid,
           media: { payload: frame.toString("base64") }
         }));
+        // Update last audio playback time when we actually send audio to Twilio
+        // Only update if this is not a silence frame (silence frames are 0xFF)
+        if (frame[0] !== 0xFF || frame.some(b => b !== 0xFF)) {
+          lastAudioPlaybackTime = Date.now();
+        }
       } catch (err) {
         console.error("❌ Error sending audio frame to Twilio:", err.message);
       }
@@ -364,12 +384,20 @@ wss.on("connection", (twilioWs, req) => {
         responseInProgress = true;
         audioStreamingStarted = false;
         totalAudioBytesSent = 0;  // Reset for new response
+        lastAudioDeltaTime = Date.now();  // Reset audio delta tracking
+        audioDoneReceived = false;  // Reset audio done flag
         
         // Cancel backchannel timer - real response is coming
         backchannel.cancel();
         
         // Clear silence recovery timer - we're responding
         clearSilenceRecoveryTimer();
+        
+        // Start timeout to detect if audio stops mid-sentence
+        clearAudioCompletionTimeout();
+        audioCompletionTimeout = setTimeout(() => {
+          checkForTTSFailure();
+        }, TTS_FAILURE_TIMEOUT_MS);
         break;
         
       case "response.audio.delta":
@@ -384,14 +412,32 @@ wss.on("connection", (twilioWs, req) => {
           const audioData = Buffer.from(event.delta, "base64");
           playBuffer = Buffer.concat([playBuffer, audioData]);
           totalAudioBytesSent += audioData.length;  // Track total
+          lastAudioDeltaTime = Date.now();  // Update last audio delta time
+          lastAudioPlaybackTime = Date.now();  // Update global silence monitor
+          
+          // Reset timeout since we're receiving audio
+          clearAudioCompletionTimeout();
+          if (responseInProgress && !audioDoneReceived) {
+            // Restart timeout - if audio stops for TTS_FAILURE_TIMEOUT_MS, consider it failed
+            audioCompletionTimeout = setTimeout(() => {
+              checkForTTSFailure();
+            }, TTS_FAILURE_TIMEOUT_MS);
+          }
+          
+          // Reset global silence monitor
+          resetGlobalSilenceMonitor();
         }
         break;
         
       case "response.audio.done":
+        audioDoneReceived = true;
         const audioSeconds = (playBuffer.length / 8000).toFixed(1);
         console.log(`🔊 Audio complete (buffer: ${playBuffer.length} bytes = ~${audioSeconds}s to play)`);
         // Keep responseInProgress true until response.done
         // This prevents new responses from starting while audio is still in buffer
+        
+        // Clear timeout since audio is done
+        clearAudioCompletionTimeout();
         break;
         
       case "response.audio_transcript.done":
@@ -401,6 +447,9 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.done":
+        // Clear timeout since response is done
+        clearAudioCompletionTimeout();
+        
         const status = event.response?.status;
         const currentState = stateMachine.getState();
         
@@ -409,10 +458,26 @@ wss.on("connection", (twilioWs, req) => {
           currentResponseId = null;
         }
         
+        // Check if audio was cut off mid-sentence
+        if (audioStreamingStarted && !audioDoneReceived && totalAudioBytesSent > 0) {
+          const audioSeconds = totalAudioBytesSent / 8000;
+          if (audioSeconds < 2) {  // Less than 2 seconds of audio - likely cut off
+            console.error(`⚠️ Audio cut off mid-sentence: only ${audioSeconds.toFixed(2)}s received`);
+            // This will be handled by the timeout check, but mark it as incomplete
+            if (status !== "cancelled") {
+              // Treat as incomplete to trigger retry logic
+              console.log(`🔄 Treating as incomplete due to audio cutoff`);
+            }
+          }
+        }
+        
         if (status === "cancelled") {
           console.log(`⚠️ Response CANCELLED`);
           // Don't send any new prompts - we cancelled for a reason
           // Either waiting for transcription, or user barged in
+          // Reset tracking
+          currentPromptText = null;
+          expectedTranscript = null;
         } else if (status === "incomplete") {
           console.log(`⚠️ Response INCOMPLETE`);
           
@@ -434,11 +499,28 @@ wss.on("connection", (twilioWs, req) => {
           }
           
           if (!audioStreamingStarted || totalAudioBytesSent === 0) {
-            // No audio was sent at all - retry immediately
-            console.log(`🔄 No audio was sent - will retry prompt`);
+            // No audio was sent at all - check retry count
+            const promptKey = currentPromptText || 'unknown';
+            const retryCount = promptRetryCount[promptKey] || 0;
+            
+            if (retryCount >= MAX_RETRIES_PER_PROMPT) {
+              console.error(`🚨 NO AUDIO GENERATED ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
+              transferToRealPerson();
+              currentPromptText = null;
+              expectedTranscript = null;
+              return;
+            }
+            
+            // Increment retry count
+            promptRetryCount[promptKey] = retryCount + 1;
+            console.log(`🔄 No audio was sent - will retry prompt (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
             setTimeout(() => {
-              sendNextPromptIfNeeded();
-            }, 100);
+              if (currentPromptText) {
+                sendStatePrompt(currentPromptText);
+              } else {
+                sendNextPromptIfNeeded();
+              }
+            }, 500);
           } else {
             // Audio was sent (user heard something)
             // Check if enough audio was sent that user probably understood
@@ -457,6 +539,14 @@ wss.on("connection", (twilioWs, req) => {
         } else {
           console.log(`✅ Response complete (state: ${currentState})`);
           assistantTurnCount++;  // Track for filler spacing
+          
+          // Reset retry count on successful completion
+          if (currentPromptText) {
+            const promptKey = currentPromptText;
+            delete promptRetryCount[promptKey];  // Clear retry count for this prompt
+            currentPromptText = null;
+            expectedTranscript = null;
+          }
           
           // If confirmation prompt was delivered and completed, mark it
           if (currentState === STATES.CONFIRMATION) {
@@ -723,6 +813,136 @@ Say the ENTIRE sentence above, word for word.`,
     if (silenceRecoveryTimer) {
       clearTimeout(silenceRecoveryTimer);
       silenceRecoveryTimer = null;
+    }
+  }
+  
+  // ============================================================================
+  // GLOBAL SILENCE MONITOR - Never leave caller in silence
+  // ============================================================================
+  function startGlobalSilenceMonitor() {
+    if (globalSilenceMonitor) {
+      clearInterval(globalSilenceMonitor);
+    }
+    
+    globalSilenceMonitor = setInterval(() => {
+      const timeSinceLastAudio = Date.now() - lastAudioPlaybackTime;
+      const hasAudioInBuffer = playBuffer.length > 0;
+      const isUserSpeaking = speechStartTime !== null;
+      const currentState = stateMachine.getState();
+      
+      // Don't trigger during confirmation/close (user needs time to listen)
+      if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE || currentState === STATES.ENDED) {
+        return;
+      }
+      
+      // If we've been silent too long and no audio is playing and user isn't speaking
+      if (timeSinceLastAudio >= GLOBAL_SILENCE_TIMEOUT_MS && !hasAudioInBuffer && !isUserSpeaking && !responseInProgress) {
+        console.error(`🚨 GLOBAL SILENCE DETECTED: ${(timeSinceLastAudio / 1000).toFixed(1)}s since last audio`);
+        console.error(`   System appears stuck - transferring to real person`);
+        
+        // Stop monitoring
+        stopGlobalSilenceMonitor();
+        
+        // Transfer to real person
+        transferToRealPerson();
+      } else if (timeSinceLastAudio >= GLOBAL_SILENCE_TIMEOUT_MS && !hasAudioInBuffer && !isUserSpeaking && responseInProgress) {
+        // Response in progress but no audio - likely TTS failure
+        console.error(`🚨 RESPONSE IN PROGRESS BUT NO AUDIO: ${(timeSinceLastAudio / 1000).toFixed(1)}s since last audio`);
+        checkForTTSFailure();
+      }
+    }, 2000);  // Check every 2 seconds
+  }
+  
+  function stopGlobalSilenceMonitor() {
+    if (globalSilenceMonitor) {
+      clearInterval(globalSilenceMonitor);
+      globalSilenceMonitor = null;
+    }
+  }
+  
+  function resetGlobalSilenceMonitor() {
+    lastAudioPlaybackTime = Date.now();
+  }
+  
+  // ============================================================================
+  // TTS FAILURE DETECTION AND RECOVERY
+  // ============================================================================
+  function clearAudioCompletionTimeout() {
+    if (audioCompletionTimeout) {
+      clearTimeout(audioCompletionTimeout);
+      audioCompletionTimeout = null;
+    }
+  }
+  
+  function checkForTTSFailure() {
+    if (!responseInProgress) {
+      return; // Not waiting for a response
+    }
+    
+    const timeSinceLastAudio = lastAudioDeltaTime ? Date.now() - lastAudioDeltaTime : TTS_FAILURE_TIMEOUT_MS;
+    const audioSeconds = totalAudioBytesSent / 8000;
+    
+    // Check if audio stopped mid-sentence
+    const audioStoppedMidSentence = (
+      audioStreamingStarted &&  // Audio started
+      !audioDoneReceived &&    // But audio.done never arrived
+      timeSinceLastAudio >= TTS_FAILURE_TIMEOUT_MS &&  // And it's been too long
+      audioSeconds > 0 && audioSeconds < 5  // And we got some audio but not enough (likely cut off)
+    );
+    
+    // Check if no audio was generated at all
+    const noAudioGenerated = (
+      !audioStreamingStarted &&  // No audio started
+      timeSinceLastAudio >= TTS_FAILURE_TIMEOUT_MS  // And it's been too long
+    );
+    
+    if (audioStoppedMidSentence || noAudioGenerated) {
+      console.error(`❌ TTS FAILURE DETECTED:`);
+      console.error(`   Audio streaming started: ${audioStreamingStarted}`);
+      console.error(`   Audio done received: ${audioDoneReceived}`);
+      console.error(`   Time since last audio: ${timeSinceLastAudio}ms`);
+      console.error(`   Audio seconds: ${audioSeconds.toFixed(2)}s`);
+      console.error(`   Current prompt: "${currentPromptText}"`);
+      
+      // Cancel current response
+      if (currentResponseId && openaiWs?.readyState === WebSocket.OPEN) {
+        console.log(`🛑 Cancelling failed response`);
+        openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+      }
+      
+      // Check retry count
+      const promptKey = currentPromptText || 'unknown';
+      const retryCount = promptRetryCount[promptKey] || 0;
+      
+      if (retryCount >= MAX_RETRIES_PER_PROMPT) {
+        console.error(`🚨 TTS FAILED ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
+        // Transfer to real person immediately
+        transferToRealPerson();
+        return;
+      }
+      
+      // Increment retry count
+      promptRetryCount[promptKey] = retryCount + 1;
+      console.log(`🔄 Retrying prompt (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
+      
+      // Reset state
+      responseInProgress = false;
+      audioStreamingStarted = false;
+      totalAudioBytesSent = 0;
+      lastAudioDeltaTime = null;
+      audioDoneReceived = false;
+      playBuffer = Buffer.alloc(0);
+      
+      // Retry the prompt after a short delay
+      setTimeout(() => {
+        if (currentPromptText) {
+          console.log(`🔄 Retrying: "${currentPromptText}"`);
+          sendStatePrompt(currentPromptText);
+        } else {
+          // Fallback: send next prompt from state machine
+          sendNextPromptIfNeeded();
+        }
+      }, 500);
     }
   }
   
@@ -1121,6 +1341,14 @@ Sound polite and helpful, not dismissive.`,
     
     const currentState = stateMachine.getState();
     console.log(`🗣️ State prompt: "${prompt}"`);
+    
+    // Track the prompt for failure detection
+    currentPromptText = prompt;
+    expectedTranscript = prompt;  // Store expected transcript
+    
+    // Clear any existing timeout
+    clearAudioCompletionTimeout();
+    
     responseInProgress = true;
     
     // CRITICAL: For CONFIRMATION and CLOSE states, use STRICT instructions
@@ -1330,6 +1558,9 @@ Keep it SHORT.`;
           console.log("🎵 Starting audio pump");
           pumpFrames();
           
+          // Start global silence monitor to never leave caller in silence
+          startGlobalSilenceMonitor();
+          
           // Connect to OpenAI
           connectToOpenAI();
           
@@ -1397,6 +1628,8 @@ Keep it SHORT.`;
     if (silenceTimer) clearTimeout(silenceTimer);
     if (longSpeechTimer) clearTimeout(longSpeechTimer);
     clearSilenceRecoveryTimer();
+    clearAudioCompletionTimeout();
+    stopGlobalSilenceMonitor();
     backchannel.cancel();
     
     if (openaiWs?.readyState === WebSocket.OPEN) {
