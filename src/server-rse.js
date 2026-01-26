@@ -11,6 +11,7 @@ const express = require("express");
 const { WebSocket, WebSocketServer } = require("ws");
 const http = require("http");
 const twilio = require("twilio");
+const { BASE_URL } = require('./config/baseUrl');
 
 // ============================================================================
 // IMPORTS
@@ -118,9 +119,9 @@ wss.on("connection", (twilioWs, req) => {
   let callerNumber = null;  // Store caller number for logging
   let openaiWs = null;
   let transferRequested = false;  // Track if transfer has been requested
-  let baseUrl = process.env.BASE_URL || null;  // Store base URL for transfers
+  let baseUrl = BASE_URL || null;  // Store base URL for transfers (from config/baseUrl.js)
   
-  // Determine base URL for transfers if not set from environment
+  // Determine base URL for transfers if not set from config/environment
   if (!baseUrl && req && req.headers && req.headers.host) {
     const protocol = req.headers.host.includes("localhost") ? "http" : "https";
     baseUrl = `${protocol}://${req.headers.host}`;
