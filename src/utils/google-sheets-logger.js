@@ -1028,44 +1028,9 @@ async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
         
         console.log(`✅ Added v1 headers to sheet "${sheetName}"`);
       } else {
-        // Schema evolution: Check if we need to add missing columns
+        // Schema evolution: Check and insert missing confidence columns at specific positions
         const existingHeaders = firstRow.data.values[0] || [];
-        const missingHeaders = COLUMN_HEADERS.filter((header, index) => {
-          return !existingHeaders.includes(header);
-        });
-        
-        if (missingHeaders.length > 0) {
-          console.log(`📊 Schema evolution: Adding ${missingHeaders.length} missing columns: ${missingHeaders.join(', ')}`);
-          
-          // Add missing columns by appending to the header row
-          const newHeaders = existingHeaders.concat(missingHeaders);
-          
-          // Calculate the end column letter for the full header row
-          // A=1, B=2, ... Z=26, AA=27, etc.
-          function columnNumberToLetter(n) {
-            let result = '';
-            while (n > 0) {
-              n--;
-              result = String.fromCharCode(65 + (n % 26)) + result;
-              n = Math.floor(n / 26);
-            }
-            return result;
-          }
-          
-          const endColumn = columnNumberToLetter(newHeaders.length);
-          
-          // Update header row with all columns
-          await sheets.spreadsheets.values.update({
-            spreadsheetId,
-            range: `${sheetName}!A1:${endColumn}1`, // Full range including new columns
-            valueInputOption: 'RAW',
-            requestBody: {
-              values: [newHeaders]
-            }
-          });
-          
-          console.log(`✅ Added ${missingHeaders.length} missing columns to sheet "${sheetName}": ${missingHeaders.join(', ')}`);
-        }
+        await ensureConfidenceColumns(sheets, spreadsheetId, sheetName, existingHeaders);
       }
     }
   } catch (error) {
