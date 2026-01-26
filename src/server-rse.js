@@ -531,10 +531,10 @@ wss.on("connection", (twilioWs, req) => {
             // Audio was sent (user heard something)
             const audioSeconds = totalAudioBytesSent / 8000;
             
-            // CRITICAL: If response is INCOMPLETE, check if audio actually finished playing
-            // Even if transcript looks complete, if audio didn't finish or response is incomplete,
-            // the user may have heard a cut-off message
-            const audioDidNotFinish = !audioDoneReceived || (audioStreamingStarted && lastAudioDeltaTime && (Date.now() - lastAudioDeltaTime) > 2000);
+            // CRITICAL: If response is INCOMPLETE, this is a failure signal from OpenAI
+            // Even if we got audio.done and a complete transcript, INCOMPLETE means something went wrong
+            // The audio may have cut off mid-sentence, or the response generation was interrupted
+            // We should retry to ensure the user hears the complete message
             
             // Check transcript completeness
             let transcriptIncomplete = false;
@@ -550,14 +550,24 @@ wss.on("connection", (twilioWs, req) => {
               }
             }
             
-            // If audio didn't finish OR transcript is incomplete, retry the prompt
-            if (audioDidNotFinish || transcriptIncomplete) {
+            // Check if audio actually finished - if audio.done wasn't received, audio definitely didn't finish
+            const audioDidNotFinish = !audioDoneReceived;
+            
+            // If response is INCOMPLETE, we should retry unless:
+            // 1. We got audio.done AND transcript is complete AND audio duration is reasonable
+            // 2. This is a very long prompt where partial delivery might be acceptable
+            const shouldRetry = transcriptIncomplete || audioDidNotFinish || 
+              (expectedTranscript && actualTranscript && actualTranscript.length < expectedTranscript.length * 0.9);
+            
+            if (shouldRetry) {
               if (transcriptIncomplete) {
-                console.error(`⚠️ Transcript incomplete: expected ~${expectedTranscript.length} chars, got ${actualTranscript?.length || 0} chars`);
-                console.error(`   Expected: "${expectedTranscript.substring(0, 80)}..."`);
+                console.error(`⚠️ Transcript incomplete: expected ~${expectedTranscript?.length || 0} chars, got ${actualTranscript?.length || 0} chars`);
+                console.error(`   Expected: "${expectedTranscript?.substring(0, 80) || 'none'}..."`);
                 console.error(`   Got: "${actualTranscript?.substring(0, 80) || 'none'}..."`);
+              } else if (audioDidNotFinish) {
+                console.error(`⚠️ Audio did not finish: audioDoneReceived=${audioDoneReceived}`);
               } else {
-                console.error(`⚠️ Audio did not finish: audioDoneReceived=${audioDoneReceived}, lastAudioDeltaTime=${lastAudioDeltaTime ? Date.now() - lastAudioDeltaTime + 'ms ago' : 'never'}`);
+                console.error(`⚠️ Response INCOMPLETE: transcript length mismatch (${actualTranscript?.length || 0} vs expected ${expectedTranscript?.length || 0})`);
               }
               
               // Check retry count
@@ -596,7 +606,11 @@ wss.on("connection", (twilioWs, req) => {
               return;
             }
             
-            // Audio finished and transcript is complete - user probably heard it all
+            // Response is INCOMPLETE but transcript and audio seem complete
+            // This is a rare case - log it but don't retry to avoid infinite loops
+            console.log(`⚠️ Response INCOMPLETE but transcript/audio appear complete - proceeding cautiously`);
+            console.log(`   Audio: ${audioSeconds.toFixed(1)}s, transcript: ${actualTranscript?.length || 0} chars`);
+            
             if (audioSeconds > 3) {
               // User heard 3+ seconds - they probably got the gist
               // Just wait for their response, don't interrupt with recovery
