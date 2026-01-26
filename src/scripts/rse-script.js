@@ -12,7 +12,7 @@
 // GREETING
 // ============================================================================
 const GREETING = {
-  primary: "Hi, thanks for calling RSE Energy Group. This is Ava. How can I help you today?",
+  primary: "Hi, thanks for calling RSE Energy Group. This is an AI receptionist. This call may be recorded. A real person is available on request. This is Ava. How can I help you today?",
   silence_fallback: "Hi, I can help with HVAC, generators, or maintenance memberships. What are you calling about?"
 };
 

@@ -10,6 +10,7 @@ require("dotenv").config();
 const express = require("express");
 const { WebSocket, WebSocketServer } = require("ws");
 const http = require("http");
+const twilio = require("twilio");
 
 // ============================================================================
 // IMPORTS
@@ -27,9 +28,17 @@ const PORT = process.env.PORT || 8080;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
 
+// Twilio configuration for transfers
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TRANSFER_PHONE_NUMBER = process.env.TRANSFER_PHONE_NUMBER; // Phone number to transfer to
+const twilioClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN 
+  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+  : null;
+
 // Voice configuration
-// Primary: coral, Fallback: shimmer
-const OPENAI_VOICE_PRIMARY = process.env.OPENAI_REALTIME_VOICE || "coral";
+// Primary: ash (lower pitch), Fallback: shimmer
+const OPENAI_VOICE_PRIMARY = process.env.OPENAI_REALTIME_VOICE || "ash";
 const OPENAI_VOICE_FALLBACK = "shimmer";
 
 // Validate API key
@@ -81,17 +90,41 @@ app.post("/twilio/voice", (req, res) => {
 });
 
 // ============================================================================
+// TWILIO TRANSFER ENDPOINT
+// ============================================================================
+app.post("/twilio/transfer", (req, res) => {
+  console.log("🔄 Transfer endpoint called");
+  const response = new twilio.twiml.VoiceResponse();
+  response.say("Transferring you to a real person now.");
+  if (TRANSFER_PHONE_NUMBER) {
+    response.dial(TRANSFER_PHONE_NUMBER);
+  } else {
+    response.say("I'm sorry, the transfer service is not configured. Please call back during business hours.");
+  }
+  res.type("text/xml").send(response.toString());
+});
+
+// ============================================================================
 // WEBSOCKET HANDLER - MAIN CALL LOGIC
 // ============================================================================
 wss.on("connection", (twilioWs, req) => {
   console.log("📞 New connection");
   
+  // Determine base URL for transfers
+  if (!baseUrl && req && req.headers && req.headers.host) {
+    const protocol = req.headers.host.includes("localhost") ? "http" : "https";
+    baseUrl = `${protocol}://${req.headers.host}`;
+  }
+  
   // ============================================================================
   // CALL SESSION STATE
   // ============================================================================
   let streamSid = null;
+  let callSid = null;  // Store call SID for transfers
   let callerNumber = null;  // Store caller number for logging
   let openaiWs = null;
+  let transferRequested = false;  // Track if transfer has been requested
+  let baseUrl = process.env.BASE_URL || null;  // Store base URL for transfers
   let paceTimer = null;
   let keepAliveTimer = null;
   let silenceTimer = null;
@@ -818,12 +851,86 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     }
   }
   
+  // ============================================================================
+  // DETECT REAL PERSON REQUEST
+  // ============================================================================
+  function detectRealPersonRequest(transcript) {
+    const lowerTranscript = transcript.toLowerCase();
+    const realPersonPatterns = [
+      /\b(real person|human|speak to someone|talk to someone|talk to a person|speak to a person)\b/,
+      /\b(agent|representative|operator|live person|live agent)\b/,
+      /\b(transfer|connect me|put me through|can i speak)\b/,
+      /\b(not a robot|not ai|not automated|actual person)\b/
+    ];
+    
+    return realPersonPatterns.some(pattern => pattern.test(lowerTranscript));
+  }
+  
+  // ============================================================================
+  // TRANSFER CALL TO REAL PERSON
+  // ============================================================================
+  async function transferToRealPerson() {
+    if (transferRequested) {
+      console.log("⚠️ Transfer already requested, skipping");
+      return;
+    }
+    
+    transferRequested = true;
+    console.log("🔄 Transferring call to real person...");
+    
+    // Close OpenAI connection
+    if (openaiWs?.readyState === WebSocket.OPEN) {
+      try {
+        openaiWs.close();
+      } catch (e) {
+        console.error("❌ Error closing OpenAI connection:", e);
+      }
+    }
+    
+    // Transfer using Twilio REST API if callSid and transfer number are available
+    if (callSid && TRANSFER_PHONE_NUMBER && twilioClient) {
+      try {
+        if (!baseUrl) {
+          throw new Error("BASE_URL not configured and cannot be determined from request");
+        }
+        
+        const transferUrl = `${baseUrl}/twilio/transfer`;
+        
+        console.log(`📞 Transferring call ${callSid} to ${TRANSFER_PHONE_NUMBER} via ${transferUrl}`);
+        await twilioClient.calls(callSid).update({
+          url: transferUrl,
+          method: 'POST'
+        });
+      } catch (error) {
+        console.error("❌ Error transferring call:", error);
+        // Fallback: close the connection and let Twilio handle it
+        if (twilioWs?.readyState === WebSocket.OPEN) {
+          twilioWs.close();
+        }
+      }
+    } else {
+      console.log("⚠️ Transfer not configured - callSid, transfer number, or Twilio client missing");
+      console.log(`   callSid: ${callSid ? 'present' : 'missing'}, transfer number: ${TRANSFER_PHONE_NUMBER ? 'present' : 'missing'}, client: ${twilioClient ? 'present' : 'missing'}`);
+      // Close Twilio connection as fallback
+      if (twilioWs?.readyState === WebSocket.OPEN) {
+        twilioWs.close();
+      }
+    }
+  }
+  
   function doProcessUserInput(transcript) {
     const currentState = stateMachine.getState();
     const lowerTranscript = transcript.toLowerCase();
     const currentData = stateMachine.getData();
     
     console.log(`🔄 Processing input in state ${currentState}: "${transcript.substring(0, 50)}..."`);
+    
+    // CRITICAL: Check for real person request FIRST - stop AI flow immediately
+    if (detectRealPersonRequest(transcript)) {
+      console.log("🚨 Real person requested - stopping AI flow and transferring immediately");
+      transferToRealPerson();
+      return; // Stop processing - don't continue AI flow
+    }
     
     // Intent classification - only if intent is NOT already locked
     let analysis = {};
@@ -1208,7 +1315,9 @@ Keep it SHORT.`;
           
         case "start":
           streamSid = msg.start.streamSid;
+          callSid = msg.start.callSid;  // Store call SID for transfers
           console.log(`📞 Stream started: ${streamSid}`);
+          console.log(`📞 Call SID: ${callSid}`);
           console.log(`📞 Stream config:`, JSON.stringify(msg.start, null, 2));
           
           // Store caller number if provided
