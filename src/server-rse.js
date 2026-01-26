@@ -513,6 +513,7 @@ wss.on("connection", (twilioWs, req) => {
               transferToRealPerson();
               currentPromptText = null;
               expectedTranscript = null;
+              actualTranscript = null;
               return;
             }
             
@@ -528,12 +529,15 @@ wss.on("connection", (twilioWs, req) => {
             }, 500);
           } else {
             // Audio was sent (user heard something)
-            // Check if enough audio was sent that user probably understood
             const audioSeconds = totalAudioBytesSent / 8000;
             
-            // CRITICAL: Even if we got long audio, check if the transcript matches expected prompt
-            // If transcript is missing or incomplete, the audio might have cut off mid-sentence
-            // Check if we have an expected transcript but the actual transcript is incomplete
+            // CRITICAL: If response is INCOMPLETE, check if audio actually finished playing
+            // Even if transcript looks complete, if audio didn't finish or response is incomplete,
+            // the user may have heard a cut-off message
+            const audioDidNotFinish = !audioDoneReceived || (audioStreamingStarted && lastAudioDeltaTime && (Date.now() - lastAudioDeltaTime) > 2000);
+            
+            // Check transcript completeness
+            let transcriptIncomplete = false;
             if (expectedTranscript && actualTranscript) {
               const expectedLength = expectedTranscript.length;
               const actualLength = actualTranscript.length;
@@ -542,47 +546,57 @@ wss.on("connection", (twilioWs, req) => {
               // If transcript is much shorter than expected (less than 70% of expected length)
               // or if it doesn't contain key phrases from the expected transcript
               if (lengthRatio < 0.7 || !actualTranscript.toLowerCase().includes(expectedTranscript.toLowerCase().substring(0, 20))) {
-                console.error(`⚠️ Transcript incomplete: expected ~${expectedLength} chars, got ${actualLength} chars (${(lengthRatio * 100).toFixed(0)}%)`);
-                console.error(`   Expected: "${expectedTranscript.substring(0, 80)}..."`);
-                console.error(`   Got: "${actualTranscript.substring(0, 80)}..."`);
-                
-                // Check retry count
-                const promptKey = currentPromptText || 'unknown';
-                const retryCount = promptRetryCount[promptKey] || 0;
-                
-                if (retryCount >= MAX_RETRIES_PER_PROMPT) {
-                  console.error(`🚨 TRANSCRIPT INCOMPLETE ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
-                  transferToRealPerson();
-                  currentPromptText = null;
-                  expectedTranscript = null;
-                  actualTranscript = null;
-                  return;
-                }
-                
-                // Retry the prompt
-                promptRetryCount[promptKey] = retryCount + 1;
-                console.log(`🔄 Retrying prompt due to incomplete transcript (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
-                
-                // Reset state
-                responseInProgress = false;
-                audioStreamingStarted = false;
-                totalAudioBytesSent = 0;
-                lastAudioDeltaTime = null;
-                audioDoneReceived = false;
-                actualTranscript = null;
-                playBuffer = Buffer.alloc(0);
-                
-                setTimeout(() => {
-                  if (currentPromptText) {
-                    sendStatePrompt(currentPromptText);
-                  } else {
-                    sendNextPromptIfNeeded();
-                  }
-                }, 500);
-                return;
+                transcriptIncomplete = true;
               }
             }
             
+            // If audio didn't finish OR transcript is incomplete, retry the prompt
+            if (audioDidNotFinish || transcriptIncomplete) {
+              if (transcriptIncomplete) {
+                console.error(`⚠️ Transcript incomplete: expected ~${expectedTranscript.length} chars, got ${actualTranscript?.length || 0} chars`);
+                console.error(`   Expected: "${expectedTranscript.substring(0, 80)}..."`);
+                console.error(`   Got: "${actualTranscript?.substring(0, 80) || 'none'}..."`);
+              } else {
+                console.error(`⚠️ Audio did not finish: audioDoneReceived=${audioDoneReceived}, lastAudioDeltaTime=${lastAudioDeltaTime ? Date.now() - lastAudioDeltaTime + 'ms ago' : 'never'}`);
+              }
+              
+              // Check retry count
+              const promptKey = currentPromptText || 'unknown';
+              const retryCount = promptRetryCount[promptKey] || 0;
+              
+              if (retryCount >= MAX_RETRIES_PER_PROMPT) {
+                console.error(`🚨 INCOMPLETE RESPONSE ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
+                transferToRealPerson();
+                currentPromptText = null;
+                expectedTranscript = null;
+                actualTranscript = null;
+                return;
+              }
+              
+              // Retry the prompt
+              promptRetryCount[promptKey] = retryCount + 1;
+              console.log(`🔄 Retrying prompt due to incomplete response (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
+              
+              // Reset state
+              responseInProgress = false;
+              audioStreamingStarted = false;
+              totalAudioBytesSent = 0;
+              lastAudioDeltaTime = null;
+              audioDoneReceived = false;
+              actualTranscript = null;
+              playBuffer = Buffer.alloc(0);
+              
+              setTimeout(() => {
+                if (currentPromptText) {
+                  sendStatePrompt(currentPromptText);
+                } else {
+                  sendNextPromptIfNeeded();
+                }
+              }, 500);
+              return;
+            }
+            
+            // Audio finished and transcript is complete - user probably heard it all
             if (audioSeconds > 3) {
               // User heard 3+ seconds - they probably got the gist
               // Just wait for their response, don't interrupt with recovery
