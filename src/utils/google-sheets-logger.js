@@ -27,21 +27,39 @@ const GOOGLE_SHEETS_CREDENTIALS_JSON = process.env.GOOGLE_SHEETS_CREDENTIALS; //
 // ============================================================================
 // V1 SCHEMA DEFINITION (Required columns only)
 // ============================================================================
+// Expected column order (for reference)
+// A: call_id
+// B: call_timestamp
+// C: first_name
+// D: last_name
+// E: conf_name (confidence for name - column C in user's spec means 3rd data column, which is E after call_id and timestamp)
+// F: phone_number
+// G: conf_pn (confidence for phone - column F in user's spec means 6th data column, which is G)
+// H: conf_mail (confidence for email - before email column)
+// I: email
+// J: primary_intent
+// K: conf_add (confidence for address - before service_address)
+// L: service_address
+// M: conf_avail (confidence for availability - before availability_notes)
+// N: availability_notes
+// O: call_summary
+// P: call_status
+
 const COLUMN_HEADERS = [
   'call_id',
   'call_timestamp',
   'first_name',
   'last_name',
-  'name_confidence',
+  'conf_name',        // Column E (user said column C, but that's 3rd data column = E after call_id/timestamp)
   'phone_number',
-  'phone_confidence',
+  'conf_pn',          // Column G (user said column F, but that's 6th data column = G)
+  'conf_mail',        // Before email
   'email',
-  'email_confidence',
   'primary_intent',
+  'conf_add',         // Before service_address
   'service_address',
-  'address_confidence',
+  'conf_avail',       // Before availability_notes
   'availability_notes',
-  'availability_confidence',
   'call_summary',
   'call_status'
 ];
@@ -774,21 +792,22 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
   
   // For all calls (complete and incomplete): Log all collected data
   // Only leave fields blank if they were never collected or failed validation
+  // Column order matches COLUMN_HEADERS array
   return [
     callId,
     timestamp,
     cleanFirstName, // Validated and cleaned
     cleanLastName, // Validated and cleaned
-    name_confidence !== null && name_confidence !== undefined ? name_confidence : '', // Confidence percentage (0-100)
+    name_confidence !== null && name_confidence !== undefined ? name_confidence : '', // conf_name - Confidence percentage (0-100)
     phoneNumber, // Validated (10 digits) or empty if invalid
-    phone_confidence !== null && phone_confidence !== undefined ? phone_confidence : '', // Confidence percentage (0-100)
+    phone_confidence !== null && phone_confidence !== undefined ? phone_confidence : '', // conf_pn - Confidence percentage (0-100)
+    email_confidence !== null && email_confidence !== undefined ? email_confidence : '', // conf_mail - Confidence percentage (0-100)
     normalizedEmail, // Validated (proper format) or empty if invalid
-    email_confidence !== null && email_confidence !== undefined ? email_confidence : '', // Confidence percentage (0-100)
     normalizedIntent, // Normalized to canonical value
+    address_confidence !== null && address_confidence !== undefined ? address_confidence : '', // conf_add - Confidence percentage (0-100)
     serviceAddress, // Validated (real address) or empty if invalid
-    address_confidence !== null && address_confidence !== undefined ? address_confidence : '', // Confidence percentage (0-100)
+    availability_confidence !== null && availability_confidence !== undefined ? availability_confidence : '', // conf_avail - Confidence percentage (0-100)
     availabilityNotes, // Cleaned (filler phrases removed)
-    availability_confidence !== null && availability_confidence !== undefined ? availability_confidence : '', // Confidence percentage (0-100)
     generateCallSummary(callData, callStatus), // Cleaned and semantic
     callStatus
   ];
@@ -818,8 +837,140 @@ function shouldLogCall(currentState, callData) {
 }
 
 /**
+ * Ensure confidence columns exist at specific positions
+ * Column positions based on user specification:
+ * - conf_name at column C (3rd data column = E after call_id/timestamp)
+ * - conf_pn at column F (6th data column = G after call_id/timestamp)
+ * - conf_mail before email
+ * - conf_add before service_address
+ * - conf_avail before availability_notes
+ */
+async function ensureConfidenceColumns(sheets, spreadsheetId, sheetName, existingHeaders) {
+  const sheetId = await getSheetId(sheets, spreadsheetId, sheetName);
+  
+  const columnMap = {
+    'conf_name': { beforeColumn: 'phone_number', description: 'name confidence at column E (after first_name, last_name)' },
+    'conf_pn': { beforeColumn: 'conf_mail', description: 'phone confidence at column G (after phone_number)' },
+    'conf_mail': { beforeColumn: 'email', description: 'email confidence before email' },
+    'conf_add': { beforeColumn: 'service_address', description: 'address confidence before service_address' },
+    'conf_avail': { beforeColumn: 'availability_notes', description: 'availability confidence before availability_notes' }
+  };
+  
+  let needsUpdate = false;
+  const insertRequests = [];
+  
+  // Check each confidence column in order (process from right to left to avoid index shifting issues)
+  const columnsToCheck = ['conf_avail', 'conf_add', 'conf_mail', 'conf_pn', 'conf_name'];
+  
+  for (const columnName of columnsToCheck) {
+    const config = columnMap[columnName];
+    const columnIndex = existingHeaders.indexOf(columnName);
+    
+    if (columnIndex === -1) {
+      // Column is missing - need to insert it
+      console.log(`📊 Missing confidence column: ${columnName} (${config.description})`);
+      
+      // Find the index of the "before" column to insert before it
+      const beforeIndex = existingHeaders.indexOf(config.beforeColumn);
+      
+      if (beforeIndex === -1) {
+        console.warn(`⚠️  Cannot find "${config.beforeColumn}" column to insert "${columnName}" before it. Skipping.`);
+        continue;
+      }
+      
+      // Insert column at beforeIndex position
+      insertRequests.push({
+        insertDimension: {
+          range: {
+            sheetId: sheetId,
+            dimension: 'COLUMNS',
+            startIndex: beforeIndex,
+            endIndex: beforeIndex + 1
+          },
+          inheritFromBefore: false
+        }
+      });
+      
+      // Insert the header value
+      insertRequests.push({
+        updateCells: {
+          range: {
+            sheetId: sheetId,
+            startRowIndex: 0,
+            endRowIndex: 1,
+            startColumnIndex: beforeIndex,
+            endColumnIndex: beforeIndex + 1
+          },
+          rows: [{
+            values: [{
+              userEnteredValue: { stringValue: columnName }
+            }]
+          }],
+          fields: 'userEnteredValue'
+        }
+      });
+      
+      // Update existingHeaders array to account for the new column (for subsequent checks)
+      existingHeaders.splice(beforeIndex, 0, columnName);
+      
+      needsUpdate = true;
+      const columnLetter = columnNumberToLetter(beforeIndex + 1);
+      console.log(`✅ Will insert ${columnName} at column ${columnLetter} (before ${config.beforeColumn})`);
+    } else {
+      const columnLetter = columnNumberToLetter(columnIndex + 1);
+      console.log(`✅ Confidence column ${columnName} already exists at column ${columnLetter}`);
+    }
+  }
+  
+  if (needsUpdate && insertRequests.length > 0) {
+    try {
+      // Execute batch update to insert columns (process in reverse order to avoid index issues)
+      // Actually, we processed from right to left, so we can execute in order
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: insertRequests
+        }
+      });
+      
+      console.log(`✅ Schema update complete: Inserted ${insertRequests.length / 2} confidence columns`);
+    } catch (error) {
+      console.error(`❌ Failed to insert confidence columns: ${error.message}`);
+      throw error;
+    }
+  } else if (!needsUpdate) {
+    console.log(`✅ All confidence columns already exist - no schema update needed`);
+  }
+}
+
+/**
+ * Get sheet ID by sheet name
+ */
+async function getSheetId(sheets, spreadsheetId, sheetName) {
+  const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId });
+  const sheet = spreadsheet.data.sheets.find(s => s.properties.title === sheetName);
+  if (!sheet) {
+    throw new Error(`Sheet "${sheetName}" not found`);
+  }
+  return sheet.properties.sheetId;
+}
+
+/**
+ * Convert column number to letter (1-indexed: A=1, B=2, etc.)
+ */
+function columnNumberToLetter(n) {
+  let result = '';
+  while (n > 0) {
+    n--;
+    result = String.fromCharCode(65 + (n % 26)) + result;
+    n = Math.floor(n / 26);
+  }
+  return result;
+}
+
+/**
  * Ensure sheet exists and has headers
- * Also handles schema evolution - adds missing columns if schema changes
+ * Also handles schema evolution - inserts missing confidence columns at specific positions
  */
 async function ensureSheetSetup(sheets, spreadsheetId, sheetName) {
   try {
