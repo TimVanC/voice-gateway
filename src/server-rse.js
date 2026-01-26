@@ -511,17 +511,20 @@ wss.on("connection", (twilioWs, req) => {
             if (retryCount >= MAX_RETRIES_PER_PROMPT) {
               console.error(`🚨 NO AUDIO GENERATED ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
               transferToRealPerson();
+              responseInProgress = false;
               currentPromptText = null;
               expectedTranscript = null;
               actualTranscript = null;
               return;
             }
             
-            // Increment retry count
             promptRetryCount[promptKey] = retryCount + 1;
             console.log(`🔄 No audio was sent - will retry prompt (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
+            responseInProgress = false;
             setTimeout(() => {
-              if (currentPromptText) {
+              if (currentPromptText === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
+                sendGreeting();
+              } else if (currentPromptText) {
                 sendStatePrompt(currentPromptText);
               } else {
                 sendNextPromptIfNeeded();
@@ -531,96 +534,43 @@ wss.on("connection", (twilioWs, req) => {
             // Audio was sent (user heard something)
             const audioSeconds = totalAudioBytesSent / 8000;
             
-            // CRITICAL: If response is INCOMPLETE, this is a failure signal from OpenAI
-            // Even if we got audio.done and a complete transcript, INCOMPLETE means something went wrong
-            // The audio may have cut off mid-sentence, or the response generation was interrupted
-            // We should retry to ensure the user hears the complete message
+            // CRITICAL: Always treat INCOMPLETE as failure. Users consistently report cutoffs
+            // (e.g. on "today", "system") even when transcript looks complete. Retry every time.
+            const promptKey = currentPromptText || 'unknown';
+            const retryCount = promptRetryCount[promptKey] || 0;
             
-            // Check transcript completeness
-            let transcriptIncomplete = false;
-            if (expectedTranscript && actualTranscript) {
-              const expectedLength = expectedTranscript.length;
-              const actualLength = actualTranscript.length;
-              const lengthRatio = actualLength / expectedLength;
-              
-              // If transcript is much shorter than expected (less than 70% of expected length)
-              // or if it doesn't contain key phrases from the expected transcript
-              if (lengthRatio < 0.7 || !actualTranscript.toLowerCase().includes(expectedTranscript.toLowerCase().substring(0, 20))) {
-                transcriptIncomplete = true;
-              }
-            }
-            
-            // Check if audio actually finished - if audio.done wasn't received, audio definitely didn't finish
-            const audioDidNotFinish = !audioDoneReceived;
-            
-            // If response is INCOMPLETE, we should retry unless:
-            // 1. We got audio.done AND transcript is complete AND audio duration is reasonable
-            // 2. This is a very long prompt where partial delivery might be acceptable
-            const shouldRetry = transcriptIncomplete || audioDidNotFinish || 
-              (expectedTranscript && actualTranscript && actualTranscript.length < expectedTranscript.length * 0.9);
-            
-            if (shouldRetry) {
-              if (transcriptIncomplete) {
-                console.error(`⚠️ Transcript incomplete: expected ~${expectedTranscript?.length || 0} chars, got ${actualTranscript?.length || 0} chars`);
-                console.error(`   Expected: "${expectedTranscript?.substring(0, 80) || 'none'}..."`);
-                console.error(`   Got: "${actualTranscript?.substring(0, 80) || 'none'}..."`);
-              } else if (audioDidNotFinish) {
-                console.error(`⚠️ Audio did not finish: audioDoneReceived=${audioDoneReceived}`);
-              } else {
-                console.error(`⚠️ Response INCOMPLETE: transcript length mismatch (${actualTranscript?.length || 0} vs expected ${expectedTranscript?.length || 0})`);
-              }
-              
-              // Check retry count
-              const promptKey = currentPromptText || 'unknown';
-              const retryCount = promptRetryCount[promptKey] || 0;
-              
-              if (retryCount >= MAX_RETRIES_PER_PROMPT) {
-                console.error(`🚨 INCOMPLETE RESPONSE ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
-                transferToRealPerson();
-                currentPromptText = null;
-                expectedTranscript = null;
-                actualTranscript = null;
-                return;
-              }
-              
-              // Retry the prompt
-              promptRetryCount[promptKey] = retryCount + 1;
-              console.log(`🔄 Retrying prompt due to incomplete response (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
-              
-              // Reset state
+            if (retryCount >= MAX_RETRIES_PER_PROMPT) {
+              console.error(`🚨 INCOMPLETE RESPONSE ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
+              transferToRealPerson();
               responseInProgress = false;
               audioStreamingStarted = false;
-              totalAudioBytesSent = 0;
-              lastAudioDeltaTime = null;
-              audioDoneReceived = false;
+              currentPromptText = null;
+              expectedTranscript = null;
               actualTranscript = null;
-              playBuffer = Buffer.alloc(0);
-              
-              setTimeout(() => {
-                if (currentPromptText) {
-                  sendStatePrompt(currentPromptText);
-                } else {
-                  sendNextPromptIfNeeded();
-                }
-              }, 500);
               return;
             }
             
-            // Response is INCOMPLETE but transcript and audio seem complete
-            // This is a rare case - log it but don't retry to avoid infinite loops
-            console.log(`⚠️ Response INCOMPLETE but transcript/audio appear complete - proceeding cautiously`);
-            console.log(`   Audio: ${audioSeconds.toFixed(1)}s, transcript: ${actualTranscript?.length || 0} chars`);
+            console.log(`⚠️ Response INCOMPLETE (audio ${audioSeconds.toFixed(1)}s, transcript ${actualTranscript?.length || 0} chars) - retrying (${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
             
-            if (audioSeconds > 3) {
-              // User heard 3+ seconds - they probably got the gist
-              // Just wait for their response, don't interrupt with recovery
-              console.log(`⏸️ User heard ${audioSeconds.toFixed(1)}s of audio - waiting for response`);
-              // No recovery timer - just wait for user to respond naturally
-            } else {
-              // Short audio - use recovery timer (but NOT in confirmation/close)
-              console.log(`⏰ Only ${audioSeconds.toFixed(1)}s of audio sent - starting recovery timer`);
-              startSilenceRecoveryTimer();
-            }
+            promptRetryCount[promptKey] = retryCount + 1;
+            responseInProgress = false;
+            audioStreamingStarted = false;
+            totalAudioBytesSent = 0;
+            lastAudioDeltaTime = null;
+            audioDoneReceived = false;
+            actualTranscript = null;
+            playBuffer = Buffer.alloc(0);
+            
+            setTimeout(() => {
+              if (currentPromptText === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
+                sendGreeting();
+              } else if (currentPromptText) {
+                sendStatePrompt(currentPromptText);
+              } else {
+                sendNextPromptIfNeeded();
+              }
+            }, 500);
+            return;
           }
         } else {
           console.log(`✅ Response complete (state: ${currentState})`);
@@ -678,6 +628,9 @@ wss.on("connection", (twilioWs, req) => {
         console.log("🎤 User speaking...");
         speechStartTime = Date.now();
         longSpeechBackchannelSent = false;
+        
+        // Reset global silence - user spoke, we're not stuck
+        resetGlobalSilenceMonitor();
         
         // Clear any pending input - we'll get a fresh transcript
         pendingUserInput = null;
@@ -1037,8 +990,17 @@ Say the ENTIRE sentence above, word for word.`,
   // SEND GREETING
   // ============================================================================
   function sendGreeting() {
+    if (openaiWs?.readyState !== WebSocket.OPEN) return;
+    if (responseInProgress) {
+      console.log("⏳ Skipping greeting - response in progress");
+      return;
+    }
     console.log("👋 Sending greeting");
     greetingSent = true;
+    currentPromptText = GREETING.primary;
+    expectedTranscript = GREETING.primary;
+    responseInProgress = true;
+    clearAudioCompletionTimeout();
     
     openaiWs.send(JSON.stringify({
       type: "response.create",
@@ -1226,7 +1188,7 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
   
   function doProcessUserInput(transcript) {
     const currentState = stateMachine.getState();
-    const lowerTranscript = transcript.toLowerCase();
+    const lowerTranscript = transcript.toLowerCase().trim();
     const currentData = stateMachine.getData();
     
     console.log(`🔄 Processing input in state ${currentState}: "${transcript.substring(0, 50)}..."`);
@@ -1236,6 +1198,20 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
       console.log("🚨 Real person requested - stopping AI flow and transferring immediately");
       transferToRealPerson();
       return; // Stop processing - don't continue AI flow
+    }
+    
+    // "Hello?" / "Anybody there?" / "Repeat" - caller didn't hear us, retry last prompt
+    const shortUtterance = transcript.trim().length < 35;
+    const explicitRepeat = /\b(repeat|say that again|say again|come again|didn\'?t hear|can\'?t hear|anybody there|anyone there)\b/i.test(lowerTranscript);
+    const repeatRequest = (shortUtterance && /\b(hello\??|hey\??|hi\??)\b/i.test(lowerTranscript)) || explicitRepeat;
+    if (repeatRequest && currentPromptText && ![STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED].includes(currentState)) {
+      console.log(`🔄 User said "${transcript}" - repeating last prompt`);
+      if (currentPromptText === GREETING.primary && currentState === STATES.GREETING) {
+        sendGreeting();
+      } else if (currentPromptText) {
+        sendStatePrompt(currentPromptText);
+      }
+      return;
     }
     
     // Intent classification - only if intent is NOT already locked
