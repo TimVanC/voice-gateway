@@ -38,8 +38,8 @@ const twilioClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
   : null;
 
 // Voice configuration
-// Primary: ash (lower pitch), Fallback: shimmer
-const OPENAI_VOICE_PRIMARY = process.env.OPENAI_REALTIME_VOICE || "ash";
+// Primary: sage (deeper female voice), Fallback: shimmer
+const OPENAI_VOICE_PRIMARY = process.env.OPENAI_REALTIME_VOICE || "sage";
 const OPENAI_VOICE_FALLBACK = "shimmer";
 
 // Validate API key
@@ -146,6 +146,7 @@ wss.on("connection", (twilioWs, req) => {
   let lastAudioDeltaTime = null;  // Track when last audio delta arrived
   let audioCompletionTimeout = null;  // Timeout to detect if audio stops mid-sentence
   let expectedTranscript = null;  // Expected transcript for current prompt
+  let actualTranscript = null;  // Store actual transcript received from OpenAI
   let audioDoneReceived = false;  // Track if response.audio.done was received
   const TTS_FAILURE_TIMEOUT_MS = 8000;  // 8 seconds - if no audio for this long, consider it failed
   const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before transferring to human
@@ -387,6 +388,7 @@ wss.on("connection", (twilioWs, req) => {
         totalAudioBytesSent = 0;  // Reset for new response
         lastAudioDeltaTime = Date.now();  // Reset audio delta tracking
         audioDoneReceived = false;  // Reset audio done flag
+        actualTranscript = null;  // Reset transcript for new response
         
         // Cancel backchannel timer - real response is coming
         backchannel.cancel();
@@ -443,6 +445,7 @@ wss.on("connection", (twilioWs, req) => {
         
       case "response.audio_transcript.done":
         if (event.transcript) {
+          actualTranscript = event.transcript;  // Store transcript for completeness checking
           console.log(`📜 AI said: "${event.transcript}"`);
         }
         break;
@@ -479,6 +482,7 @@ wss.on("connection", (twilioWs, req) => {
           // Reset tracking
           currentPromptText = null;
           expectedTranscript = null;
+          actualTranscript = null;
         } else if (status === "incomplete") {
           console.log(`⚠️ Response INCOMPLETE`);
           
@@ -526,6 +530,59 @@ wss.on("connection", (twilioWs, req) => {
             // Audio was sent (user heard something)
             // Check if enough audio was sent that user probably understood
             const audioSeconds = totalAudioBytesSent / 8000;
+            
+            // CRITICAL: Even if we got long audio, check if the transcript matches expected prompt
+            // If transcript is missing or incomplete, the audio might have cut off mid-sentence
+            // Check if we have an expected transcript but the actual transcript is incomplete
+            if (expectedTranscript && actualTranscript) {
+              const expectedLength = expectedTranscript.length;
+              const actualLength = actualTranscript.length;
+              const lengthRatio = actualLength / expectedLength;
+              
+              // If transcript is much shorter than expected (less than 70% of expected length)
+              // or if it doesn't contain key phrases from the expected transcript
+              if (lengthRatio < 0.7 || !actualTranscript.toLowerCase().includes(expectedTranscript.toLowerCase().substring(0, 20))) {
+                console.error(`⚠️ Transcript incomplete: expected ~${expectedLength} chars, got ${actualLength} chars (${(lengthRatio * 100).toFixed(0)}%)`);
+                console.error(`   Expected: "${expectedTranscript.substring(0, 80)}..."`);
+                console.error(`   Got: "${actualTranscript.substring(0, 80)}..."`);
+                
+                // Check retry count
+                const promptKey = currentPromptText || 'unknown';
+                const retryCount = promptRetryCount[promptKey] || 0;
+                
+                if (retryCount >= MAX_RETRIES_PER_PROMPT) {
+                  console.error(`🚨 TRANSCRIPT INCOMPLETE ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
+                  transferToRealPerson();
+                  currentPromptText = null;
+                  expectedTranscript = null;
+                  actualTranscript = null;
+                  return;
+                }
+                
+                // Retry the prompt
+                promptRetryCount[promptKey] = retryCount + 1;
+                console.log(`🔄 Retrying prompt due to incomplete transcript (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
+                
+                // Reset state
+                responseInProgress = false;
+                audioStreamingStarted = false;
+                totalAudioBytesSent = 0;
+                lastAudioDeltaTime = null;
+                audioDoneReceived = false;
+                actualTranscript = null;
+                playBuffer = Buffer.alloc(0);
+                
+                setTimeout(() => {
+                  if (currentPromptText) {
+                    sendStatePrompt(currentPromptText);
+                  } else {
+                    sendNextPromptIfNeeded();
+                  }
+                }, 500);
+                return;
+              }
+            }
+            
             if (audioSeconds > 3) {
               // User heard 3+ seconds - they probably got the gist
               // Just wait for their response, don't interrupt with recovery
@@ -547,6 +604,7 @@ wss.on("connection", (twilioWs, req) => {
             delete promptRetryCount[promptKey];  // Clear retry count for this prompt
             currentPromptText = null;
             expectedTranscript = null;
+            actualTranscript = null;
           }
           
           // If confirmation prompt was delivered and completed, mark it
@@ -1027,10 +1085,9 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
       responseInProgress = false;
     }
     
-    // Small delay to ensure cancel is processed
-    setTimeout(() => {
-      doProcessUserInput(transcript);
-    }, 50);
+    // Process immediately - no delay needed for name collection
+    // The state machine will handle the transition and send the next prompt
+    doProcessUserInput(transcript);
   }
   
   // Update state machine without sending a new response
