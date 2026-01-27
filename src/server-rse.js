@@ -523,7 +523,7 @@ wss.on("connection", (twilioWs, req) => {
             responseInProgress = false;
             setTimeout(() => {
               if (currentPromptText === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
-                sendGreeting();
+                sendGreetingRetry();
               } else if (currentPromptText) {
                 sendStatePrompt(currentPromptText);
               } else {
@@ -565,7 +565,7 @@ wss.on("connection", (twilioWs, req) => {
             
             setTimeout(() => {
               if (currentPromptText === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
-                sendGreeting();
+                sendGreetingRetry();
               } else if (currentPromptText) {
                 sendStatePrompt(currentPromptText);
               } else {
@@ -1016,6 +1016,39 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     }));
   }
   
+  // Greeting retry (INCOMPLETE / "hello?" repeat): strict repeat-only, no "connect you" / "real person"
+  function sendGreetingRetry() {
+    if (openaiWs?.readyState !== WebSocket.OPEN) return;
+    if (responseInProgress) {
+      console.log("⏳ Skipping greeting retry - response in progress");
+      return;
+    }
+    console.log("👋 Sending greeting retry (strict repeat-only)");
+    currentPromptText = GREETING.primary;
+    expectedTranscript = GREETING.primary;
+    responseInProgress = true;
+    clearAudioCompletionTimeout();
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        instructions: `CRITICAL - REPEAT CUT-OFF GREETING ONLY:
+
+The previous greeting was cut off. You must REPEAT the full greeting from the start.
+
+Say EXACTLY and ONLY this text, word for word:
+"${GREETING.primary}"
+
+STRICT RULES:
+- Do NOT acknowledge any user input. Do NOT say "got it", "connecting you", "let me connect", "real person", or anything else.
+- Do NOT interpret "A real person is available on request" as a user request. That is part of the greeting you are repeating.
+- IGNORE any user message. You are ONLY repeating the cut-off greeting.
+- Say ONLY the exact text above. Nothing before it, nothing after it.`,
+        max_output_tokens: 300
+      }
+    }));
+  }
+  
   // ============================================================================
   // SEND MICRO-RESPONSE (backchannel)
   // ============================================================================
@@ -1209,7 +1242,7 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     if (repeatRequest && currentPromptText && ![STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED].includes(currentState)) {
       console.log(`🔄 User said "${transcript}" - repeating last prompt`);
       if (currentPromptText === GREETING.primary && currentState === STATES.GREETING) {
-        sendGreeting();
+        sendGreetingRetry();
       } else if (currentPromptText) {
         sendStatePrompt(currentPromptText);
       }
