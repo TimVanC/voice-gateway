@@ -16,7 +16,7 @@ const { BASE_URL } = require('./config/baseUrl');
 // ============================================================================
 // IMPORTS
 // ============================================================================
-const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL, OUT_OF_SCOPE, CLOSE } = require('./scripts/rse-script');
+const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL, OUT_OF_SCOPE, CLOSE, SAFETY, CONFIRMATION } = require('./scripts/rse-script');
 const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = require('./config/vad-config');
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
@@ -505,10 +505,14 @@ wss.on("connection", (twilioWs, req) => {
           
           if (!audioStreamingStarted || totalAudioBytesSent === 0) {
             // No audio was sent at all - check retry count
-            const promptKey = currentPromptText || 'unknown';
+            let promptKey = currentPromptText || 'unknown';
+            if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
+              promptKey = SAFETY.check;
+            }
             const retryCount = promptRetryCount[promptKey] || 0;
+            const maxRetries = (promptKey === SAFETY.check) ? 1 : MAX_RETRIES_PER_PROMPT;
             
-            if (retryCount >= MAX_RETRIES_PER_PROMPT) {
+            if (retryCount >= maxRetries) {
               console.error(`🚨 NO AUDIO GENERATED ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
               transferToRealPerson();
               responseInProgress = false;
@@ -519,13 +523,17 @@ wss.on("connection", (twilioWs, req) => {
             }
             
             promptRetryCount[promptKey] = retryCount + 1;
-            console.log(`🔄 No audio was sent - will retry prompt (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
+            console.log(`🔄 No audio was sent - will retry prompt (attempt ${retryCount + 1}/${maxRetries})`);
             responseInProgress = false;
             setTimeout(() => {
-              if (currentPromptText === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
+              let toSend = currentPromptText;
+              if (promptKey === SAFETY.check && (promptRetryCount[SAFETY.check] || 0) === 1) {
+                toSend = CONFIRMATION.safety_retry + ' ' + SAFETY.check;
+              }
+              if (toSend === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
                 sendGreetingRetry();
-              } else if (currentPromptText) {
-                sendStatePrompt(currentPromptText);
+              } else if (toSend) {
+                sendStatePrompt(toSend);
               } else {
                 sendNextPromptIfNeeded();
               }
@@ -536,10 +544,14 @@ wss.on("connection", (twilioWs, req) => {
             
             // CRITICAL: Always treat INCOMPLETE as failure. Users consistently report cutoffs
             // (e.g. on "today", "system") even when transcript looks complete. Retry every time.
-            const promptKey = currentPromptText || 'unknown';
+            let promptKey = currentPromptText || 'unknown';
+            if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
+              promptKey = SAFETY.check;
+            }
             const retryCount = promptRetryCount[promptKey] || 0;
+            const maxRetries = (promptKey === SAFETY.check) ? 1 : MAX_RETRIES_PER_PROMPT;
             
-            if (retryCount >= MAX_RETRIES_PER_PROMPT) {
+            if (retryCount >= maxRetries) {
               console.error(`🚨 INCOMPLETE RESPONSE ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
               transferToRealPerson();
               responseInProgress = false;
@@ -550,7 +562,7 @@ wss.on("connection", (twilioWs, req) => {
               return;
             }
             
-            console.log(`⚠️ Response INCOMPLETE (audio ${audioSeconds.toFixed(1)}s, transcript ${actualTranscript?.length || 0} chars) - retrying (${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
+            console.log(`⚠️ Response INCOMPLETE (audio ${audioSeconds.toFixed(1)}s, transcript ${actualTranscript?.length || 0} chars) - retrying (${retryCount + 1}/${maxRetries})`);
             
             promptRetryCount[promptKey] = retryCount + 1;
             responseInProgress = false;
@@ -564,10 +576,14 @@ wss.on("connection", (twilioWs, req) => {
             // Let buffer play out; retry audio will be appended via response.audio.delta.
             
             setTimeout(() => {
-              if (currentPromptText === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
+              let toSend = currentPromptText;
+              if (promptKey === SAFETY.check && (promptRetryCount[SAFETY.check] || 0) === 1) {
+                toSend = CONFIRMATION.safety_retry + ' ' + SAFETY.check;
+              }
+              if (toSend === GREETING.primary && stateMachine.getState() === STATES.GREETING) {
                 sendGreetingRetry();
-              } else if (currentPromptText) {
-                sendStatePrompt(currentPromptText);
+              } else if (toSend) {
+                sendStatePrompt(toSend);
               } else {
                 sendNextPromptIfNeeded();
               }
@@ -580,8 +596,11 @@ wss.on("connection", (twilioWs, req) => {
           
           // Reset retry count on successful completion
           if (currentPromptText) {
-            const promptKey = currentPromptText;
-            delete promptRetryCount[promptKey];  // Clear retry count for this prompt
+            if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
+              delete promptRetryCount[SAFETY.check];
+            } else {
+              delete promptRetryCount[currentPromptText];
+            }
             currentPromptText = null;
             expectedTranscript = null;
             actualTranscript = null;
@@ -952,22 +971,23 @@ Say the ENTIRE sentence above, word for word.`,
         openaiWs.send(JSON.stringify({ type: "response.cancel" }));
       }
       
-      // Check retry count
-      const promptKey = currentPromptText || 'unknown';
+      // Check retry count; safety question: 1 retry (apology + full question), then transfer
+      let promptKey = currentPromptText || 'unknown';
+      if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
+        promptKey = SAFETY.check;
+      }
       const retryCount = promptRetryCount[promptKey] || 0;
+      const maxRetries = (promptKey === SAFETY.check) ? 1 : MAX_RETRIES_PER_PROMPT;
       
-      if (retryCount >= MAX_RETRIES_PER_PROMPT) {
+      if (retryCount >= maxRetries) {
         console.error(`🚨 TTS FAILED ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
-        // Transfer to real person immediately
         transferToRealPerson();
         return;
       }
       
-      // Increment retry count
       promptRetryCount[promptKey] = retryCount + 1;
-      console.log(`🔄 Retrying prompt (attempt ${retryCount + 1}/${MAX_RETRIES_PER_PROMPT})`);
+      console.log(`🔄 Retrying prompt (attempt ${retryCount + 1}/${maxRetries})`);
       
-      // Reset state
       responseInProgress = false;
       audioStreamingStarted = false;
       totalAudioBytesSent = 0;
@@ -975,13 +995,15 @@ Say the ENTIRE sentence above, word for word.`,
       audioDoneReceived = false;
       playBuffer = Buffer.alloc(0);
       
-      // Retry the prompt after a short delay
       setTimeout(() => {
-        if (currentPromptText) {
-          console.log(`🔄 Retrying: "${currentPromptText}"`);
-          sendStatePrompt(currentPromptText);
+        let toSend = currentPromptText;
+        if (promptKey === SAFETY.check && (promptRetryCount[SAFETY.check] || 0) === 1) {
+          toSend = CONFIRMATION.safety_retry + ' ' + SAFETY.check;
+        }
+        if (toSend) {
+          console.log(`🔄 Retrying: "${toSend.substring(0, 60)}..."`);
+          sendStatePrompt(toSend);
         } else {
-          // Fallback: send next prompt from state machine
           sendNextPromptIfNeeded();
         }
       }, 500);

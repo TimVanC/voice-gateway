@@ -129,7 +129,15 @@ const AVAILABILITY = {
 const CONFIRMATION = {
   intro: "Let me read that back.",
   verify: "Is all of that correct?",
-  correction_reread: "I've updated that. Let me read that back again."
+  correction_reread: "I've updated that. Let me read that back again.",
+  // Immediate confirmation (right after answer, when confidence < threshold). Recap never uses these.
+  immediate_name: "Did I get your last name right.",  // Append: " {lastNameSpelled}." e.g. "V A N C A U W E N B E R G E."
+  immediate_address_street: "Did you say the street name was",  // Append: " {spelled} {type}?" e.g. "E L F road."
+  immediate_address_town: "Did you say the town was",           // Append: " {spelled}?" e.g. "M A D I S O N."
+  immediate_phone: "I have",   // Append: " {phone}. Is that right?"
+  immediate_email: "I have",   // Append: " {email}. Is that right?"
+  // Emergency retry (safety question cut off)
+  safety_retry: "Sorry, that may have cut out."
 };
 
 // ============================================================================
