@@ -542,8 +542,56 @@ wss.on("connection", (twilioWs, req) => {
             // Audio was sent (user heard something)
             const audioSeconds = totalAudioBytesSent / 8000;
             
-            // CRITICAL: Always treat INCOMPLETE as failure. Users consistently report cutoffs
-            // (e.g. on "today", "system") even when transcript looks complete. Retry every time.
+            // Check if transcript is actually complete despite INCOMPLETE status
+            const transcriptComplete = actualTranscript && actualTranscript.trim().length > 0;
+            const hasExpectedTranscript = expectedTranscript && expectedTranscript.trim().length > 0;
+            const transcriptMatches = transcriptComplete && hasExpectedTranscript && 
+              actualTranscript.trim().toLowerCase() === expectedTranscript.trim().toLowerCase();
+            const substantialAudio = audioSeconds >= 5; // At least 5 seconds of audio
+            
+            // If transcript is complete and matches expected, or we got substantial audio with complete transcript,
+            // treat as successful even if status is INCOMPLETE (OpenAI sometimes marks complete responses as incomplete)
+            if (transcriptComplete && (transcriptMatches || substantialAudio)) {
+              console.log(`✅ Response marked INCOMPLETE but transcript is complete (${actualTranscript.length} chars, ${audioSeconds.toFixed(1)}s audio) - treating as success`);
+              
+              // Reset retry count on successful completion
+              if (currentPromptText) {
+                let promptKey = currentPromptText;
+                if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
+                  promptKey = SAFETY.check;
+                  delete promptRetryCount[SAFETY.check];
+                } else {
+                  delete promptRetryCount[currentPromptText];
+                }
+                currentPromptText = null;
+                expectedTranscript = null;
+                actualTranscript = null;
+              }
+              
+              responseInProgress = false;
+              audioStreamingStarted = false;
+              
+              // Mark confirmation if in confirmation state
+              if (currentState === STATES.CONFIRMATION) {
+                const callData = stateMachine.getData();
+                callData._confirmationDelivered = true;
+              }
+              
+              // Reset dynamic silence to default after turn completes
+              currentSilenceDuration = VAD_CONFIG.silence_default;
+              
+              // Process any pending input that arrived while response was in progress
+              if (pendingUserInput) {
+                console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
+                const input = pendingUserInput;
+                pendingUserInput = null;
+                processUserInput(input);
+              }
+              
+              return; // Success - don't retry
+            }
+            
+            // Transcript is actually incomplete or missing - retry
             let promptKey = currentPromptText || 'unknown';
             if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
               promptKey = SAFETY.check;
