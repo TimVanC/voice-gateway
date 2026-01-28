@@ -335,10 +335,10 @@ wss.on("connection", (twilioWs, req) => {
         console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()})`);
         
         if (elapsed > 20000) {
-          // CRITICAL: Do NOT trigger recovery during CONFIRMATION or CLOSE states
-          // The user needs time to listen to the full recap (can be 30+ seconds)
+          // CRITICAL: Do NOT trigger recovery during CONFIRMATION, CLOSE, SAFETY_CHECK, or ENDED states
+          // The user needs time to listen to prompts and respond
           const state = stateMachine.getState();
-          if (state === STATES.CONFIRMATION || state === STATES.CLOSE || state === STATES.ENDED) {
+          if (state === STATES.CONFIRMATION || state === STATES.CLOSE || state === STATES.ENDED || state === STATES.SAFETY_CHECK) {
             console.log(`⏸️ Keep-alive: Waiting patiently in ${state} state (${elapsed}ms)`);
           } else {
             console.error(`⚠️ No OpenAI activity for ${elapsed}ms!`);
@@ -568,11 +568,18 @@ wss.on("connection", (twilioWs, req) => {
             
             // If transcript is complete and matches expected, or we got substantial audio with complete transcript,
             // treat as successful even if status is INCOMPLETE (OpenAI sometimes marks complete responses as incomplete)
-            if (transcriptComplete && (transcriptMatches || substantialAudio)) {
+            // BUT: If audioDoneReceived is false, the audio stream was cut off before completion - retry
+            // Also check if audio is significantly shorter than expected for the transcript length
+            const expectedAudioLength = actualTranscript ? actualTranscript.length * 0.1 : 0; // Rough estimate: ~100ms per character
+            const audioTooShort = expectedAudioLength > 0 && audioSeconds < expectedAudioLength * 0.6; // Less than 60% of expected
+            const audioWasCutOff = !audioDoneReceived && audioStreamingStarted; // Audio started but never got audio.done
+            
+            if (transcriptComplete && (transcriptMatches || substantialAudio) && !audioTooShort && !audioWasCutOff) {
               const bufferSeconds = playBuffer.length / 8000;
               console.log(`✅ Response marked INCOMPLETE but transcript is complete (${actualTranscript.length} chars, ${audioSeconds.toFixed(1)}s audio, ${bufferSeconds.toFixed(1)}s in buffer) - treating as success`);
               
               // Reset retry count on successful completion
+              // BUT keep currentPromptText for repeat detection (e.g., "Hello?" after greeting cuts off)
               if (currentPromptText) {
                 let promptKey = currentPromptText;
                 if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
@@ -581,7 +588,8 @@ wss.on("connection", (twilioWs, req) => {
                 } else {
                   delete promptRetryCount[currentPromptText];
                 }
-                currentPromptText = null;
+                // Don't clear currentPromptText - keep it for repeat detection
+                // It will be cleared when we move to next state or get new prompt
                 expectedTranscript = null;
                 actualTranscript = null;
               }
@@ -627,6 +635,13 @@ wss.on("connection", (twilioWs, req) => {
               }
               
               return; // Success - don't retry
+            }
+            
+            // If audio was cut off or too short, log and retry
+            if (audioWasCutOff) {
+              console.log(`⚠️ Audio stream cut off (audio.done never received) - will retry`);
+            } else if (transcriptComplete && audioTooShort) {
+              console.log(`⚠️ Audio too short for transcript (${audioSeconds.toFixed(1)}s vs expected ~${expectedAudioLength.toFixed(1)}s) - likely cut off mid-sentence, will retry`);
             }
             
             // Transcript is actually incomplete or missing - retry
@@ -1347,14 +1362,19 @@ STRICT RULES:
     const shortUtterance = transcript.trim().length < 35;
     const explicitRepeat = /\b(repeat|say that again|say again|come again|didn\'?t hear|can\'?t hear|anybody there|anyone there)\b/i.test(lowerTranscript);
     const repeatRequest = (shortUtterance && /\b(hello\??|hey\??|hi\??)\b/i.test(lowerTranscript)) || explicitRepeat;
-    if (repeatRequest && currentPromptText && ![STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED].includes(currentState)) {
-      console.log(`🔄 User said "${transcript}" - repeating last prompt`);
-      if (currentPromptText === GREETING.primary && currentState === STATES.GREETING) {
-        sendGreetingRetry();
-      } else if (currentPromptText) {
-        sendStatePrompt(currentPromptText);
+    
+    // Check for repeat request - use currentPromptText if available, otherwise get prompt from state machine
+    if (repeatRequest && ![STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED].includes(currentState)) {
+      const promptToRepeat = currentPromptText || stateMachine.getNextPrompt();
+      if (promptToRepeat) {
+        console.log(`🔄 User said "${transcript}" - repeating last prompt`);
+        if (promptToRepeat === GREETING.primary && currentState === STATES.GREETING) {
+          sendGreetingRetry();
+        } else {
+          sendStatePrompt(promptToRepeat);
+        }
+        return;
       }
-      return;
     }
     
     // Intent classification - only if intent is NOT already locked
