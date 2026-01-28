@@ -186,7 +186,7 @@ wss.on("connection", (twilioWs, req) => {
   // Global silence monitor - never leave caller in silence
   let globalSilenceMonitor = null;
   let lastAudioPlaybackTime = Date.now();
-  const GLOBAL_SILENCE_TIMEOUT_MS = 15000;  // 15 seconds of total silence = transfer
+  const GLOBAL_SILENCE_TIMEOUT_MS = 45000;  // 45 seconds of total silence before considering stuck
   
   // ============================================================================
   // AUDIO PACING - Send audio to Twilio at correct rate
@@ -334,16 +334,17 @@ wss.on("connection", (twilioWs, req) => {
         const elapsed = Date.now() - lastActivityTime;
         console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()})`);
         
-        if (elapsed > 20000) {
-          // CRITICAL: Do NOT trigger recovery during CONFIRMATION, CLOSE, SAFETY_CHECK, or ENDED states
+        if (elapsed > 30000) {
+          // CRITICAL: Do NOT trigger recovery during critical states
           // The user needs time to listen to prompts and respond
           const state = stateMachine.getState();
-          if (state === STATES.CONFIRMATION || state === STATES.CLOSE || state === STATES.ENDED || state === STATES.SAFETY_CHECK) {
+          if (state === STATES.CONFIRMATION || state === STATES.CLOSE || state === STATES.ENDED || 
+              state === STATES.SAFETY_CHECK || state === STATES.GREETING || state === STATES.INTENT) {
             console.log(`⏸️ Keep-alive: Waiting patiently in ${state} state (${elapsed}ms)`);
           } else {
-            console.error(`⚠️ No OpenAI activity for ${elapsed}ms!`);
+            console.log(`⚠️ No OpenAI activity for ${elapsed}ms in ${state} state`);
             // If we've been waiting too long and no response is in progress, send recovery prompt
-            if (!responseInProgress && elapsed > 20000) {
+            if (!responseInProgress && elapsed > 30000) {
               console.log(`🔄 Recovery: System went nonverbal, sending next prompt`);
               sendNextPromptIfNeeded();
             }
@@ -763,24 +764,38 @@ wss.on("connection", (twilioWs, req) => {
         // Reset acknowledgement tracking for new user turn
         backchannel.resetTurn();
         
-        // AGGRESSIVE BARGE-IN: Immediately stop assistant audio and cancel OpenAI response
+        // BARGE-IN: Stop assistant audio when user speaks
+        // BUT: During greeting/safety_check, let the prompt finish - don't cut it off
+        const currentStateForBargeIn = stateMachine.getState();
+        const isProtectedPrompt = currentStateForBargeIn === STATES.GREETING || 
+                                   currentStateForBargeIn === STATES.SAFETY_CHECK ||
+                                   currentStateForBargeIn === STATES.INTENT;
+        
         if (playBuffer.length > 0 || responseInProgress) {
-          console.log("🛑 Barge-in: stopping assistant audio");
-          playBuffer = Buffer.alloc(0);  // Clear audio buffer immediately
-          responseInProgress = false;
-          audioStreamingStarted = false;
-          
-          // CRITICAL: Also cancel OpenAI's response generation if it's in progress
-          // This prevents OpenAI from continuing to generate audio after user interrupts
-          if (openaiWs?.readyState === WebSocket.OPEN && currentResponseId) {
-            try {
-              openaiWs.send(JSON.stringify({
-                type: "response.cancel",
-                response_id: currentResponseId
-              }));
-              console.log(`🛑 Cancelled OpenAI response: ${currentResponseId}`);
-            } catch (err) {
-              // Ignore cancellation errors (response might already be done)
+          if (isProtectedPrompt && playBuffer.length > 1600) {
+            // During greeting/safety/intent: DON'T clear buffer if substantial audio remains
+            // Let the prompt finish playing - user will hear it, then we process their input
+            console.log(`⏸️ User speaking during ${currentStateForBargeIn} - letting ${(playBuffer.length/8000).toFixed(1)}s of audio finish`);
+            // Don't clear buffer, don't cancel response - let audio finish
+            // Their input will be processed after
+          } else {
+            // Normal barge-in for other states or if buffer is nearly empty
+            console.log("🛑 Barge-in: stopping assistant audio");
+            playBuffer = Buffer.alloc(0);  // Clear audio buffer immediately
+            responseInProgress = false;
+            audioStreamingStarted = false;
+            
+            // CRITICAL: Also cancel OpenAI's response generation if it's in progress
+            if (openaiWs?.readyState === WebSocket.OPEN && currentResponseId) {
+              try {
+                openaiWs.send(JSON.stringify({
+                  type: "response.cancel",
+                  response_id: currentResponseId
+                }));
+                console.log(`🛑 Cancelled OpenAI response: ${currentResponseId}`);
+              } catch (err) {
+                // Ignore cancellation errors (response might already be done)
+              }
             }
           }
         }
@@ -992,21 +1007,26 @@ Say the ENTIRE sentence above, word for word.`,
       const isUserSpeaking = speechStartTime !== null;
       const currentState = stateMachine.getState();
       
-      // Don't trigger during confirmation/close/safety_check (user needs time to listen)
-      if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE || currentState === STATES.ENDED || currentState === STATES.SAFETY_CHECK) {
+      // Don't trigger during critical states (user needs time to listen and respond)
+      if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE || currentState === STATES.ENDED || 
+          currentState === STATES.SAFETY_CHECK || currentState === STATES.GREETING || currentState === STATES.INTENT) {
         return;
       }
       
       // If we've been silent too long and no audio is playing and user isn't speaking
       if (timeSinceLastAudio >= GLOBAL_SILENCE_TIMEOUT_MS && !hasAudioInBuffer && !isUserSpeaking && !responseInProgress) {
-        console.error(`🚨 GLOBAL SILENCE DETECTED: ${(timeSinceLastAudio / 1000).toFixed(1)}s since last audio`);
-        console.error(`   System appears stuck - transferring to real person`);
+        console.log(`⚠️ GLOBAL SILENCE DETECTED: ${(timeSinceLastAudio / 1000).toFixed(1)}s since last audio`);
+        console.log(`   Re-prompting user instead of transferring`);
         
-        // Stop monitoring
-        stopGlobalSilenceMonitor();
+        // Reset the timer
+        resetGlobalSilenceMonitor();
         
-        // Transfer to real person
-        transferToRealPerson();
+        // Re-prompt the user instead of transferring
+        const prompt = stateMachine.getNextPrompt();
+        if (prompt && openaiWs?.readyState === WebSocket.OPEN) {
+          // Send a gentle "are you still there?" followed by the prompt
+          sendStatePrompt("Are you still there? " + prompt);
+        }
       } else if (timeSinceLastAudio >= GLOBAL_SILENCE_TIMEOUT_MS && !hasAudioInBuffer && !isUserSpeaking && responseInProgress) {
         // Response in progress but no audio - likely TTS failure
         console.error(`🚨 RESPONSE IN PROGRESS BUT NO AUDIO: ${(timeSinceLastAudio / 1000).toFixed(1)}s since last audio`);
