@@ -1131,19 +1131,53 @@ function createCallStateMachine() {
             clearPendingClarification();
             return { nextState: transitionTo(STATES.AVAILABILITY), prompt: AVAILABILITY.ask, action: 'ask' };
           }
-          const ap = extractAddress(transcript);
-          if (ap.address || ap.city) {
-            data.address = ap.address || pendingClarification.value.address;
-            data.city = ap.city || pendingClarification.value.city;
-            data.state = ap.state || pendingClarification.value.state;
-            data.zip = ap.zip || pendingClarification.value.zip;
-            data.address_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
+          
+          // User provided a correction - extract what they said
+          // Handle patterns like "No, no, it is Sherman" or "No, it's Sherman" or "Sherman"
+          let correctedValue = transcript
+            .replace(/^(no[,.]?\s*)+(it\s+is|it's|that's|that\s+is)?\s*/gi, '')
+            .trim();
+          
+          // If user gave a simple correction (single word or short phrase), it's likely the street name
+          // Apply it to the pending address
+          const pendingAddr = pendingClarification.value;
+          if (correctedValue && correctedValue.length > 1 && correctedValue.length < 30) {
+            // Check if this looks like a street name correction (no numbers, no common city words)
+            const looksLikeStreetName = /^[a-zA-Z\s]+$/.test(correctedValue) && 
+              !/\b(street|st|road|rd|avenue|ave|drive|dr|boulevard|blvd|lane|ln)\b/i.test(correctedValue);
+            
+            if (looksLikeStreetName && pendingAddr.address) {
+              // Replace the street name in the address while keeping number and type
+              const streetMatch = pendingAddr.address.match(/^(\d+\s+)?(.*?)\s*(street|st|road|rd|avenue|ave|drive|dr|boulevard|blvd|lane|ln|way|court|ct|circle|cir|place|pl)?$/i);
+              if (streetMatch) {
+                const number = streetMatch[1] || '';
+                const type = streetMatch[3] || '';
+                data.address = `${number}${correctedValue}${type ? ' ' + type : ''}`.trim();
+                console.log(`📋 Street name corrected: "${correctedValue}" → address: "${data.address}"`);
+              } else {
+                data.address = correctedValue;
+              }
+            } else {
+              // Try full address extraction
+              const ap = extractAddress(transcript);
+              data.address = ap.address || pendingAddr.address;
+              data.city = ap.city || pendingAddr.city;
+            }
           } else {
-            data.address = pendingClarification.value.address;
-            data.city = pendingClarification.value.city;
-            data.state = pendingClarification.value.state;
-            data.zip = pendingClarification.value.zip;
+            // Try full address extraction for longer responses
+            const ap = extractAddress(transcript);
+            if (ap.address && ap.address.length > 3 && !/^no[,.]?\s/i.test(ap.address)) {
+              data.address = ap.address;
+              data.city = ap.city || pendingAddr.city;
+            } else {
+              data.address = pendingAddr.address;
+              data.city = pendingAddr.city;
+            }
           }
+          
+          data.state = pendingAddr.state;
+          data.zip = pendingAddr.zip;
+          data.address_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
           data._addressComplete = true;
           clearPendingClarification();
           return { nextState: transitionTo(STATES.AVAILABILITY), prompt: AVAILABILITY.ask, action: 'ask' };
@@ -2459,8 +2493,9 @@ function createCallStateMachine() {
   
   function extractAvailability(text) {
     // Clean up and normalize availability
+    // CRITICAL: Match "weekdays" before "weekday" to avoid leaving "s" behind
     return text
-      .replace(/^(i'm available|i can do|works for me|best for me is|a\s+weekday|weekday)\s*/gi, '')
+      .replace(/^(i'm available|i can do|works for me|best for me is|a\s+weekdays?|weekdays?)\s*/gi, '')
       .trim();
   }
   
