@@ -465,6 +465,27 @@ wss.on("connection", (twilioWs, req) => {
         if (event.transcript) {
           actualTranscript = event.transcript;  // Store transcript for completeness checking
           console.log(`📜 AI said: "${event.transcript}"`);
+          
+          // CRITICAL: Check for off-script hallucination
+          // If we have an expected transcript, check if actual is wildly different
+          if (expectedTranscript && actualTranscript) {
+            const expected = expectedTranscript.toLowerCase();
+            const actual = actualTranscript.toLowerCase();
+            // Check if the actual transcript contains key words from expected
+            const expectedWords = expected.split(/\s+/).filter(w => w.length > 3);
+            const matchingWords = expectedWords.filter(w => actual.includes(w));
+            const matchRatio = expectedWords.length > 0 ? matchingWords.length / expectedWords.length : 1;
+            
+            if (matchRatio < 0.3 && actualTranscript.length > 20) {
+              // Less than 30% match on key words - likely hallucination
+              console.error(`🚨 POTENTIAL HALLUCINATION DETECTED!`);
+              console.error(`   Expected: "${expectedTranscript.substring(0, 80)}..."`);
+              console.error(`   Got: "${actualTranscript.substring(0, 80)}..."`);
+              console.error(`   Match ratio: ${(matchRatio * 100).toFixed(0)}%`);
+            }
+          }
+        } else {
+          console.log(`⚠️ No transcript in audio_transcript.done event`);
         }
         break;
         
@@ -693,6 +714,12 @@ wss.on("connection", (twilioWs, req) => {
             return;
           }
         } else {
+          // Log what was said (or warn if no transcript)
+          if (!actualTranscript && totalAudioBytesSent > 0) {
+            const audioSeconds = totalAudioBytesSent / 8000;
+            console.error(`⚠️ Response complete but NO TRANSCRIPT received! (${audioSeconds.toFixed(1)}s of audio played)`);
+            console.error(`   Expected: "${expectedTranscript || 'unknown'}"`);
+          }
           console.log(`✅ Response complete (state: ${currentState})`);
           assistantTurnCount++;  // Track for filler spacing
           

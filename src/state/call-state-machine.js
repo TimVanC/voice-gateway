@@ -52,6 +52,7 @@ const {
 function createCallStateMachine() {
   // Current state
   let currentState = STATES.GREETING;
+  let previousState = null;  // Track previous state for backtracking
   
   // Collected caller data - REQUIRED FIELDS
   const data = {
@@ -472,6 +473,10 @@ function createCallStateMachine() {
    */
   function transitionTo(newState) {
     const oldState = currentState;
+    // Track previous state for backtracking (but don't track same state or greeting)
+    if (oldState !== newState && oldState !== STATES.GREETING) {
+      previousState = oldState;
+    }
     currentState = newState;
     console.log(`📍 State: ${oldState} → ${newState}`);
     
@@ -1587,7 +1592,52 @@ function createCallStateMachine() {
    * Handle a backtrack request - explain what was asked and where we are
    */
   function handleBacktrackRequest(transcript) {
-    // Explain the previous question based on current state
+    // Check if user is asking for "the question before that" (wants to go back)
+    const wantsToGoBack = /before that|previous|go back|last question|other question/i.test(transcript);
+    
+    if (wantsToGoBack && previousState) {
+      console.log(`📋 Going back to previous state: ${previousState}`);
+      // Actually go back to the previous state
+      const targetState = previousState;
+      previousState = null; // Clear so we don't keep going back
+      currentState = targetState;
+      
+      // Get the prompt for that state
+      let prompt = '';
+      switch (targetState) {
+        case STATES.SAFETY_CHECK:
+          prompt = SAFETY.check;
+          break;
+        case STATES.NAME:
+          prompt = CALLER_INFO.name;
+          break;
+        case STATES.PHONE:
+          prompt = CALLER_INFO.phone;
+          break;
+        case STATES.EMAIL:
+          prompt = CALLER_INFO.email;
+          break;
+        case STATES.DETAILS_BRANCH:
+          prompt = "Can you tell me more about the issue?";
+          break;
+        case STATES.ADDRESS:
+          prompt = ADDRESS.ask;
+          break;
+        case STATES.AVAILABILITY:
+          prompt = AVAILABILITY.ask;
+          break;
+        default:
+          prompt = "How can I help you?";
+      }
+      
+      return {
+        nextState: targetState,
+        prompt: prompt,
+        action: 'ask'
+      };
+    }
+    
+    // Just repeat the current question
     let explanation = '';
     switch (currentState) {
       case STATES.NAME:
