@@ -234,6 +234,23 @@ wss.on("connection", (twilioWs, req) => {
         if (frame[0] !== 0xFF || frame.some(b => b !== 0xFF)) {
           lastAudioPlaybackTime = Date.now();
         }
+        
+        // If buffer just emptied and we're waiting for it to finish (audioDoneReceived=true but responseInProgress=true),
+        // reset responseInProgress now that all audio has been sent
+        if (playBuffer.length === 0 && audioDoneReceived && responseInProgress) {
+          console.log(`✅ Audio buffer emptied - resetting responseInProgress`);
+          responseInProgress = false;
+          audioStreamingStarted = false;
+          
+          // Process any pending input that was queued
+          if (pendingUserInput) {
+            console.log(`📤 Processing queued input after buffer emptied: "${pendingUserInput.substring(0, 50)}..."`);
+            const input = pendingUserInput;
+            pendingUserInput = null;
+            // Use setTimeout to avoid processing during pumpFrames interval
+            setTimeout(() => processUserInput(input), 0);
+          }
+        }
       } catch (err) {
         console.error("❌ Error sending audio frame to Twilio:", err.message);
       }
@@ -552,7 +569,8 @@ wss.on("connection", (twilioWs, req) => {
             // If transcript is complete and matches expected, or we got substantial audio with complete transcript,
             // treat as successful even if status is INCOMPLETE (OpenAI sometimes marks complete responses as incomplete)
             if (transcriptComplete && (transcriptMatches || substantialAudio)) {
-              console.log(`✅ Response marked INCOMPLETE but transcript is complete (${actualTranscript.length} chars, ${audioSeconds.toFixed(1)}s audio) - treating as success`);
+              const bufferSeconds = playBuffer.length / 8000;
+              console.log(`✅ Response marked INCOMPLETE but transcript is complete (${actualTranscript.length} chars, ${audioSeconds.toFixed(1)}s audio, ${bufferSeconds.toFixed(1)}s in buffer) - treating as success`);
               
               // Reset retry count on successful completion
               if (currentPromptText) {
@@ -568,8 +586,27 @@ wss.on("connection", (twilioWs, req) => {
                 actualTranscript = null;
               }
               
-              responseInProgress = false;
-              audioStreamingStarted = false;
+              // CRITICAL: If there's still audio in the buffer, keep responseInProgress true
+              // so the global silence monitor knows audio is still playing
+              // Only reset when buffer is empty or nearly empty
+              if (playBuffer.length > 3200) { // More than 400ms of audio remaining
+                console.log(`⏳ Keeping responseInProgress=true until buffer empties (${bufferSeconds.toFixed(1)}s remaining)`);
+                // Don't reset responseInProgress yet - let audio finish playing
+                // The response.done handler will reset it when buffer is empty
+                // But mark that we've accepted this response
+                audioDoneReceived = true; // Mark audio as done so we don't retry
+              } else {
+                // Buffer is nearly empty, safe to reset
+                responseInProgress = false;
+                audioStreamingStarted = false;
+              }
+              
+              // Update lastAudioPlaybackTime to account for remaining buffer time
+              // This prevents global silence monitor from triggering while audio is still playing
+              if (bufferSeconds > 0) {
+                lastAudioPlaybackTime = Date.now();
+                console.log(`🔄 Updated lastAudioPlaybackTime - ${bufferSeconds.toFixed(1)}s of audio still playing`);
+              }
               
               // Mark confirmation if in confirmation state
               if (currentState === STATES.CONFIRMATION) {
@@ -581,7 +618,8 @@ wss.on("connection", (twilioWs, req) => {
               currentSilenceDuration = VAD_CONFIG.silence_default;
               
               // Process any pending input that arrived while response was in progress
-              if (pendingUserInput) {
+              if (pendingUserInput && playBuffer.length <= 3200) {
+                // Only process if buffer is nearly empty
                 console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
                 const input = pendingUserInput;
                 pendingUserInput = null;
@@ -939,8 +977,8 @@ Say the ENTIRE sentence above, word for word.`,
       const isUserSpeaking = speechStartTime !== null;
       const currentState = stateMachine.getState();
       
-      // Don't trigger during confirmation/close (user needs time to listen)
-      if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE || currentState === STATES.ENDED) {
+      // Don't trigger during confirmation/close/safety_check (user needs time to listen)
+      if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE || currentState === STATES.ENDED || currentState === STATES.SAFETY_CHECK) {
         return;
       }
       
