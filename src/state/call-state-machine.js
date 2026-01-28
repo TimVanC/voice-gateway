@@ -1262,7 +1262,9 @@ function createCallStateMachine() {
             const ty = getStreetType(finalAddress);
             confirmParts.push(`${CONFIRMATION.immediate_address_street} ${spellWordWithSpaces(st)}${ty ? ' ' + ty : ''}?`);
           }
-          if (finalCity && confidenceToPercentage(cityConf) < CONFIDENCE_THRESHOLD) {
+          // Only confirm city if it's a valid city name (at least 2 chars, not just punctuation)
+          const validCity = finalCity && finalCity.length >= 2 && /[a-zA-Z]/.test(finalCity);
+          if (validCity && confidenceToPercentage(cityConf) < CONFIDENCE_THRESHOLD) {
             confirmParts.push(`${CONFIRMATION.immediate_address_town} ${spellWordWithSpaces(finalCity)}?`);
           }
           if (confirmParts.length === 0) {
@@ -2363,11 +2365,15 @@ function createCallStateMachine() {
       address = address.replace(stateMatch[0], '').trim();
     }
     
+    // CRITICAL: Clean trailing punctuation BEFORE splitting
+    // This prevents "." or "," from becoming its own part
+    address = address.replace(/[.,!?]+$/g, '').trim();
+    
     // Extract city (usually after street address, separated by comma)
     // Format: "[Street Address], [City] [, State] [, Zip]"
     let city = null;
-    // Split by comma first
-    const parts = address.split(',').map(s => s.trim()).filter(s => s.length > 0);
+    // Split by comma first, filter out empty parts AND punctuation-only parts
+    const parts = address.split(',').map(s => s.trim()).filter(s => s.length > 0 && !/^[.,!?]+$/.test(s));
     
     if (parts.length >= 2) {
       // If we have multiple parts, the pattern is: [street], [city], [state], [zip]

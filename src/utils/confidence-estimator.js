@@ -232,8 +232,8 @@ function estimateAddressConfidence(transcript) {
 function estimateCityConfidence(transcript) {
   const cleaned = cleanTranscript(transcript);
   
-  // Too short
-  if (cleaned.length < 2) {
+  // Too short or only punctuation
+  if (cleaned.length < 2 || !/[a-zA-Z]/.test(cleaned)) {
     return { level: CONFIDENCE.LOW, reason: 'city too short' };
   }
   
