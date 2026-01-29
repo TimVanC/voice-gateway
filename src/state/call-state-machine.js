@@ -1240,6 +1240,16 @@ function createCallStateMachine() {
           
           const addressParts = extractAddress(transcript);
           
+          // LENGTH CHECK: If extracted address is too long (likely parsing error), ask user to repeat
+          if (addressParts.address && addressParts.address.length > 60) {
+            console.log(`📋 Address too long (${addressParts.address.length} chars) - asking user to repeat simply`);
+            return {
+              nextState: currentState,
+              prompt: "I didn't quite catch that. Can you give me just the street address and city?",
+              action: 'ask'
+            };
+          }
+          
           // Check confidence for each part
           const addressConf = estimateAddressConfidence(addressParts.address || transcript);
           const cityConf = addressParts.city ? estimateCityConfidence(addressParts.city) : { level: CONFIDENCE.HIGH };
@@ -2354,8 +2364,38 @@ function createCallStateMachine() {
   }
   
   function extractAddress(text) {
+    // =========================================================================
+    // PRE-CLEANING: Remove filler phrases and duplicates FIRST
+    // =========================================================================
+    let address = text;
+    
+    // Remove common filler phrases that appear in the middle of addresses
+    const fillerPhrases = [
+      /\.\s*yeah[,.]?\s*(i'm|im|i am)?\s*(just)?\s*(saying|telling|giving)\s*(it|that|you)?\s*(right)?\s*now\s*\.?\s*/gi,
+      /\.\s*let me (say|give|tell)\s*(it|that|you)?\s*(again)?\s*\.?\s*/gi,
+      /\.\s*it\s*(would|will)\s+be\s*/gi,
+      /\.\s*that\s+(would|will)\s+be\s*/gi,
+      /\.\s*so\s+(it's|its|that's|thats)\s*/gi,
+    ];
+    
+    for (const filler of fillerPhrases) {
+      address = address.replace(filler, '. ');
+    }
+    
+    // If address contains multiple sentences with similar street numbers, take the last/cleanest one
+    // Split by period and look for duplicate address patterns
+    const sentences = address.split(/\.\s+/).filter(s => s.trim().length > 3);
+    if (sentences.length > 1) {
+      // Look for sentences that start with a number (likely addresses)
+      const addressSentences = sentences.filter(s => /^\d+\s+\w/.test(s.trim()));
+      if (addressSentences.length > 0) {
+        // Take the last address-like sentence (usually the cleaner/repeated one)
+        address = addressSentences[addressSentences.length - 1];
+      }
+    }
+    
     // Remove common prefixes
-    let address = text
+    address = address
       .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|the\s+address\s+is|address\s+is|my\s+address\s+is)\s*/gi, '')
       .trim();
     

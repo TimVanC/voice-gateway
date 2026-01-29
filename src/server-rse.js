@@ -303,7 +303,7 @@ wss.on("connection", (twilioWs, req) => {
             prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
             silence_duration_ms: VAD_CONFIG.silence_duration_ms
           },
-          temperature: 0.8,
+          temperature: 0.4,  // Lower temperature = more predictable, sticks to script better
           max_response_output_tokens: 1000
         }
       };
@@ -1665,29 +1665,28 @@ DO NOT DEVIATE FROM THE SCRIPT.`;
     } else {
       // Other states - FORCE EXACT OUTPUT
       // The AI has been going off-script. Use extremely strict formatting.
-      instructions = `[ROBOT MODE - EXACT OUTPUT ONLY]
+      instructions = `[STRICT SCRIPT MODE]
 
-YOUR ENTIRE RESPONSE MUST BE:
+SAY EXACTLY THIS AND NOTHING ELSE:
 "${prompt}"
 
-RULES:
-- You ARE A SCRIPT READER. You read scripts, nothing else.
-- The ONLY words that can come out of your mouth are the exact words in quotes above.
-- You may add "Okay, " or "Thanks, " at the very start. NOTHING ELSE.
-- After saying the script, STOP. Do not say another word.
-- Do NOT add commentary, questions, or helpful information.
-- Do NOT say "You too", "Take care", "We've got all the details", or ANYTHING not in the script.
-- If the script says "What's the service address?" - you say ONLY that.
+CRITICAL RULES:
+1. Say the EXACT text in quotes above - word for word
+2. Do NOT add "Got it", "Sure", "Thanks for clarifying", "Great", or ANY prefix
+3. Do NOT add ANY suffix or follow-up
+4. Do NOT mention appointments, scheduling, or follow-ups
+5. Do NOT say anything helpful or conversational
+6. After the script text, STOP IMMEDIATELY - zero additional words
 
-ABSOLUTELY FORBIDDEN - you will be FIRED if you say:
-- "next week" / "this week" / "Thursday" / any day name
-- "lock in a time" / "schedule" / "appointment" / "confirmation"
-- "We've got all the key details" / "our team will follow up"
-- "You too" / "Take care" / any goodbye unless the script says goodbye
-- ANY question that isn't in the script
+FORBIDDEN PHRASES (instant failure):
+- "Got it" / "Sure" / "Thanks" / "Great" / "Awesome" / "Perfect"
+- "thanks for clarifying" / "I understand" / "No problem"
+- "I'll have someone" / "we'll reach out" / "confirm an appointment"
+- ANY day name or time reference not in the script
+- ANY question not in the script
 
-OUTPUT THE SCRIPT TEXT. THEN STOP. NOTHING MORE.`;
-      maxTokens = 200; // Reduce tokens even more to force very short response
+You are a script-reading robot. Read the script. Stop.`;
+      maxTokens = 150; // Very short to prevent rambling
     }
     
     openaiWs.send(JSON.stringify({
@@ -1695,7 +1694,8 @@ OUTPUT THE SCRIPT TEXT. THEN STOP. NOTHING MORE.`;
       response: {
         modalities: ["audio", "text"],
         instructions: instructions,
-        max_output_tokens: maxTokens
+        max_output_tokens: maxTokens,
+        temperature: 0.3  // Low temperature for scripted responses - be predictable
       }
     }));
   }
