@@ -1657,8 +1657,12 @@ Say EXACTLY this text word-for-word:
 STRICT RULES:
 - Say ONLY the text above, nothing else
 - DO NOT add commentary or continue beyond this prompt
+- DO NOT mention technicians, appointments, or scheduling
+- DO NOT say "I'll have someone reach out" or "confirm an appointment"
 - After saying the text, the call is complete
 - If user hangs up, that's expected behavior
+
+FORBIDDEN: technician, tech, schedule, appointment, next week, confirm
 
 DO NOT DEVIATE FROM THE SCRIPT.`;
       maxTokens = 300;
@@ -1682,8 +1686,13 @@ FORBIDDEN PHRASES (instant failure):
 - "Got it" / "Sure" / "Thanks" / "Great" / "Awesome" / "Perfect"
 - "thanks for clarifying" / "I understand" / "No problem"
 - "I'll have someone" / "we'll reach out" / "confirm an appointment"
-- ANY day name or time reference not in the script
+- "technician" / "tech" / "service person" / "send someone"
+- "schedule" / "scheduling" / "appointment" / "book" / "booking"
+- "next week" / "this week" / ANY day name
+- ANY time reference not in the script
 - ANY question not in the script
+
+REMEMBER: No technicians. No scheduling. Availability only. Human follow-up only.
 
 You are a script-reading robot. Read the script. Stop.`;
       maxTokens = 150; // Very short to prevent rambling

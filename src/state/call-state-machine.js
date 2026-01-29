@@ -288,52 +288,63 @@ function createCallStateMachine() {
       ? CONFIRMATION.correction_reread 
       : CONFIRMATION.intro;
     
-    // Build the read-back - SPELL OUT everything for clarity
+    // Build the read-back
+    // RULES: Only spell LAST NAME and STREET NAME. Everything else spoken normally.
     let parts = [intro];
     
-    // First and last name - SPELL OUT
+    // Name - spell ONLY the last name
     if (data.firstName && data.lastName) {
-      const firstNameSpelled = spellOutWord(data.firstName);
       const lastNameSpelled = spellOutWord(data.lastName);
-      parts.push(`First name, ${firstNameSpelled}. Last name, ${lastNameSpelled}.`);
+      parts.push(`${data.firstName}, ${lastNameSpelled}.`);
     } else if (data.firstName) {
-      parts.push(`First name, ${spellOutWord(data.firstName)}.`);
+      parts.push(`${data.firstName}.`);
     } else if (data.lastName) {
-      parts.push(`Last name, ${spellOutWord(data.lastName)}.`);
+      parts.push(`${spellOutWord(data.lastName)}.`);
     }
     
-    // Phone - SPELL OUT each digit
+    // Phone - speak normally (e.g., "973-885-2528")
     if (data.phone) {
-      const formatted = formatPhoneForConfirmation(data.phone);
-      parts.push(`Phone, ${formatted}.`);
+      parts.push(`Phone, ${data.phone}.`);
     }
     
-    // Email - SPELL OUT letter by letter
+    // Email - speak normally (e.g., "mj23 at gmail dot com")
     if (data.email) {
-      const emailSpelled = data.email.split('').map(c => {
-        if (c === '@') return 'at';
-        if (c === '.') return 'dot';
-        if (/[a-zA-Z0-9]/.test(c)) return c.toUpperCase();
-        return '';
-      }).filter(c => c).join(' ');
-      parts.push(`Email, ${emailSpelled}.`);
+      const emailSpoken = data.email
+        .replace(/@/g, ' at ')
+        .replace(/\./g, ' dot ');
+      parts.push(`Email, ${emailSpoken}.`);
     }
     
-    // Address - SPELL OUT
+    // Address - spell ONLY the street name, speak everything else normally
     if (data.address) {
-      const addressSpelled = spellOutAddress(data.address);
-      if (data.city) {
-        const citySpelled = spellOutAddress(data.city);
-        parts.push(`Address, ${addressSpelled}, ${citySpelled}.`);
+      // Extract street name to spell, keep number and type normal
+      const streetNameToSpell = getStreetNameToSpell(data.address);
+      const streetType = getStreetType(data.address);
+      const streetNumber = data.address.match(/^(\d+)\s/)?.[1] || '';
+      
+      // Build address: "123 S-H-E-R-M-A-N Boulevard"
+      let addressPart = '';
+      if (streetNumber) {
+        addressPart = `${streetNumber} ${spellOutWord(streetNameToSpell)}`;
       } else {
-        parts.push(`Address, ${addressSpelled}.`);
+        addressPart = spellOutWord(streetNameToSpell);
+      }
+      if (streetType) {
+        addressPart += ` ${streetType}`;
+      }
+      
+      // Add city, state, zip - all spoken normally
+      if (data.city) {
+        addressPart += `, ${data.city}`;
       }
       if (data.state) {
-        parts.push(`State, ${spellOutWord(data.state)}.`);
+        addressPart += `, ${data.state}`;
       }
       if (data.zip) {
-        parts.push(`Zip, ${data.zip.split('').join(' ')}.`);
+        addressPart += ` ${data.zip}`;
       }
+      
+      parts.push(`Address, ${addressPart}.`);
     }
     
     // NOTE: We do NOT include availability or issue details in the recap
