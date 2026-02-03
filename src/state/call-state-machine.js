@@ -289,17 +289,16 @@ function createCallStateMachine() {
       : CONFIRMATION.intro;
     
     // Build the read-back
-    // RULES: Only spell LAST NAME and STREET NAME. Everything else spoken normally.
+    // RULES: NO SPELLING - just read everything back normally
     let parts = [intro];
     
-    // Name - spell ONLY the last name
+    // Name - full name, spoken normally
     if (data.firstName && data.lastName) {
-      const lastNameSpelled = spellOutWord(data.lastName);
-      parts.push(`${data.firstName}, ${lastNameSpelled}.`);
+      parts.push(`${data.firstName} ${data.lastName}.`);
     } else if (data.firstName) {
       parts.push(`${data.firstName}.`);
     } else if (data.lastName) {
-      parts.push(`${spellOutWord(data.lastName)}.`);
+      parts.push(`${data.lastName}.`);
     }
     
     // Phone - speak normally (e.g., "973-885-2528")
@@ -315,25 +314,11 @@ function createCallStateMachine() {
       parts.push(`Email, ${emailSpoken}.`);
     }
     
-    // Address - spell ONLY the street name, speak everything else normally
+    // Address - speak everything normally (NO spelling)
     if (data.address) {
-      // Extract street name to spell, keep number and type normal
-      const streetNameToSpell = getStreetNameToSpell(data.address);
-      const streetType = getStreetType(data.address);
-      const streetNumber = data.address.match(/^(\d+)\s/)?.[1] || '';
+      let addressPart = data.address;
       
-      // Build address: "123 S-H-E-R-M-A-N Boulevard"
-      let addressPart = '';
-      if (streetNumber) {
-        addressPart = `${streetNumber} ${spellOutWord(streetNameToSpell)}`;
-      } else {
-        addressPart = spellOutWord(streetNameToSpell);
-      }
-      if (streetType) {
-        addressPart += ` ${streetType}`;
-      }
-      
-      // Add city, state, zip - all spoken normally
+      // Add city, state, zip
       if (data.city) {
         addressPart += `, ${data.city}`;
       }
@@ -630,13 +615,33 @@ function createCallStateMachine() {
             clearPendingClarification();
             return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
           }
-          // No or correction: take correction and lock
+          // No or correction: handle spelled corrections like "No. It's spelled V-A-N-C-A-U-W-E-N-B-E-R-G-E"
+          // First, check if this is a spelled correction for the last name
+          const spelledCorrectionMatch = transcript.match(/(?:no[,.]?\s*)?(?:it'?s\s+)?spelled?\s+([A-Z][-.\s]+[A-Z][-.\s]*(?:[-.\s]*[A-Z])*)/i);
+          if (spelledCorrectionMatch) {
+            // Extract spelled letters
+            const spelledPart = spelledCorrectionMatch[1];
+            const letters = spelledPart.match(/[A-Z]/gi) || [];
+            if (letters.length >= 2) {
+              const correctedLastName = letters.join('').charAt(0).toUpperCase() + letters.join('').slice(1).toLowerCase();
+              data.firstName = pendingClarification.value.firstName;  // Keep original first name
+              data.lastName = correctedLastName;
+              data.name_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
+              data._nameComplete = true;
+              console.log(`✅ Last name corrected via spelling: ${data.lastName} (was: ${pendingClarification.value.lastName})`);
+              clearPendingClarification();
+              return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
+            }
+          }
+          
+          // Standard correction: take correction and lock
           const corr = extractName(transcript);
           if (corr.firstName || corr.lastName) {
             data.firstName = corr.firstName || pendingClarification.value.firstName;
             data.lastName = corr.lastName || pendingClarification.value.lastName;
             data.name_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
           } else {
+            // No name extracted - keep pending values
             data.firstName = pendingClarification.value.firstName;
             data.lastName = pendingClarification.value.lastName;
           }
@@ -2405,9 +2410,11 @@ function createCallStateMachine() {
       }
     }
     
-    // Remove common prefixes
+    // Remove common prefixes and filler phrases
     address = address
-      .replace(/^(yeah\s*,?\s*)?(that\s+would\s+be|that'?s|it'?s|it\s+is|the\s+address\s+is|address\s+is|my\s+address\s+is)\s*/gi, '')
+      .replace(/^(yeah|yes|oh|um|uh|so|well|okay|ok)[,.]?\s*/gi, '')
+      .replace(/^(it would be|that would be|it'?d be|that'?d be)\s*/gi, '')
+      .replace(/^(that'?s|it'?s|it\s+is|the\s+address\s+is|address\s+is|my\s+address\s+is)\s*/gi, '')
       .trim();
     
     // Remove "as in" and similar phrases (e.g., "1111, as in 1111 Elf")
@@ -2544,10 +2551,14 @@ function createCallStateMachine() {
   
   function extractAvailability(text) {
     // Clean up and normalize availability
-    // CRITICAL: Match "weekdays" before "weekday" to avoid leaving "s" behind
-    return text
-      .replace(/^(i'm available|i can do|works for me|best for me is|a\s+weekdays?|weekdays?)\s*/gi, '')
+    // Remove filler phrases like "I would say", "that would be", etc.
+    let cleaned = text
+      .replace(/^(yeah|yes|oh|um|uh|so|well|okay|ok)[,.]?\s*/gi, '')
+      .replace(/^(i would say|i'd say|that would be|it would be|probably|maybe)\s*/gi, '')
+      .replace(/^(i'm available|i can do|works for me|best for me is)\s*/gi, '')
       .trim();
+    
+    return cleaned;
   }
   
   function looksLikeAvailability(text) {

@@ -57,10 +57,11 @@ const CALLER_INFO = {
 // ============================================================================
 const DETAILS = {
   hvac_service: {
-    system_type: "What type of system is it? Furnace, boiler, central air, mini split, or rooftop unit?",
+    // SHORTENED: Long prompts cut off with OpenAI Realtime
+    system_type: "What type of system is it?",
     symptoms: "What symptoms are you noticing?",
     start_time: "When did this start?",
-    severity: "Is the system completely out, or still running but not working well?"
+    severity: "Is the system completely out, or still running?"
   },
   hvac_installation: {
     project_type: "Is this a new installation or replacing an existing system?",
