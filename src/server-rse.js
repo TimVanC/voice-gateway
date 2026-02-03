@@ -202,8 +202,16 @@ wss.on("connection", (twilioWs, req) => {
     }
     
     paceTimer = setInterval(() => {
-      if (!streamSid || twilioWs.readyState !== WebSocket.OPEN) {
-        return; // Can't send without stream
+      if (!streamSid) {
+        return; // No stream yet
+      }
+      if (twilioWs.readyState !== WebSocket.OPEN) {
+        // Twilio disconnected - log this so we know audio stopped
+        if (playBuffer.length > 0) {
+          console.error(`⚠️ Twilio WebSocket closed while ${(playBuffer.length/8000).toFixed(1)}s of audio still in buffer!`);
+          playBuffer = Buffer.alloc(0);  // Clear buffer since we can't send
+        }
+        return;
       }
       
       let frame;
@@ -1878,7 +1886,12 @@ Keep it SHORT.`;
   });
   
   twilioWs.on("close", (code, reason) => {
-    console.log(`🔌 Twilio disconnected (code: ${code})`);
+    const bufferedAudio = playBuffer.length / 8000;
+    if (bufferedAudio > 0.1) {
+      console.error(`🔌 Twilio disconnected (code: ${code}) with ${bufferedAudio.toFixed(1)}s of audio still buffered!`);
+    } else {
+      console.log(`🔌 Twilio disconnected (code: ${code})`);
+    }
     cleanup();
   });
   
