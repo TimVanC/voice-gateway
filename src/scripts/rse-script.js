@@ -12,8 +12,10 @@
 // GREETING
 // ============================================================================
 const GREETING = {
-  primary: "Hi, thanks for calling RSE Energy Group. This is an AI receptionist. This call may be recorded. A real person is available on request. This is Ava. How can I help you today?",
-  silence_fallback: "Hi, I can help with HVAC, generators, or maintenance memberships. What are you calling about?"
+  // SHORTENED: OpenAI Realtime has issues with long utterances (>8 seconds)
+  // Original was 173 chars, new is ~85 chars (~5 seconds of speech)
+  primary: "Hi, thanks for calling RSE Energy. This is Ava, an AI assistant. How can I help you?",
+  silence_fallback: "Hi there, what can I help you with today?"
 };
 
 // ============================================================================
@@ -32,8 +34,9 @@ const INTENT_PROMPTS = {
 // SAFETY CHECK (hvac_service or generator only)
 // ============================================================================
 const SAFETY = {
-  check: "Before we go further, is there anything unsafe right now? Smoke, gas smell, sparks, or a total system shutdown?",
-  emergency_response: "I'm glad you called. For safety, please hang up and call 911 or your utility provider right away.",
+  // SHORTENED: OpenAI Realtime struggles with long utterances
+  check: "Quick safety check - any smoke, gas smell, or sparks right now?",
+  emergency_response: "Please hang up and call 911 right away for your safety.",
   all_clear: "Thank you."
 };
 
