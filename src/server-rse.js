@@ -133,6 +133,7 @@ wss.on("connection", (twilioWs, req) => {
   
   // Audio buffer for pacing
   let playBuffer = Buffer.alloc(0);
+  let audioFramesSent = 0;  // Track frames sent for debugging
   let responseInProgress = false;
   let audioStreamingStarted = false;
   let totalAudioBytesSent = 0;  // Track total audio in current response
@@ -241,6 +242,11 @@ wss.on("connection", (twilioWs, req) => {
         // Only update if this is not a silence frame (silence frames are 0xFF)
         if (frame[0] !== 0xFF || frame.some(b => b !== 0xFF)) {
           lastAudioPlaybackTime = Date.now();
+          audioFramesSent++;
+          // Log every 2 seconds (100 frames) to show progress
+          if (audioFramesSent % 100 === 0) {
+            console.log(`🔊 Audio progress: ${(audioFramesSent * 0.02).toFixed(1)}s sent, ${(playBuffer.length/8000).toFixed(1)}s remaining`);
+          }
         }
         
         // If buffer just emptied and we're waiting for it to finish (audioDoneReceived=true but responseInProgress=true),
@@ -412,6 +418,7 @@ wss.on("connection", (twilioWs, req) => {
         responseInProgress = true;
         audioStreamingStarted = false;
         totalAudioBytesSent = 0;  // Reset for new response
+        audioFramesSent = 0;  // Reset frame counter
         lastAudioDeltaTime = Date.now();  // Reset audio delta tracking
         audioDoneReceived = false;  // Reset audio done flag
         actualTranscript = null;  // Reset transcript for new response
