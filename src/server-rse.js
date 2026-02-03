@@ -303,7 +303,7 @@ wss.on("connection", (twilioWs, req) => {
             prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
             silence_duration_ms: VAD_CONFIG.silence_duration_ms
           },
-          temperature: 0.4,  // Lower temperature = more predictable, sticks to script better
+          temperature: 0.6,  // Minimum allowed by OpenAI Realtime API (0.6-1.2 range)
           max_response_output_tokens: 1000
         }
       };
@@ -1704,7 +1704,7 @@ You are a script-reading robot. Read the script. Stop.`;
         modalities: ["audio", "text"],
         instructions: instructions,
         max_output_tokens: maxTokens,
-        temperature: 0.3  // Low temperature for scripted responses - be predictable
+        temperature: 0.6  // Minimum allowed by OpenAI Realtime API
       }
     }));
   }
