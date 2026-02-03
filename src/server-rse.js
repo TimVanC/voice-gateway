@@ -276,7 +276,13 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   // CONNECT TO OPENAI REALTIME API
   // ============================================================================
+  let openaiConnectionAttempts = 0;
+  const MAX_OPENAI_RETRIES = 3;
+  
   function connectToOpenAI() {
+    openaiConnectionAttempts++;
+    console.log(`🔌 Connecting to OpenAI Realtime (attempt ${openaiConnectionAttempts}/${MAX_OPENAI_RETRIES})...`);
+    
     openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
       headers: {
         "Authorization": `Bearer ${OPENAI_API_KEY}`,
@@ -286,6 +292,7 @@ wss.on("connection", (twilioWs, req) => {
     
     openaiWs.on("open", () => {
       console.log("✅ Connected to OpenAI Realtime");
+      openaiConnectionAttempts = 0;  // Reset on success
       
       // Configure session with selected voice (set once, no changes mid-call)
       configureSession(callVoice);
@@ -340,6 +347,19 @@ wss.on("connection", (twilioWs, req) => {
     
     openaiWs.on("error", (err) => {
       console.error("❌ OpenAI WebSocket error:", err.message);
+      
+      // Retry connection on error
+      if (openaiConnectionAttempts < MAX_OPENAI_RETRIES && twilioWs?.readyState === WebSocket.OPEN) {
+        const retryDelay = openaiConnectionAttempts * 1000;  // 1s, 2s, 3s
+        console.log(`🔄 Retrying OpenAI connection in ${retryDelay}ms...`);
+        setTimeout(() => {
+          if (twilioWs?.readyState === WebSocket.OPEN) {
+            connectToOpenAI();
+          }
+        }, retryDelay);
+      } else if (openaiConnectionAttempts >= MAX_OPENAI_RETRIES) {
+        console.error(`❌ Failed to connect to OpenAI after ${MAX_OPENAI_RETRIES} attempts`);
+      }
     });
     
     // Keep-alive ping every 20 seconds
