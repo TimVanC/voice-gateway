@@ -493,10 +493,28 @@ wss.on("connection", (twilioWs, req) => {
             
             if (matchRatio < 0.3 && actualTranscript.length > 20) {
               // Less than 30% match on key words - likely hallucination
-              console.error(`🚨 POTENTIAL HALLUCINATION DETECTED!`);
+              console.error(`🚨 HALLUCINATION DETECTED - clearing buffer and resending!`);
               console.error(`   Expected: "${expectedTranscript.substring(0, 80)}..."`);
               console.error(`   Got: "${actualTranscript.substring(0, 80)}..."`);
               console.error(`   Match ratio: ${(matchRatio * 100).toFixed(0)}%`);
+              
+              // CRITICAL: Clear the bad audio and resend the correct prompt
+              playBuffer = Buffer.alloc(0);
+              responseInProgress = false;
+              audioStreamingStarted = false;
+              
+              // Cancel any ongoing response
+              if (openaiWs?.readyState === WebSocket.OPEN) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              }
+              
+              // Resend the correct prompt after a brief delay
+              setTimeout(() => {
+                if (expectedTranscript && openaiWs?.readyState === WebSocket.OPEN) {
+                  console.log(`🔄 Resending correct prompt: "${expectedTranscript.substring(0, 50)}..."`);
+                  sendStatePrompt(expectedTranscript);
+                }
+              }, 100);
             }
           }
         } else {

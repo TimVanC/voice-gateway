@@ -615,15 +615,43 @@ function createCallStateMachine() {
             clearPendingClarification();
             return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
           }
-          // No or correction: handle spelled corrections like "No. It's spelled V-A-N-C-A-U-W-E-N-B-E-R-G-E"
-          // First, check if this is a spelled correction for the last name
-          const spelledCorrectionMatch = transcript.match(/(?:no[,.]?\s*)?(?:it'?s\s+)?spelled?\s+([A-Z][-.\s]+[A-Z][-.\s]*(?:[-.\s]*[A-Z])*)/i);
-          if (spelledCorrectionMatch) {
-            // Extract spelled letters
-            const spelledPart = spelledCorrectionMatch[1];
-            const letters = spelledPart.match(/[A-Z]/gi) || [];
-            if (letters.length >= 2) {
-              const correctedLastName = letters.join('').charAt(0).toUpperCase() + letters.join('').slice(1).toLowerCase();
+          // No or correction: handle spelled corrections
+          // Patterns: "No. It's spelled V-A-N...", "And not fully, it's V-A-N space C-A-U...", "it's V-A-N-C-A-U..."
+          // Look for any sequence of spelled letters (single letters separated by dashes, spaces, or dots)
+          const hasSpelledLetters = /([A-Z])[-.\s]+([A-Z])[-.\s]+([A-Z])/i.test(transcript);
+          if (hasSpelledLetters) {
+            // Extract all spelled letter sequences, handling "space" as word separator
+            let spelledPart = transcript;
+            // Remove common prefixes
+            spelledPart = spelledPart.replace(/^(and\s+)?not\s+fully[,.]?\s*/i, '');
+            spelledPart = spelledPart.replace(/^no[,.]?\s*/i, '');
+            spelledPart = spelledPart.replace(/^(it'?s|that'?s)\s*/i, '');
+            spelledPart = spelledPart.replace(/^spelled?\s*/i, '');
+            
+            // Handle "space" as word separator in names like "V-A-N space C-A-U-W-E-N-B-E-R-G-E"
+            const hasSpace = /\bspace\b/i.test(spelledPart);
+            let correctedLastName = '';
+            
+            if (hasSpace) {
+              // Split by "space" and extract letters from each part
+              const parts = spelledPart.split(/\s+space\s+/i);
+              const nameParts = parts.map(part => {
+                const letters = part.match(/[A-Z]/gi) || [];
+                if (letters.length >= 1) {
+                  return letters.join('').charAt(0).toUpperCase() + letters.join('').slice(1).toLowerCase();
+                }
+                return '';
+              }).filter(p => p.length > 0);
+              correctedLastName = nameParts.join(' ');
+            } else {
+              // Single word - extract all letters
+              const letters = spelledPart.match(/[A-Z]/gi) || [];
+              if (letters.length >= 2) {
+                correctedLastName = letters.join('').charAt(0).toUpperCase() + letters.join('').slice(1).toLowerCase();
+              }
+            }
+            
+            if (correctedLastName.length >= 2) {
               data.firstName = pendingClarification.value.firstName;  // Keep original first name
               data.lastName = correctedLastName;
               data.name_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
