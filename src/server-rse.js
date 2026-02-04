@@ -492,6 +492,12 @@ wss.on("connection", (twilioWs, req) => {
         audioDoneReceived = true;
         const audioSeconds = (playBuffer.length / 8000).toFixed(1);
         console.log(`🔊 Audio complete (buffer: ${playBuffer.length} bytes = ~${audioSeconds}s to play)`);
+        
+        // LOGGING: Track if this was a spelling prompt
+        if (expectedTranscript && /\b([A-Z]\s){2,}[A-Z]\.?\b/.test(expectedTranscript)) {
+          console.log(`🔤 TTS SPELLING AUDIO DONE: ${audioSeconds}s of audio generated for spelled content`);
+        }
+        
         // Keep responseInProgress true until response.done
         // This prevents new responses from starting while audio is still in buffer
         
@@ -1733,6 +1739,13 @@ Sound polite and helpful, not dismissive.`,
     
     const currentState = stateMachine.getState();
     console.log(`🗣️ State prompt: "${prompt}"`);
+    
+    // LOGGING: Detect spelling playback prompts (for debugging TTS cutoffs)
+    const hasSpelling = /\b([A-Z]\s){2,}[A-Z]\.?\b/.test(prompt) || /\b[A-Z]\s[A-Z]\s[A-Z]\b/.test(prompt);
+    if (hasSpelling) {
+      console.log(`🔤 TTS SPELLING START: Prompt contains spelled content`);
+      console.log(`🔤 Spelled prompt length: ${prompt.length} chars`);
+    }
     
     // Track the prompt for failure detection
     currentPromptText = prompt;

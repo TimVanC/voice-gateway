@@ -616,28 +616,30 @@ function createCallStateMachine() {
         
       case STATES.NAME:
         // Immediate confirmation: we asked "Did I get your last name right. X Y Z." (Phase 2)
+        // THIS IS A BLOCKING STATE - do not advance until confirmation equals YES
         if (pendingClarification.field === 'name' && pendingClarification.awaitingConfirmation) {
+          console.log(`📋 Name confirmation state - awaiting yes/no for: ${pendingClarification.value.firstName} ${pendingClarification.value.lastName}`);
+          
+          // CASE 1: User confirms with "yes" - accept and advance
           if (isConfirmation(lowerTranscript)) {
             data.firstName = pendingClarification.value.firstName;
             data.lastName = pendingClarification.value.lastName;
             const baseConf = data.name_confidence != null ? data.name_confidence : confidenceToPercentage(pendingClarification.confidence);
             data.name_confidence = adjustConfidence(baseConf, 'confirmation');
-            data._nameComplete = true;
-            console.log(`✅ Name confirmed: ${data.firstName} ${data.lastName} (confidence: ${data.name_confidence}%)`);
+            data._nameComplete = true;  // ONLY set complete on positive confirmation
+            console.log(`✅ Name CONFIRMED: ${data.firstName} ${data.lastName} (confidence: ${data.name_confidence}%)`);
             clearPendingClarification();
             return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
           }
-          // No or correction: handle spelled corrections
+          
+          // CASE 2: User provides a spelled correction (e.g., "No, it's V-A-N...")
           // Patterns: "No. It's spelled V-A-N...", "And not fully, it's V-A-N space C-A-U...", "it's V-A-N-C-A-U..."
-          // Look for any sequence of spelled letters (single letters separated by dashes, spaces, or dots)
           const hasSpelledLetters = /([A-Z])[-.\s]+([A-Z])[-.\s]+([A-Z])/i.test(transcript);
           if (hasSpelledLetters) {
-            // Extract all spelled letter sequences, handling "space" as word separator
             let spelledPart = transcript;
             // Remove common prefixes (order matters!)
             spelledPart = spelledPart.replace(/^(and\s+)?not\s+fully[,.]?\s*/i, '');
             spelledPart = spelledPart.replace(/^no[,.]?\s*/i, '');
-            // Handle both "it is" (two words) and "it's" (contraction)
             spelledPart = spelledPart.replace(/^(it\s+is|it'?s|that\s+is|that'?s)\s*/i, '');
             spelledPart = spelledPart.replace(/^spelled?\s*/i, '');
             
@@ -646,7 +648,6 @@ function createCallStateMachine() {
             let correctedLastName = '';
             
             if (hasSpace) {
-              // Split by "space" and extract letters from each part
               const parts = spelledPart.split(/\s+space\s+/i);
               const nameParts = parts.map(part => {
                 const letters = part.match(/[A-Z]/gi) || [];
@@ -657,7 +658,6 @@ function createCallStateMachine() {
               }).filter(p => p.length > 0);
               correctedLastName = nameParts.join(' ');
             } else {
-              // Single word - extract all letters
               const letters = spelledPart.match(/[A-Z]/gi) || [];
               if (letters.length >= 2) {
                 correctedLastName = letters.join('').charAt(0).toUpperCase() + letters.join('').slice(1).toLowerCase();
@@ -665,30 +665,63 @@ function createCallStateMachine() {
             }
             
             if (correctedLastName.length >= 2) {
-              data.firstName = pendingClarification.value.firstName;  // Keep original first name
-              data.lastName = correctedLastName;
-              data.name_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
-              data._nameComplete = true;
-              console.log(`✅ Last name corrected via spelling: ${data.lastName} (was: ${pendingClarification.value.lastName})`);
-              clearPendingClarification();
-              return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
+              // User provided a valid spelled correction - store it and re-confirm
+              const newLastName = correctedLastName;
+              console.log(`📋 Received spelled correction: "${newLastName}" (was: "${pendingClarification.value.lastName}")`);
+              
+              // Update pending value with correction and re-confirm (don't advance yet!)
+              pendingClarification.value.lastName = newLastName;
+              const spelledConfirm = spellWordWithSpaces(newLastName);
+              return {
+                nextState: currentState,  // STAY in NAME state
+                prompt: `Got it. So your last name is ${spelledConfirm}. Is that correct?`,
+                action: 'ask'
+              };
             }
           }
           
-          // Standard correction: take correction and lock
+          // CASE 3: User says "no" clearly without providing correction
+          if (isNegation(lowerTranscript)) {
+            console.log(`❌ Name REJECTED by user - clearing and re-asking`);
+            // CRITICAL: Reset the field completely and re-ask
+            data.firstName = null;
+            data.lastName = null;
+            data.name_confidence = null;
+            data._nameComplete = false;  // Explicitly ensure NOT complete
+            clearPendingClarification();
+            return {
+              nextState: currentState,  // STAY in NAME state
+              prompt: "No problem. Let me get that again. What is your first and last name?",
+              action: 'ask'
+            };
+          }
+          
+          // CASE 4: User provides a name correction (not spelled, e.g., "It's Smith, not Smythe")
           const corr = extractName(transcript);
           if (corr.firstName || corr.lastName) {
-            data.firstName = corr.firstName || pendingClarification.value.firstName;
-            data.lastName = corr.lastName || pendingClarification.value.lastName;
-            data.name_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
-          } else {
-            // No name extracted - keep pending values
-            data.firstName = pendingClarification.value.firstName;
-            data.lastName = pendingClarification.value.lastName;
+            // User provided a different name - update pending and re-confirm
+            const newFirstName = corr.firstName || pendingClarification.value.firstName;
+            const newLastName = corr.lastName || pendingClarification.value.lastName;
+            console.log(`📋 Received name correction: "${newFirstName} ${newLastName}"`);
+            
+            pendingClarification.value.firstName = newFirstName;
+            pendingClarification.value.lastName = newLastName;
+            const spelledConfirm = newLastName ? spellWordWithSpaces(newLastName) : newLastName;
+            return {
+              nextState: currentState,  // STAY in NAME state - re-confirm the correction
+              prompt: `Got it. So that's ${newFirstName}, last name ${spelledConfirm}. Is that right?`,
+              action: 'ask'
+            };
           }
-          data._nameComplete = true;
-          clearPendingClarification();
-          return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
+          
+          // CASE 5: Unclear response - ask again for clarification
+          console.log(`⚠️ Unclear name confirmation response: "${transcript}" - re-asking`);
+          const currentSpelled = pendingClarification.value.lastName ? spellWordWithSpaces(pendingClarification.value.lastName) : pendingClarification.value.lastName;
+          return {
+            nextState: currentState,  // STAY in NAME state
+            prompt: `I want to make sure I have this right. Is your last name ${currentSpelled}? Yes or no?`,
+            action: 'ask'
+          };
         }
         
         // Check if caller is confused or asking for clarification (NOT a name)
@@ -874,6 +907,23 @@ function createCallStateMachine() {
           return handleBacktrackRequest(transcript);
         }
         
+        // CRITICAL: Check if user is referencing their name/last name
+        // User corrections always take priority over linear progression
+        if (isReferringToName(lowerTranscript)) {
+          console.log(`📋 User referenced NAME in PHONE state - routing back to NAME`);
+          // Reset name data to allow re-capture
+          data.firstName = null;
+          data.lastName = null;
+          data.name_confidence = null;
+          data._nameComplete = false;
+          clearPendingClarification();
+          return {
+            nextState: transitionTo(STATES.NAME),
+            prompt: "Let's go back to your name. What is your first and last name?",
+            action: 'ask'
+          };
+        }
+        
         // CRITICAL: Check if this is city/state being provided to complete an address
         // User might say "Orange, New Jersey" to complete "11 Elf Road"
         if (data.address && !data.city) {
@@ -1055,6 +1105,22 @@ function createCallStateMachine() {
           return {
             nextState: transitionTo(STATES.DETAILS_BRANCH),
             prompt: getDetailsPrompt(),
+            action: 'ask'
+          };
+        }
+        
+        // CRITICAL: Check if user is referencing their name/last name
+        // User corrections always take priority over linear progression
+        if (isReferringToName(lowerTranscript)) {
+          console.log(`📋 User referenced NAME in EMAIL state - routing back to NAME`);
+          data.firstName = null;
+          data.lastName = null;
+          data.name_confidence = null;
+          data._nameComplete = false;
+          clearPendingClarification();
+          return {
+            nextState: transitionTo(STATES.NAME),
+            prompt: "Let's go back to your name. What is your first and last name?",
             action: 'ask'
           };
         }
@@ -2771,6 +2837,54 @@ function createCallStateMachine() {
       'that\'s correct', 'yes it is', 'yup'
     ];
     return confirmPatterns.some(p => text.includes(p));
+  }
+  
+  /**
+   * Detect if user is referring to their name (for backtracking)
+   * Used to route back to NAME state when user mentions name-related issues
+   */
+  function isReferringToName(text) {
+    const namePatterns = [
+      /\b(my\s+)?(last\s+)?name\b/i,
+      /\bspelling\b/i,
+      /\byou\s+(got|have)\s+(my\s+)?name\b/i,
+      /\bwait.*(name|spelled)/i,
+      /\bgo\s+back.*(name)/i,
+      /\babout\s+my\s+(last\s+)?name\b/i,
+      /\bname\s+(is\s+)?(wrong|incorrect|not\s+right)/i
+    ];
+    return namePatterns.some(p => p.test(text));
+  }
+  
+  /**
+   * Detect if user is saying "no" without providing a correction
+   * More strict than isCorrection - only matches clear negations
+   */
+  function isNegation(text) {
+    const cleanText = text.trim().toLowerCase();
+    // Pure negations (without additional content that looks like a correction)
+    const pureNegations = [
+      /^no\.?$/,
+      /^nope\.?$/,
+      /^not?\s+(right|correct|quite)\.?$/,
+      /^that'?s?\s+(not\s+)?(right|correct|wrong)\.?$/,
+      /^wrong\.?$/,
+      /^incorrect\.?$/,
+      /^no,?\s+that'?s?\s+(not\s+)?(it|right|correct)\.?$/
+    ];
+    // Check if it matches a pure negation pattern
+    if (pureNegations.some(p => p.test(cleanText))) {
+      return true;
+    }
+    // Also check for short "no" responses (under 15 chars without any name-like content)
+    if (cleanText.length < 15 && /^no[,.\s]/.test(cleanText)) {
+      // Make sure it doesn't contain a name correction
+      const hasNameContent = /[A-Z]{2,}/i.test(cleanText.replace(/^no[,.\s]*/i, ''));
+      if (!hasNameContent) {
+        return true;
+      }
+    }
+    return false;
   }
   
   function isCorrection(text) {
