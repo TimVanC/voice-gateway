@@ -496,6 +496,12 @@ function createCallStateMachine() {
           data.intent = analysis.intent;
           console.log(`📋 Intent LOCKED from greeting: ${data.intent}`);
           
+          // If it's a new installation (generator or HVAC), mark it
+          if (analysis.isNewInstallation) {
+            data.details.generatorType = 'new';
+            console.log(`📋 Marked as NEW installation - will skip safety check`);
+          }
+          
           // Handle out-of-scope immediately
           if (data.intent === INTENT_TYPES.OUT_OF_SCOPE) {
             console.log(`⚠️ Out-of-scope request detected`);
@@ -553,6 +559,12 @@ function createCallStateMachine() {
         if (analysis.intent) {
           data.intent = analysis.intent;
           console.log(`📋 Intent LOCKED: ${data.intent}`);
+          
+          // If it's a new installation (generator or HVAC), mark it
+          if (analysis.isNewInstallation) {
+            data.details.generatorType = 'new';
+            console.log(`📋 Marked as NEW installation - will skip safety check`);
+          }
           
           // Handle out-of-scope requests (solar, electrical, plumbing, etc.)
           if (data.intent === INTENT_TYPES.OUT_OF_SCOPE) {
@@ -622,10 +634,11 @@ function createCallStateMachine() {
           if (hasSpelledLetters) {
             // Extract all spelled letter sequences, handling "space" as word separator
             let spelledPart = transcript;
-            // Remove common prefixes
+            // Remove common prefixes (order matters!)
             spelledPart = spelledPart.replace(/^(and\s+)?not\s+fully[,.]?\s*/i, '');
             spelledPart = spelledPart.replace(/^no[,.]?\s*/i, '');
-            spelledPart = spelledPart.replace(/^(it'?s|that'?s)\s*/i, '');
+            // Handle both "it is" (two words) and "it's" (contraction)
+            spelledPart = spelledPart.replace(/^(it\s+is|it'?s|that\s+is|that'?s)\s*/i, '');
             spelledPart = spelledPart.replace(/^spelled?\s*/i, '');
             
             // Handle "space" as word separator in names like "V-A-N space C-A-U-W-E-N-B-E-R-G-E"
@@ -1649,8 +1662,20 @@ function createCallStateMachine() {
   function needsSafetyCheck() {
     // Only service calls need safety check, NOT installations
     // Installations are for new equipment, not emergencies
-    return data.intent === INTENT_TYPES.HVAC_SERVICE || 
-           (data.intent === INTENT_TYPES.GENERATOR && !isGeneratorInstallation());
+    // Skip safety for: HVAC_INSTALLATION, MEMBERSHIP, EXISTING_PROJECT, OTHER
+    // and for new generator installations
+    if (data.intent === INTENT_TYPES.HVAC_INSTALLATION) return false;
+    if (data.intent === INTENT_TYPES.MEMBERSHIP) return false;
+    if (data.intent === INTENT_TYPES.EXISTING_PROJECT) return false;
+    if (data.intent === INTENT_TYPES.OTHER) return false;
+    
+    // For generators, only need safety check if it's for service (not new installation)
+    if (data.intent === INTENT_TYPES.GENERATOR) {
+      return !isGeneratorInstallation();
+    }
+    
+    // HVAC_SERVICE always needs safety check
+    return data.intent === INTENT_TYPES.HVAC_SERVICE;
   }
   
   /**

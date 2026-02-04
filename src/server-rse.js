@@ -149,8 +149,11 @@ wss.on("connection", (twilioWs, req) => {
   let expectedTranscript = null;  // Expected transcript for current prompt
   let actualTranscript = null;  // Store actual transcript received from OpenAI
   let audioDoneReceived = false;  // Track if response.audio.done was received
+  let hallucinationCount = 0;  // Track consecutive hallucinations for same prompt
+  let lastHallucinationPrompt = null;  // Track which prompt is hallucinating
   const TTS_FAILURE_TIMEOUT_MS = 8000;  // 8 seconds - if no audio for this long, consider it failed
   const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before transferring to human
+  const MAX_HALLUCINATION_RETRIES = 3;  // Max hallucination retries before skipping to next state
   
   // State machine for this call
   const stateMachine = createCallStateMachine();
@@ -513,7 +516,16 @@ wss.on("connection", (twilioWs, req) => {
             
             if (matchRatio < 0.3 && actualTranscript.length > 20) {
               // Less than 30% match on key words - likely hallucination
-              console.error(`🚨 HALLUCINATION DETECTED - clearing buffer and resending!`);
+              
+              // Track hallucination count for this prompt
+              if (lastHallucinationPrompt === expectedTranscript) {
+                hallucinationCount++;
+              } else {
+                hallucinationCount = 1;
+                lastHallucinationPrompt = expectedTranscript;
+              }
+              
+              console.error(`🚨 HALLUCINATION DETECTED (#${hallucinationCount}/${MAX_HALLUCINATION_RETRIES}) - clearing buffer!`);
               console.error(`   Expected: "${expectedTranscript.substring(0, 80)}..."`);
               console.error(`   Got: "${actualTranscript.substring(0, 80)}..."`);
               console.error(`   Match ratio: ${(matchRatio * 100).toFixed(0)}%`);
@@ -522,6 +534,26 @@ wss.on("connection", (twilioWs, req) => {
               playBuffer = Buffer.alloc(0);
               responseInProgress = false;
               audioStreamingStarted = false;
+              
+              // Check if we've exceeded max retries
+              if (hallucinationCount >= MAX_HALLUCINATION_RETRIES) {
+                console.error(`🛑 Max hallucination retries reached - skipping to next state`);
+                // Reset counters
+                hallucinationCount = 0;
+                lastHallucinationPrompt = null;
+                
+                // Skip to next state - let state machine handle this gracefully
+                setTimeout(() => {
+                  if (openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
+                    const currentState = stateMachine.getState();
+                    console.log(`🔄 Forcing state transition from ${currentState} due to persistent hallucination`);
+                    
+                    // Tell the user we're having trouble and move on
+                    sendStatePrompt("I'm sorry, let me continue. " + (stateMachine.getNextPrompt() || "Is there anything else I can help with?"));
+                  }
+                }, 300);
+                return;  // Don't try to resend the same prompt
+              }
               
               // Store the prompt to resend (before it gets cleared)
               const promptToResend = expectedTranscript;
@@ -535,7 +567,7 @@ wss.on("connection", (twilioWs, req) => {
                 console.log(`⚠️ Cancel attempt failed (expected): ${cancelErr.message}`);
               }
               
-              // ALWAYS resend the correct prompt after a brief delay
+              // Resend the correct prompt after a brief delay
               setTimeout(() => {
                 if (promptToResend && openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
                   console.log(`🔄 Resending correct prompt after hallucination: "${promptToResend.substring(0, 50)}..."`);
@@ -544,6 +576,13 @@ wss.on("connection", (twilioWs, req) => {
                   console.error(`❌ Cannot resend - OpenAI: ${openaiWs?.readyState}, Twilio: ${twilioWs?.readyState}, prompt: ${!!promptToResend}`);
                 }
               }, 300);  // Slightly longer delay to ensure cleanup
+            } else {
+              // Successful response - reset hallucination counters
+              if (hallucinationCount > 0) {
+                console.log(`✅ Response matched expected - resetting hallucination counter`);
+                hallucinationCount = 0;
+                lastHallucinationPrompt = null;
+              }
             }
           }
         } else {
@@ -1359,8 +1398,14 @@ STRICT RULES:
     // Intent classification - only if intent is NOT already locked
     let analysis = {};
     if ((currentState === STATES.GREETING || currentState === STATES.INTENT) && !currentData.intent) {
-      analysis.intent = classifyIntent(lowerTranscript);
-      if (analysis.intent) {
+      const intentResult = classifyIntent(lowerTranscript);
+      // Handle both simple intent (string) and complex intent (object with isNew flag)
+      if (intentResult && typeof intentResult === 'object') {
+        analysis.intent = intentResult.intent;
+        analysis.isNewInstallation = intentResult.isNew;
+        console.log(`📋 Detected intent: ${analysis.intent} (new installation: ${analysis.isNewInstallation})`);
+      } else if (intentResult) {
+        analysis.intent = intentResult;
         console.log(`📋 Detected intent: ${analysis.intent}`);
       }
     }
@@ -1489,8 +1534,14 @@ STRICT RULES:
     // Intent classification - only if intent is NOT already locked
     let analysis = {};
     if ((currentState === STATES.GREETING || currentState === STATES.INTENT) && !currentData.intent) {
-      analysis.intent = classifyIntent(lowerTranscript);
-      if (analysis.intent) {
+      const intentResult = classifyIntent(lowerTranscript);
+      // Handle both simple intent (string) and complex intent (object with isNew flag)
+      if (intentResult && typeof intentResult === 'object') {
+        analysis.intent = intentResult.intent;
+        analysis.isNewInstallation = intentResult.isNew;
+        console.log(`📋 Detected intent: ${analysis.intent} (new installation: ${analysis.isNewInstallation})`);
+      } else if (intentResult) {
+        analysis.intent = intentResult;
         console.log(`📋 Detected intent: ${analysis.intent}`);
       }
     } else if (currentData.intent) {
@@ -1611,8 +1662,15 @@ Sound polite and helpful, not dismissive.`,
     // ALLOWED SERVICES - Order matters! Check installation FIRST
     // ============================================================
     
-    // Generator keywords
+    // Generator keywords - check for NEW vs SERVICE
     if (/\b(generator|generac|cummins|backup power|standby|whole house power)\b/.test(text)) {
+      // Check if it's for a NEW generator (installation, not service)
+      const isNewGenerator = /\b(new|install|installation|buy|purchase|looking for|interested in|want to get|quote|estimate|price|cost)\b/.test(text);
+      if (isNewGenerator) {
+        // Return with a flag that we can use to skip safety check
+        // We'll handle this by returning a special object
+        return { intent: INTENT_TYPES.GENERATOR, isNew: true };
+      }
       return INTENT_TYPES.GENERATOR;
     }
     
