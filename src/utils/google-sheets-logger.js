@@ -85,7 +85,10 @@ function removeFillerPhrases(text) {
     /\s+(um|uh|er|ah|oh|well|so|like)\s*$/gi,
     /\s+(okay|ok|alright|right|sure|yeah|yes|yep|yup)\s*$/gi,
     /^(i\s+think|i\s+guess|i\s+mean|you\s+know)\s*,?\s*/gi,
-    /\s+(i\s+think|i\s+guess|i\s+mean|you\s+know)\s*$/gi
+    /\s+(i\s+think|i\s+guess|i\s+mean|you\s+know)\s*$/gi,
+    // Additional filler phrases
+    /\b(to\s+be\s+honest|let\s+me\s+think|let\s+me\s+see|i\s+don'?t\s+know|i'?m\s+not\s+sure)\b\s*,?\s*/gi,
+    /^a\s+(to\s+be\s+honest|um+|uh+)\s*\.?\s*/gi  // "a to be honest." pattern
   ];
   
   fillerPatterns.forEach(pattern => {
@@ -648,7 +651,16 @@ function buildServiceAddress(callData) {
 function normalizeSystemType(systemType) {
   if (!systemType) return '';
   
-  const normalized = systemType.toLowerCase().trim();
+  // Remove filler phrases first - these should never be system types
+  let cleaned = systemType
+    .replace(/^(oh|uh|um|er|ah|yeah|yes|well|so|okay|to be honest|let me think|let me see|i don't know|i'm not sure)\s*[,.]?\s*/gi, '')
+    .replace(/\b(it'?s|it\s+is|that'?s|that\s+is|here|there)\b/gi, '')
+    .trim();
+  
+  // If only filler words, return empty (fallback to intent-based summary)
+  if (!cleaned || cleaned.length < 2) return '';
+  
+  const normalized = cleaned.toLowerCase().trim();
   
   // Map common variations to canonical values
   const systemTypeMap = {

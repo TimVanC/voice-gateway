@@ -1226,6 +1226,21 @@ function createCallStateMachine() {
         };
         
       case STATES.DETAILS_BRANCH:
+        // CRITICAL: Filter out pure filler words/phrases that aren't actual answers
+        // Examples: "Um", "uh", "to be honest", "let me think", "well", etc.
+        const fillerOnlyPattern = /^(um+|uh+|er+|hmm+|well|so|oh|okay|to be honest|let me think|let me see|i don't know|i'm not sure)[,.]?\s*$/i;
+        const cleanedForFillerCheck = transcript.trim().replace(/[.,!?]+$/, '');
+        if (fillerOnlyPattern.test(cleanedForFillerCheck) || cleanedForFillerCheck.length < 3) {
+          console.log(`⏭️ Skipping filler response in DETAILS_BRANCH: "${transcript}"`);
+          // Don't advance, just re-prompt the same question
+          const currentDetailPrompt = getDetailsPrompt();
+          return {
+            nextState: currentState,
+            prompt: currentDetailPrompt || "Could you tell me more about that?",
+            action: 'ask'
+          };
+        }
+        
         // CRITICAL: Check if user gave an address instead of details
         // "11 Elf Road, West Orange, New Jersey" should be stored as address, not systemType
         if (looksLikeAddress(transcript)) {
@@ -2137,12 +2152,27 @@ function createCallStateMachine() {
     // STEP 2: Check for "My first name is X, last name is Y" pattern
     if (/first\s+name\s+is/i.test(name) && /last\s+name\s+is/i.test(name)) {
       const firstNameMatch = name.match(/first\s+name\s+is\s+([^,]+)/i);
-      const lastNameMatch = name.match(/last\s+name\s+is\s+([^,.\s]+)/i);
+      // FIXED: Don't stop at space - capture full multi-word last names like "Van Cowenberg"
+      const lastNameMatch = name.match(/last\s+name\s+is\s+([^,.]+)/i);
       if (firstNameMatch && lastNameMatch) {
         return {
           firstName: firstNameMatch[1].trim().replace(/[.,!?]+$/g, ''),
           lastName: lastNameMatch[1].trim().replace(/[.,!?]+$/g, '')
         };
+      }
+    }
+    
+    // STEP 2b: Check for "FirstName, last name is LastName" pattern (without "first name is")
+    // Example: "Tim, last name is Van Cowenberg"
+    if (/last\s+name\s+is/i.test(name) && !/first\s+name\s+is/i.test(name)) {
+      const match = name.match(/^([^,]+),\s*last\s+name\s+is\s+(.+)$/i);
+      if (match) {
+        const firstName = match[1].trim().replace(/[.,!?]+$/g, '');
+        const lastName = match[2].trim().replace(/[.,!?]+$/g, '');
+        if (firstName && lastName) {
+          console.log(`📋 Extracted from "FirstName, last name is LastName" pattern: firstName="${firstName}", lastName="${lastName}"`);
+          return { firstName, lastName };
+        }
       }
     }
     

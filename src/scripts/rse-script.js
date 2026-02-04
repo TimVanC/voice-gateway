@@ -149,7 +149,7 @@ const CONFIRMATION = {
 // ============================================================================
 const CLOSE = {
   anything_else: "Is there anything else I can help with today?",
-  goodbye: "Thanks for calling RSE Energy Group. Have a great day.",
+  goodbye: "Thanks for calling RSE Energy Group. Someone will be in touch with you soon. Have a great day.",
   out_of_scope_close: "Thanks for calling. Have a great day."
 };
 
