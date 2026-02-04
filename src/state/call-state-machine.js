@@ -248,10 +248,28 @@ function createCallStateMachine() {
     return word.split('').filter(c => /[a-zA-Z0-9]/.test(c)).join('-').toUpperCase();
   }
   
-  /** Spell word with spaces for immediate confirmation (e.g. "VAN" → "V A N"). Do not spell street types. */
+  /** 
+   * Spell word in CHUNKED format to prevent LLM truncation.
+   * Groups of 3 letters separated by periods for natural pauses.
+   * Example: "VANCAUWENBERGE" → "V A N. C A U. W E N. B E R. G E."
+   * This prevents OpenAI from truncating mid-stream on long spellings.
+   */
   function spellWordWithSpaces(word) {
     if (!word) return '';
-    return word.replace(/\s/g, '').split('').filter(c => /[a-zA-Z0-9]/.test(c)).map(c => c.toUpperCase()).join(' ');
+    // Remove spaces and extract only alphanumeric characters
+    const letters = word.replace(/\s/g, '').split('').filter(c => /[a-zA-Z0-9]/.test(c)).map(c => c.toUpperCase());
+    
+    if (letters.length === 0) return '';
+    
+    // Chunk into groups of 3 letters
+    const chunks = [];
+    for (let i = 0; i < letters.length; i += 3) {
+      const chunk = letters.slice(i, i + 3).join(' ');
+      chunks.push(chunk);
+    }
+    
+    // Join with periods for natural pauses
+    return chunks.join('. ') + '.';
   }
   
   /** Street type suffixes we do NOT spell (road, street, avenue, etc.) */
@@ -633,50 +651,64 @@ function createCallStateMachine() {
           }
           
           // CASE 2: User provides a spelled correction (e.g., "No, it's V-A-N...")
-          // Patterns: "No. It's spelled V-A-N...", "And not fully, it's V-A-N space C-A-U...", "it's V-A-N-C-A-U..."
+          // Patterns: "Uh, no, it's V-A-N-C-A-U-W-E-N-B-E-R-G-E.", "V A N space C A U W E N B E R G E"
+          // CRITICAL: Only extract ISOLATED single letters (not letters within words like "uh", "no", "it's")
           const hasSpelledLetters = /([A-Z])[-.\s]+([A-Z])[-.\s]+([A-Z])/i.test(transcript);
           if (hasSpelledLetters) {
-            let spelledPart = transcript;
-            // Remove common prefixes (order matters!)
-            spelledPart = spelledPart.replace(/^(and\s+)?not\s+fully[,.]?\s*/i, '');
-            spelledPart = spelledPart.replace(/^no[,.]?\s*/i, '');
-            spelledPart = spelledPart.replace(/^(it\s+is|it'?s|that\s+is|that'?s)\s*/i, '');
-            spelledPart = spelledPart.replace(/^spelled?\s*/i, '');
+            console.log(`📋 Detected spelled letters in: "${transcript}"`);
+            
+            // Extract ONLY isolated single letters (letters surrounded by non-letter characters)
+            // This ignores filler words like "uh", "no", "it's" because their letters aren't isolated
+            // Pattern: single letter preceded and followed by non-letter (or start/end)
+            const isolatedLetters = transcript.toUpperCase().match(/(?:^|[^A-Z])([A-Z])(?=[^A-Z]|$)/g) || [];
+            const letters = isolatedLetters.map(m => m.replace(/[^A-Z]/g, '')).filter(l => l.length === 1);
+            
+            console.log(`📋 Extracted isolated letters: [${letters.join(', ')}] (${letters.length} letters)`);
             
             // Handle "space" as word separator in names like "V-A-N space C-A-U-W-E-N-B-E-R-G-E"
-            const hasSpace = /\bspace\b/i.test(spelledPart);
+            const hasSpace = /\bspace\b/i.test(transcript);
             let correctedLastName = '';
             
-            if (hasSpace) {
-              const parts = spelledPart.split(/\s+space\s+/i);
-              const nameParts = parts.map(part => {
-                const letters = part.match(/[A-Z]/gi) || [];
-                if (letters.length >= 1) {
-                  return letters.join('').charAt(0).toUpperCase() + letters.join('').slice(1).toLowerCase();
+            if (letters.length >= 3) {
+              if (hasSpace) {
+                // Find where "space" appears and split the letters accordingly
+                // For now, handle common pattern: first 3 letters are prefix (Van, De, etc.)
+                const raw = letters.join('');
+                // Check for common Dutch/German name prefixes
+                if (raw.length > 3 && /^(VAN|VON|DE|DU|LA|LE)/i.test(raw)) {
+                  const prefix = raw.slice(0, 3);
+                  const rest = raw.slice(3);
+                  correctedLastName = prefix.charAt(0).toUpperCase() + prefix.slice(1).toLowerCase() + 
+                                      ' ' + rest.charAt(0).toUpperCase() + rest.slice(1).toLowerCase();
+                } else {
+                  correctedLastName = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
                 }
-                return '';
-              }).filter(p => p.length > 0);
-              correctedLastName = nameParts.join(' ');
-            } else {
-              const letters = spelledPart.match(/[A-Z]/gi) || [];
-              if (letters.length >= 2) {
-                correctedLastName = letters.join('').charAt(0).toUpperCase() + letters.join('').slice(1).toLowerCase();
+              } else {
+                // Single word - capitalize first letter
+                const raw = letters.join('');
+                // Check for common prefixes even without explicit "space"
+                if (raw.length > 5 && /^(VAN|VON)/i.test(raw)) {
+                  const prefix = raw.slice(0, 3);
+                  const rest = raw.slice(3);
+                  correctedLastName = prefix.charAt(0).toUpperCase() + prefix.slice(1).toLowerCase() + 
+                                      ' ' + rest.charAt(0).toUpperCase() + rest.slice(1).toLowerCase();
+                } else {
+                  correctedLastName = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+                }
               }
-            }
-            
-            if (correctedLastName.length >= 2) {
-              // User provided a valid spelled correction - store it and re-confirm
-              const newLastName = correctedLastName;
-              console.log(`📋 Received spelled correction: "${newLastName}" (was: "${pendingClarification.value.lastName}")`);
               
-              // Update pending value with correction and re-confirm (don't advance yet!)
-              pendingClarification.value.lastName = newLastName;
-              const spelledConfirm = spellWordWithSpaces(newLastName);
+              console.log(`📋 Parsed spelled correction: "${correctedLastName}" (from ${letters.length} letters)`);
+              
+              // User provided a valid spelled correction - store it and re-confirm
+              pendingClarification.value.lastName = correctedLastName;
+              const spelledConfirm = spellWordWithSpaces(correctedLastName);
               return {
                 nextState: currentState,  // STAY in NAME state
-                prompt: `Got it. So your last name is ${spelledConfirm}. Is that correct?`,
+                prompt: `Got it. So your last name is ${spelledConfirm} Is that correct?`,
                 action: 'ask'
               };
+            } else {
+              console.log(`⚠️ Not enough isolated letters extracted (${letters.length}) - need at least 3`);
             }
           }
           

@@ -695,15 +695,39 @@ wss.on("connection", (twilioWs, req) => {
               actualTranscript.trim().toLowerCase() === expectedTranscript.trim().toLowerCase();
             const substantialAudio = audioSeconds >= 5; // At least 5 seconds of audio
             
+            // CRITICAL: Check if this is a SPELLING prompt (contains chunked letters like "V A N.")
+            // Spelling prompts require stricter validation - transcript must contain the spelled letters
+            const hasSpellingPrompt = expectedTranscript && /\b([A-Z]\s){2,}[A-Z]\.?\b/.test(expectedTranscript);
+            let spellingComplete = true;  // Default to true for non-spelling prompts
+            
+            if (hasSpellingPrompt && transcriptComplete) {
+              // Extract expected letters from the prompt (e.g., "V A N. C A U." -> "VANCAU")
+              const expectedLetters = (expectedTranscript.match(/\b[A-Z]\b/g) || []).join('');
+              const actualLetters = (actualTranscript.toUpperCase().match(/\b[A-Z]\b/g) || []).join('');
+              
+              // Check if actual transcript contains the full expected sequence
+              // OR at minimum, contains the last 3 letters (for partial match)
+              const lastThreeExpected = expectedLetters.slice(-3);
+              spellingComplete = actualLetters.includes(expectedLetters) || 
+                                 (actualLetters.length >= expectedLetters.length * 0.9 && actualLetters.includes(lastThreeExpected));
+              
+              console.log(`🔤 Spelling validation: expected="${expectedLetters}" (${expectedLetters.length} letters), actual="${actualLetters}" (${actualLetters.length} letters), complete=${spellingComplete}`);
+              
+              if (!spellingComplete) {
+                console.log(`⚠️ Spelling prompt INCOMPLETE: transcript missing letters (expected last 3: "${lastThreeExpected}")`);
+              }
+            }
+            
             // If transcript is complete and matches expected, or we got substantial audio with complete transcript,
             // treat as successful even if status is INCOMPLETE (OpenAI sometimes marks complete responses as incomplete)
             // BUT: If audioDoneReceived is false, the audio stream was cut off before completion - retry
             // Also check if audio is significantly shorter than expected for the transcript length
+            // FOR SPELLING: Also require spellingComplete to be true
             const expectedAudioLength = actualTranscript ? actualTranscript.length * 0.1 : 0; // Rough estimate: ~100ms per character
             const audioTooShort = expectedAudioLength > 0 && audioSeconds < expectedAudioLength * 0.6; // Less than 60% of expected
             const audioWasCutOff = !audioDoneReceived && audioStreamingStarted; // Audio started but never got audio.done
             
-            if (transcriptComplete && (transcriptMatches || substantialAudio) && !audioTooShort && !audioWasCutOff) {
+            if (transcriptComplete && (transcriptMatches || substantialAudio) && !audioTooShort && !audioWasCutOff && spellingComplete) {
               const bufferSeconds = playBuffer.length / 8000;
               console.log(`✅ Response marked INCOMPLETE but transcript is complete (${actualTranscript.length} chars, ${audioSeconds.toFixed(1)}s audio, ${bufferSeconds.toFixed(1)}s in buffer) - treating as success`);
               
