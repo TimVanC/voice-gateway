@@ -657,10 +657,16 @@ function createCallStateMachine() {
           if (hasSpelledLetters) {
             console.log(`📋 Detected spelled letters in: "${transcript}"`);
             
+            // CRITICAL: First remove contractions like "it's", "that's", "what's" to avoid
+            // extracting the trailing letter (e.g., 'S' from "it's")
+            let cleanedForLetters = transcript
+              .replace(/\b(it'?s|that'?s|what'?s|there'?s|here'?s|let'?s|he'?s|she'?s|who'?s)\b/gi, '')
+              .replace(/\b(i'm|you're|we're|they're|isn't|aren't|won't|can't|don't)\b/gi, '');
+            
             // Extract ONLY isolated single letters (letters surrounded by non-letter characters)
-            // This ignores filler words like "uh", "no", "it's" because their letters aren't isolated
+            // This ignores filler words like "uh", "no" because their letters aren't isolated
             // Pattern: single letter preceded and followed by non-letter (or start/end)
-            const isolatedLetters = transcript.toUpperCase().match(/(?:^|[^A-Z])([A-Z])(?=[^A-Z]|$)/g) || [];
+            const isolatedLetters = cleanedForLetters.toUpperCase().match(/(?:^|[^A-Z])([A-Z])(?=[^A-Z]|$)/g) || [];
             const letters = isolatedLetters.map(m => m.replace(/[^A-Z]/g, '')).filter(l => l.length === 1);
             
             console.log(`📋 Extracted isolated letters: [${letters.join(', ')}] (${letters.length} letters)`);
@@ -1660,6 +1666,22 @@ function createCallStateMachine() {
               data.lastName = lastNameText;
             }
             console.log(`✅ Last name corrected to: ${data.lastName}`);
+            return {
+              nextState: currentState,
+              prompt: getConfirmationPrompt(),
+              action: 'confirm'
+            };
+          }
+        }
+        
+        // Handle email corrections
+        // Patterns: "email is X", "it's X at gmail", "timvanc@gmail.com", spelled letters like "T-I-M-V-A-N-C"
+        if (lowerTranscript.includes('email') || lowerTranscript.includes('@') || lowerTranscript.includes(' at ') || 
+            lowerTranscript.includes('gmail') || lowerTranscript.includes('yahoo') || lowerTranscript.includes('hotmail')) {
+          const emailExtracted = extractEmail(transcript);
+          if (emailExtracted && emailExtracted.includes('@')) {
+            data.email = emailExtracted;
+            console.log(`✅ Email corrected to: ${data.email}`);
             return {
               nextState: currentState,
               prompt: getConfirmationPrompt(),

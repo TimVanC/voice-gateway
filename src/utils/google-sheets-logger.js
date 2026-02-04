@@ -216,14 +216,22 @@ function validateAndNormalizeAddress(address) {
   // Normalize spelling (E L F → Elf)
   cleaned = normalizeSpelling(cleaned);
   
-  // Must look like a real address
-  // Should have a street number and street name
+  // Must look like a real address - should have a street number at minimum
   const hasNumber = /^\s*\d{1,6}\s+/.test(cleaned);
   const hasStreetType = /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|place|pl|terrace|terr)\b/i.test(cleaned);
   
-  if (!hasNumber || !hasStreetType) {
+  // Accept address if it has a number and at least one word after it
+  // Street type is preferred but not required (user might say "11 Elf" instead of "11 Elf Road")
+  const hasStreetName = /^\s*\d{1,6}\s+\S+/.test(cleaned);
+  
+  if (!hasNumber || !hasStreetName) {
     console.log(`⚠️  Invalid address format: "${address}"`);
     return '';
+  }
+  
+  // Log if street type is missing (but still accept it)
+  if (!hasStreetType) {
+    console.log(`📋 Address accepted without explicit street type: "${cleaned}"`);
   }
   
   // Reject if it contains symptom/problem descriptions
@@ -624,9 +632,23 @@ function buildServiceAddress(callData) {
     }
   }
   
-  // Add state if provided
+  // Add state if provided (convert full name to abbreviation)
   if (state) {
-    const normalizedState = state.toUpperCase().trim();
+    const stateAbbreviations = {
+      'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
+      'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
+      'hawaii': 'HI', 'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
+      'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+      'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS', 'missouri': 'MO',
+      'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ',
+      'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH',
+      'oklahoma': 'OK', 'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+      'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT', 'vermont': 'VT',
+      'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV', 'wisconsin': 'WI', 'wyoming': 'WY',
+      'district of columbia': 'DC'
+    };
+    const stateLower = state.toLowerCase().trim();
+    const normalizedState = stateAbbreviations[stateLower] || state.toUpperCase().trim();
     if (normalizedState.length === 2) {
       parts.push(normalizedState);
     }

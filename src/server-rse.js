@@ -659,6 +659,31 @@ wss.on("connection", (twilioWs, req) => {
             return; // Don't start recovery timer
           }
           
+          // CRITICAL: For ENDED state, if goodbye was cut short, retry it once
+          // User should hear the full "Thanks for calling... Someone will be in touch soon. Have a great day."
+          if (currentState === STATES.ENDED) {
+            const audioSeconds = totalAudioBytesSent / 8000;
+            // Goodbye message should be ~5-6 seconds. If less than 4s, it was cut off.
+            if (audioSeconds < 4) {
+              const retryCount = promptRetryCount['goodbye'] || 0;
+              if (retryCount < 1) {
+                console.log(`🔄 Goodbye was cut short (${audioSeconds.toFixed(1)}s) - retrying once`);
+                promptRetryCount['goodbye'] = retryCount + 1;
+                responseInProgress = false;
+                audioStreamingStarted = false;
+                setTimeout(() => {
+                  sendStatePrompt(CLOSE.goodbye);
+                }, 500);
+                return;
+              }
+            }
+            // If already retried or audio was sufficient, just let it play out
+            console.log(`👋 Goodbye delivered (${audioSeconds.toFixed(1)}s) - letting audio buffer play`);
+            responseInProgress = false;
+            audioStreamingStarted = false;
+            return;
+          }
+          
           if (!audioStreamingStarted || totalAudioBytesSent === 0) {
             // No audio was sent at all - check retry count
             let promptKey = currentPromptText || 'unknown';
