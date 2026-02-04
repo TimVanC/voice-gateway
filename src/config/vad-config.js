@@ -4,11 +4,11 @@
  */
 
 const VAD_CONFIG = {
-  // MUCH more conservative settings to prevent interrupting user mid-thought
-  // and reduce phantom speech detection from background noise
-  threshold: 0.85,           // Very high - only clear speech triggers (was 0.7)
-  prefix_padding_ms: 500,    // More padding before speech triggers (was 400)
-  silence_duration_ms: 1200, // MUCH longer - wait for real end of speech (was 650)
+  // Balanced settings - sensitive enough to catch "yes"/"no" but not phantom triggers
+  // Previous 0.85 was TOO HIGH and missed quiet confirmations like "yes" or "hello?"
+  threshold: 0.65,           // More sensitive - catch quiet speech (was 0.85)
+  prefix_padding_ms: 400,    // Standard padding before speech triggers (was 500)
+  silence_duration_ms: 1000, // Reasonable wait for end of speech (was 1200)
   
   // Dynamic silence adjustments
   silence_short: 800,    // Short answers still get a bit of patience

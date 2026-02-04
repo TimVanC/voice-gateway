@@ -187,6 +187,12 @@ wss.on("connection", (twilioWs, req) => {
   let silenceRecoveryTimer = null;       // Timer to recover from stuck state
   const SILENCE_RECOVERY_MS = 6000;      // Wait 6 seconds before prompting
   
+  // ============================================================================
+  // CONFIRMATION RECOVERY (for when user doesn't respond to yes/no questions)
+  // ============================================================================
+  let confirmationRecoveryTimer = null;  // Timer for yes/no confirmation prompts
+  const CONFIRMATION_RECOVERY_MS = 12000; // 12 seconds - shorter than general recovery
+  
   // Global silence monitor - never leave caller in silence
   let globalSilenceMonitor = null;
   let lastAudioPlaybackTime = Date.now();
@@ -371,7 +377,7 @@ wss.on("connection", (twilioWs, req) => {
         const elapsed = Date.now() - lastActivityTime;
         console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()})`);
         
-        if (elapsed > 30000) {
+        if (elapsed > 20000) {
           // CRITICAL: Do NOT trigger recovery during critical states
           // The user needs time to listen to prompts and respond
           const state = stateMachine.getState();
@@ -381,7 +387,8 @@ wss.on("connection", (twilioWs, req) => {
           } else {
             console.log(`⚠️ No OpenAI activity for ${elapsed}ms in ${state} state`);
             // If we've been waiting too long and no response is in progress, send recovery prompt
-            if (!responseInProgress && elapsed > 30000) {
+            // Reduced from 30s to 20s for faster recovery
+            if (!responseInProgress && elapsed > 20000) {
               console.log(`🔄 Recovery: System went nonverbal, sending next prompt`);
               sendNextPromptIfNeeded();
             }
@@ -451,6 +458,9 @@ wss.on("connection", (twilioWs, req) => {
         
         // Clear silence recovery timer - we're responding
         clearSilenceRecoveryTimer();
+        
+        // Clear confirmation recovery timer - new response starting
+        clearConfirmationRecoveryTimer();
         
         // Start timeout to detect if audio stops mid-sentence
         clearAudioCompletionTimeout();
@@ -896,6 +906,17 @@ wss.on("connection", (twilioWs, req) => {
         // Reset dynamic silence to default after turn completes
         currentSilenceDuration = VAD_CONFIG.silence_default;
         
+        // Start confirmation recovery timer if we just sent a yes/no question
+        // Detect by checking if the prompt contained confirmation language
+        const isConfirmationPrompt = expectedTranscript && (
+          /\bIs that (correct|right)\??\s*$/i.test(expectedTranscript) ||
+          /\bYes or no\??\s*$/i.test(expectedTranscript) ||
+          /\bDid I get.+right\??\s*$/i.test(expectedTranscript)
+        );
+        if (isConfirmationPrompt && status !== "cancelled") {
+          startConfirmationRecoveryTimer();
+        }
+        
         // Process any pending input that arrived while response was in progress
         if (pendingUserInput && status !== "cancelled") {
           console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
@@ -918,6 +939,9 @@ wss.on("connection", (twilioWs, req) => {
         
         // Clear silence recovery timer - user is responding!
         clearSilenceRecoveryTimer();
+        
+        // Clear confirmation recovery timer - user is responding!
+        clearConfirmationRecoveryTimer();
         
         // Reset acknowledgement tracking for new user turn
         backchannel.resetTurn();
@@ -1026,6 +1050,9 @@ wss.on("connection", (twilioWs, req) => {
           
           // Clear the waiting flag - we have the transcript now
           waitingForTranscription = false;
+          
+          // Clear confirmation recovery timer - we got a response
+          clearConfirmationRecoveryTimer();
           
           // If a response is already in progress (shouldn't happen after our cancel),
           // log it but still process the input
@@ -1148,6 +1175,40 @@ Say the ENTIRE sentence above, word for word.`,
     if (silenceRecoveryTimer) {
       clearTimeout(silenceRecoveryTimer);
       silenceRecoveryTimer = null;
+    }
+  }
+  
+  // ============================================================================
+  // CONFIRMATION RECOVERY TIMER - For yes/no questions that go unanswered
+  // ============================================================================
+  function startConfirmationRecoveryTimer() {
+    // Clear any existing timer
+    clearConfirmationRecoveryTimer();
+    
+    confirmationRecoveryTimer = setTimeout(() => {
+      confirmationRecoveryTimer = null;
+      
+      const currentState = stateMachine.getState();
+      
+      // Only trigger if we're still waiting for input and not already responding
+      if (!responseInProgress && !speechStartTime && openaiWs?.readyState === WebSocket.OPEN) {
+        console.log(`⏰ Confirmation recovery: no response after ${CONFIRMATION_RECOVERY_MS}ms`);
+        
+        // Re-send a gentle "are you still there?" + the question
+        const prompt = stateMachine.getNextPrompt();
+        if (prompt) {
+          sendStatePrompt("Are you still there? " + prompt);
+        }
+      }
+    }, CONFIRMATION_RECOVERY_MS);
+    
+    console.log(`⏰ Started confirmation recovery timer (${CONFIRMATION_RECOVERY_MS}ms)`);
+  }
+  
+  function clearConfirmationRecoveryTimer() {
+    if (confirmationRecoveryTimer) {
+      clearTimeout(confirmationRecoveryTimer);
+      confirmationRecoveryTimer = null;
     }
   }
   
@@ -2071,6 +2132,7 @@ Keep it SHORT.`;
     if (silenceTimer) clearTimeout(silenceTimer);
     if (longSpeechTimer) clearTimeout(longSpeechTimer);
     clearSilenceRecoveryTimer();
+    clearConfirmationRecoveryTimer();
     clearAudioCompletionTimeout();
     stopGlobalSilenceMonitor();
     backchannel.cancel();
