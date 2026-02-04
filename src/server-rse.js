@@ -518,23 +518,32 @@ wss.on("connection", (twilioWs, req) => {
               console.error(`   Got: "${actualTranscript.substring(0, 80)}..."`);
               console.error(`   Match ratio: ${(matchRatio * 100).toFixed(0)}%`);
               
-              // CRITICAL: Clear the bad audio and resend the correct prompt
+              // CRITICAL: Clear the bad audio
               playBuffer = Buffer.alloc(0);
               responseInProgress = false;
               audioStreamingStarted = false;
               
-              // Cancel any ongoing response
-              if (openaiWs?.readyState === WebSocket.OPEN) {
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              // Store the prompt to resend (before it gets cleared)
+              const promptToResend = expectedTranscript;
+              
+              // Try to cancel any ongoing response (may fail if already done)
+              try {
+                if (openaiWs?.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                }
+              } catch (cancelErr) {
+                console.log(`⚠️ Cancel attempt failed (expected): ${cancelErr.message}`);
               }
               
-              // Resend the correct prompt after a brief delay
+              // ALWAYS resend the correct prompt after a brief delay
               setTimeout(() => {
-                if (expectedTranscript && openaiWs?.readyState === WebSocket.OPEN) {
-                  console.log(`🔄 Resending correct prompt: "${expectedTranscript.substring(0, 50)}..."`);
-                  sendStatePrompt(expectedTranscript);
+                if (promptToResend && openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
+                  console.log(`🔄 Resending correct prompt after hallucination: "${promptToResend.substring(0, 50)}..."`);
+                  sendStatePrompt(promptToResend);
+                } else {
+                  console.error(`❌ Cannot resend - OpenAI: ${openaiWs?.readyState}, Twilio: ${twilioWs?.readyState}, prompt: ${!!promptToResend}`);
                 }
-              }, 100);
+              }, 300);  // Slightly longer delay to ensure cleanup
             }
           }
         } else {
