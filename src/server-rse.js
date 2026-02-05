@@ -412,7 +412,7 @@ wss.on("connection", (twilioWs, req) => {
       } else {
         console.warn(`⚠️ Keep-alive: OpenAI WS not open (state: ${openaiWs?.readyState})`);
       }
-    }, 20000);
+    }, 10000);  // Reduced from 20s to 10s for faster recovery
   }
   
   // ============================================================================
@@ -815,6 +815,17 @@ wss.on("connection", (twilioWs, req) => {
               // Reset dynamic silence to default after turn completes
               currentSilenceDuration = VAD_CONFIG.silence_default;
               
+              // Start confirmation recovery timer if this was a yes/no question
+              // Use currentPromptText before it gets cleared
+              const wasConfirmationPrompt = currentPromptText && (
+                /\bIs that (correct|right)\??\s*$/i.test(currentPromptText) ||
+                /\bYes or no\??\s*$/i.test(currentPromptText) ||
+                /\bDid I get.+right\??\s*$/i.test(currentPromptText)
+              );
+              if (wasConfirmationPrompt) {
+                startConfirmationRecoveryTimer();
+              }
+              
               // Process any pending input that arrived while response was in progress
               if (pendingUserInput && playBuffer.length <= 3200) {
                 // Only process if buffer is nearly empty
@@ -891,6 +902,9 @@ wss.on("connection", (twilioWs, req) => {
           console.log(`✅ Response complete (state: ${currentState})`);
           assistantTurnCount++;  // Track for filler spacing
           
+          // CRITICAL: Save expectedTranscript BEFORE nullifying for confirmation check
+          const completedPrompt = expectedTranscript;
+          
           // Reset retry count on successful completion
           if (currentPromptText) {
             if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
@@ -935,10 +949,11 @@ wss.on("connection", (twilioWs, req) => {
         
         // Start confirmation recovery timer if we just sent a yes/no question
         // Detect by checking if the prompt contained confirmation language
-        const isConfirmationPrompt = expectedTranscript && (
-          /\bIs that (correct|right)\??\s*$/i.test(expectedTranscript) ||
-          /\bYes or no\??\s*$/i.test(expectedTranscript) ||
-          /\bDid I get.+right\??\s*$/i.test(expectedTranscript)
+        // Use completedPrompt (saved before nullifying) instead of expectedTranscript
+        const isConfirmationPrompt = completedPrompt && (
+          /\bIs that (correct|right)\??\s*$/i.test(completedPrompt) ||
+          /\bYes or no\??\s*$/i.test(completedPrompt) ||
+          /\bDid I get.+right\??\s*$/i.test(completedPrompt)
         );
         if (isConfirmationPrompt && status !== "cancelled") {
           startConfirmationRecoveryTimer();
