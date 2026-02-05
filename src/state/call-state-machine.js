@@ -124,6 +124,26 @@ function createCallStateMachine() {
    * Get the next prompt based on current state and data
    */
   function getNextPrompt() {
+    // CRITICAL: If we're awaiting confirmation, return the confirmation prompt
+    // This prevents "hello?" from resetting to the default state prompt
+    if (pendingClarification.awaitingConfirmation && pendingClarification.field) {
+      switch (pendingClarification.field) {
+        case 'name':
+          // Don't spell it out - just ask for confirmation
+          const firstName = pendingClarification.value?.firstName || '';
+          const lastName = pendingClarification.value?.lastName || '';
+          return `I have ${firstName} ${lastName}. Is that correct?`;
+        case 'phone':
+          return `I have ${pendingClarification.value}. Is that correct?`;
+        case 'email':
+          return `I have ${pendingClarification.value}. Is that correct?`;
+        case 'address':
+          return `Is that address correct?`;
+        case 'availability':
+          return `I have ${pendingClarification.value}. Is that correct?`;
+      }
+    }
+    
     switch (currentState) {
       case STATES.GREETING:
         return silenceAfterGreeting ? GREETING.silence_fallback : GREETING.primary;
@@ -784,12 +804,11 @@ function createCallStateMachine() {
                 };
               }
               
-              // User provided a valid spelled correction - store it and re-confirm
+              // User provided a valid spelled correction - store it and confirm without spelling back
               pendingClarification.value.lastName = correctedLastName;
-              const spelledConfirm = spellWordWithSpaces(correctedLastName);
               return {
                 nextState: currentState,  // STAY in NAME state
-                prompt: `Got it. So your last name is ${spelledConfirm} Is that correct?`,
+                prompt: `Got it, ${correctedLastName}. Is that correct?`,
                 action: 'ask'
               };
             } else {
@@ -816,27 +835,25 @@ function createCallStateMachine() {
           // CASE 4: User provides a name correction (not spelled, e.g., "It's Smith, not Smythe")
           const corr = extractName(transcript);
           if (corr.firstName || corr.lastName) {
-            // User provided a different name - update pending and re-confirm
+            // User provided a different name - update pending and re-confirm without spelling
             const newFirstName = corr.firstName || pendingClarification.value.firstName;
             const newLastName = corr.lastName || pendingClarification.value.lastName;
             console.log(`📋 Received name correction: "${newFirstName} ${newLastName}"`);
             
             pendingClarification.value.firstName = newFirstName;
             pendingClarification.value.lastName = newLastName;
-            const spelledConfirm = newLastName ? spellWordWithSpaces(newLastName) : newLastName;
             return {
               nextState: currentState,  // STAY in NAME state - re-confirm the correction
-              prompt: `Got it. So that's ${newFirstName}, last name ${spelledConfirm}. Is that right?`,
+              prompt: `Got it, ${newFirstName} ${newLastName}. Is that correct?`,
               action: 'ask'
             };
           }
           
-          // CASE 5: Unclear response - ask again for clarification
-          console.log(`⚠️ Unclear name confirmation response: "${transcript}" - re-asking`);
-          const currentSpelled = pendingClarification.value.lastName ? spellWordWithSpaces(pendingClarification.value.lastName) : pendingClarification.value.lastName;
+          // CASE 5: Unclear response - ask them to spell again
+          console.log(`⚠️ Unclear name confirmation response: "${transcript}" - asking to spell again`);
           return {
             nextState: currentState,  // STAY in NAME state
-            prompt: `I want to make sure I have this right. Is your last name ${currentSpelled}? Yes or no?`,
+            prompt: `I'm still having trouble with that. Could you spell your last name for me one more time?`,
             action: 'ask'
           };
         }
@@ -974,13 +991,13 @@ function createCallStateMachine() {
             console.log(`✅ Name stored: ${firstName} ${lastName} (confidence: ${nameConfidencePercent}%)`);
             return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
           }
-          // Below threshold: confirm immediately with last name spelled. One confirmation only.
+          // Below threshold: ask user to spell their last name instead of spelling it for them
+          // This is clearer and avoids the bot rambling on with wrong spelling
           data.name_confidence = nameConfidencePercent;
           pendingClarification = { field: 'name', value: { firstName, lastName }, confidence: overallConf, awaitingConfirmation: true };
-          const lastSpelled = (lastName && spellWordWithSpaces(lastName)) ? ` ${spellWordWithSpaces(lastName)}.` : ` ${firstName} ${lastName || ''}.`;
           return {
             nextState: currentState,
-            prompt: `${CONFIRMATION.immediate_name}${lastSpelled}`.trim(),
+            prompt: `I'm having a little trouble with your last name. Could you spell it for me?`,
             action: 'ask'
           };
         }
