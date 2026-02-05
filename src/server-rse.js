@@ -1713,6 +1713,11 @@ STRICT RULES:
       console.log(`👋 End of call - delivering goodbye`);
       stateMachine.updateData('_closeStateReached', true);
       sendStatePrompt(result.prompt || CLOSE.goodbye);
+    } else if (result.action === 'wait') {
+      // Incomplete utterance detected - wait silently for user to continue
+      // Don't send any prompt, just let the user keep talking
+      console.log(`⏳ Waiting for user to continue (incomplete utterance)`);
+      return;  // Don't send any prompt
     } else if (result.prompt) {
       // CRITICAL: Always use scripted prompts, never let AI go off-script
       // This ensures AI follows the state machine exactly

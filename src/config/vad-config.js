@@ -8,7 +8,7 @@ const VAD_CONFIG = {
   // OpenAI's VAD was missing obvious speech for 19+ seconds
   threshold: 0.5,            // Lower threshold to catch more speech (was 0.65)
   prefix_padding_ms: 300,    // Faster response to speech start (was 400)
-  silence_duration_ms: 1000, // Reasonable wait for end of speech
+  silence_duration_ms: 1200, // Slightly longer pause tolerance to avoid cutting off mid-sentence
   
   // Dynamic silence adjustments
   silence_short: 800,    // Short answers still get a bit of patience

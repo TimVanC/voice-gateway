@@ -916,9 +916,31 @@ function createCallStateMachine() {
           // Log confidence IMMEDIATELY (before any validation)
           console.log(`📋 Name confidence: firstName="${firstName}" (${firstNameConf.level}, ${firstNameConf.reason || 'N/A'}), lastName="${lastName}" (${lastNameConf.level}, ${lastNameConf.reason || 'N/A'}), overall=${overallConf.level}, percentage=${nameConfidencePercent}%`);
           
-          // If extraction failed completely, check raw transcript
+          // If extraction failed completely, check if it's an incomplete utterance
           if (!firstName && !lastName) {
             console.log(`⚠️  Name extraction failed completely for: "${transcript}"`);
+            
+            // CRITICAL: Detect incomplete utterances like "Yeah, it's" or "My name is"
+            // These are preambles where the user paused before giving their actual name
+            const incompletePatterns = [
+              /^(yeah|yes|yep|sure|okay|ok)[,.]?\s*(it'?s|that'?s|i'?m|my name)?\s*$/i,  // "Yeah, it's" "Yes, I'm"
+              /^(my name is|i'?m|it'?s|that'?s|this is)\s*$/i,                            // "My name is" "I'm"
+              /^(uh|um|er|hmm)[,.]?\s*(yeah|yes|it'?s|my)?\s*$/i,                         // "Uh yeah" "Um it's"
+              /^(hi|hello|hey)[,.]?\s*(yeah|yes|it'?s|my|i'?m)?\s*$/i,                    // "Hi yeah" "Hello it's"
+            ];
+            
+            const isIncomplete = incompletePatterns.some(p => p.test(transcript.trim()));
+            if (isIncomplete) {
+              console.log(`⏳ Detected incomplete utterance "${transcript}" - waiting for user to continue`);
+              // Return null/skip to let the user continue speaking
+              // The next transcript will be processed
+              return {
+                nextState: currentState,
+                prompt: null,  // No prompt - wait silently for user to continue
+                action: 'wait'
+              };
+            }
+            
             // Try to extract from raw transcript (maybe it's a single word name or has unusual format)
             const rawParts = transcript.split(/\s+/).filter(p => p.length > 1 && !/\b(yeah|yes|it'?s|that'?s|would|be)\b/i.test(p));
             if (rawParts.length >= 2) {
