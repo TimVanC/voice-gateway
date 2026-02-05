@@ -128,6 +128,7 @@ wss.on("connection", (twilioWs, req) => {
   }
   let paceTimer = null;
   let keepAliveTimer = null;
+  let audioPacketsForwarded = 0;  // Track audio forwarding for debugging
   let silenceTimer = null;
   let lastActivityTime = Date.now();
   
@@ -377,7 +378,7 @@ wss.on("connection", (twilioWs, req) => {
     keepAliveTimer = setInterval(() => {
       if (openaiWs?.readyState === WebSocket.OPEN) {
         const elapsed = Date.now() - lastActivityTime;
-        console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()})`);
+        console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()}, audio packets: ${audioPacketsForwarded})`);
         
         if (elapsed > 20000) {
           // CRITICAL: Do NOT trigger recovery during critical states
@@ -2145,6 +2146,8 @@ Keep it SHORT.`;
               type: "input_audio_buffer.append",
               audio: msg.media.payload
             }));
+            // Track audio forwarding for debugging VAD issues
+            audioPacketsForwarded = (audioPacketsForwarded || 0) + 1;
           }
           break;
           

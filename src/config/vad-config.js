@@ -4,11 +4,11 @@
  */
 
 const VAD_CONFIG = {
-  // Balanced settings - sensitive enough to catch "yes"/"no" but not phantom triggers
-  // Previous 0.85 was TOO HIGH and missed quiet confirmations like "yes" or "hello?"
-  threshold: 0.65,           // More sensitive - catch quiet speech (was 0.85)
-  prefix_padding_ms: 400,    // Standard padding before speech triggers (was 500)
-  silence_duration_ms: 1000, // Reasonable wait for end of speech (was 1200)
+  // VERY sensitive settings - user reported screaming but VAD didn't detect
+  // OpenAI's VAD was missing obvious speech for 19+ seconds
+  threshold: 0.5,            // Lower threshold to catch more speech (was 0.65)
+  prefix_padding_ms: 300,    // Faster response to speech start (was 400)
+  silence_duration_ms: 1000, // Reasonable wait for end of speech
   
   // Dynamic silence adjustments
   silence_short: 800,    // Short answers still get a bit of patience
