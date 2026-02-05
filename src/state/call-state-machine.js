@@ -682,6 +682,32 @@ function createCallStateMachine() {
             return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
           }
           
+          // CASE 1.5: User is providing a clarification about the spelling (not spelling new letters)
+          // e.g., "It only has one V in the beginning, not two" or "There's only one V"
+          // These should NOT be treated as new names or spelling attempts
+          const clarificationPatterns = [
+            /only\s+(has\s+)?(one|two|a single)\s+[A-Z]/i,         // "only has one V"
+            /(not|no)\s+(two|double|2)\s*[A-Z]?/i,                  // "not two V's"
+            /there'?s\s+(only\s+)?(one|a single)/i,                 // "there's only one"
+            /just\s+(one|a single)\s+[A-Z]/i,                       // "just one V"
+            /in\s+the\s+(beginning|start|front|middle|end)/i,      // "in the beginning, not two"
+            /you\s+(have|got|said)\s+(two|double|too many)/i,      // "you have two"
+            /remove\s+(the|one|a)\s+(extra|second)/i,              // "remove the extra"
+            /(should|supposed)\s+to\s+(be|have)\s+(one|single)/i,  // "should be one"
+          ];
+          
+          const isSpellingClarification = clarificationPatterns.some(p => p.test(lowerTranscript));
+          if (isSpellingClarification && pendingClarification && pendingClarification.field === 'name') {
+            console.log(`📋 Detected spelling clarification: "${transcript}"`);
+            // User is telling us about an error in what we have stored
+            // Ask them to spell it again correctly
+            return {
+              nextState: currentState,
+              prompt: "I understand. Could you please spell your last name again for me?",
+              action: 'ask'
+            };
+          }
+          
           // CASE 2: User provides a spelled correction (e.g., "No, it's V-A-N...")
           // Patterns: "Uh, no, it's V-A-N-C-A-U-W-E-N-B-E-R-G-E.", "V A N space C A U W E N B E R G E"
           // CRITICAL: Only extract ISOLATED single letters (not letters within words like "uh", "no", "it's")
@@ -693,7 +719,10 @@ function createCallStateMachine() {
             // extracting the trailing letter (e.g., 'S' from "it's")
             let cleanedForLetters = transcript
               .replace(/\b(it'?s|that'?s|what'?s|there'?s|here'?s|let'?s|he'?s|she'?s|who'?s)\b/gi, '')
-              .replace(/\b(i'm|you're|we're|they're|isn't|aren't|won't|can't|don't)\b/gi, '');
+              .replace(/\b(i'm|you're|we're|they're|isn't|aren't|won't|can't|don't)\b/gi, '')
+              // Remove "letter as in word" patterns (phonetic alphabet) to avoid double-counting
+              // e.g., "V as in Victor" should only count as one V, not two
+              .replace(/\b([A-Z])\s+(as\s+in|like|for)\s+\w+/gi, '$1');
             
             // Extract ONLY isolated single letters (letters surrounded by non-letter characters)
             // This ignores filler words like "uh", "no" because their letters aren't isolated
