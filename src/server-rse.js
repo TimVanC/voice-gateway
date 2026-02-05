@@ -180,6 +180,8 @@ wss.on("connection", (twilioWs, req) => {
   // GREETING STATE
   // ============================================================================
   let greetingSent = false;              // Track if greeting was sent
+  let callConnectedTime = null;          // Track when call connected (for phantom speech protection)
+  const CALL_SETTLING_MS = 2000;         // Ignore speech in first 2 seconds (line noise/artifacts)
   
   // ============================================================================
   // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
@@ -952,6 +954,15 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "input_audio_buffer.speech_started":
+        // CRITICAL: Ignore phantom speech in the first 2 seconds after call connects
+        // Line noise and connection artifacts can trigger false VAD detections
+        const timeSinceCallStart = callConnectedTime ? Date.now() - callConnectedTime : 0;
+        if (timeSinceCallStart < CALL_SETTLING_MS && !greetingSent) {
+          console.log(`⏭️ Ignoring phantom speech (${timeSinceCallStart}ms since call start - settling period)`);
+          // Don't process this speech event - it's likely connection noise
+          break;
+        }
+        
         console.log("🎤 User speaking...");
         speechStartTime = Date.now();
         longSpeechBackchannelSent = false;
@@ -2079,6 +2090,7 @@ Keep it SHORT.`;
         case "start":
           streamSid = msg.start.streamSid;
           callSid = msg.start.callSid;  // Store call SID for transfers
+          callConnectedTime = Date.now();  // Track call start for phantom speech protection
           console.log(`📞 Stream started: ${streamSid}`);
           console.log(`📞 Call SID: ${callSid}`);
           console.log(`📞 Stream config:`, JSON.stringify(msg.start, null, 2));

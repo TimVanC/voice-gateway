@@ -502,10 +502,42 @@ function createCallStateMachine() {
   }
   
   /**
+   * Detect if user is frustrated/confused and needs acknowledgement
+   */
+  function isUserFrustrated(text) {
+    const frustrationPatterns = [
+      /can you hear me/i,
+      /hello[?!]*\s*(hello)?/i,
+      /are you (there|listening)/i,
+      /you('re| are)? (not|just) (listening|hearing)/i,
+      /you (cut|cutting) me off/i,
+      /i('m| am) (trying|talking)/i,
+      /let me (finish|speak|talk)/i,
+      /stop (interrupting|cutting)/i,
+      /what('s| is) (wrong|going on)/i,
+      /this (isn't|is not) working/i
+    ];
+    return frustrationPatterns.some(pattern => pattern.test(text));
+  }
+  
+  /**
    * Process user input and determine next state
    */
   function processInput(transcript, analysis = {}) {
     const lowerTranscript = transcript.toLowerCase();
+    
+    // CRITICAL: Detect user frustration and respond appropriately
+    // Don't treat frustrated speech as data input
+    if (isUserFrustrated(transcript)) {
+      console.log(`⚠️ User frustration detected: "${transcript.substring(0, 50)}..."`);
+      // Acknowledge and re-prompt for current state
+      const currentPrompt = getNextPrompt();
+      return {
+        nextState: currentState,
+        prompt: "I'm sorry, I'm having trouble hearing you clearly. Let me try again. " + (currentPrompt || "How can I help you?"),
+        action: 'ask'
+      };
+    }
     
     switch (currentState) {
       case STATES.GREETING:
@@ -704,6 +736,24 @@ function createCallStateMachine() {
               }
               
               console.log(`📋 Parsed spelled correction: "${correctedLastName}" (from ${letters.length} letters)`);
+              
+              // CRITICAL: If only 3-4 letters and looks like a prefix (Van, De, La, etc.),
+              // the user might have been cut off mid-spelling. Ask for more instead of confirming.
+              const commonPrefixes = ['van', 'von', 'de', 'du', 'la', 'le', 'da', 'di', 'mc', 'mac', 'o\''];
+              const looksLikePrefix = letters.length <= 4 && commonPrefixes.some(p => 
+                correctedLastName.toLowerCase() === p || correctedLastName.toLowerCase().startsWith(p)
+              );
+              
+              if (looksLikePrefix) {
+                console.log(`⏳ Detected possible incomplete prefix "${correctedLastName}" - asking for more`);
+                // Store what we have so far but ask if there's more
+                pendingClarification.value.lastName = correctedLastName;
+                return {
+                  nextState: currentState,
+                  prompt: `I heard ${correctedLastName}. Is there more to your last name, or is that it?`,
+                  action: 'ask'
+                };
+              }
               
               // User provided a valid spelled correction - store it and re-confirm
               pendingClarification.value.lastName = correctedLastName;
