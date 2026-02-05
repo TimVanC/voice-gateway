@@ -616,6 +616,10 @@ wss.on("connection", (twilioWs, req) => {
         const status = event.response?.status;
         const currentState = stateMachine.getState();
         
+        // CRITICAL: Save expectedTranscript early for confirmation check later
+        // This must be done before any code path nullifies it
+        const completedPrompt = expectedTranscript;
+        
         // Clear response ID when response is done
         if (event.response?.id === currentResponseId) {
           currentResponseId = null;
@@ -680,10 +684,20 @@ wss.on("connection", (twilioWs, req) => {
                 return;
               }
             }
-            // If already retried or audio was sufficient, just let it play out
-            console.log(`👋 Goodbye delivered (${audioSeconds.toFixed(1)}s) - letting audio buffer play`);
+            // If already retried or audio was sufficient, let it play out and hang up
+            console.log(`👋 Goodbye delivered (${audioSeconds.toFixed(1)}s) - hanging up after buffer plays`);
             responseInProgress = false;
             audioStreamingStarted = false;
+            stateMachine.updateData('_closeStateReached', true);
+            // Calculate remaining buffer time and add padding before hanging up
+            const bufferSeconds = playBuffer.length / 8000;
+            const hangUpDelay = Math.max(2000, (bufferSeconds * 1000) + 1000); // Buffer time + 1s padding
+            setTimeout(() => {
+              console.log(`📞 Disconnecting call after goodbye`);
+              if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
+                twilioWs.close(1000, 'Call completed');
+              }
+            }, hangUpDelay);
             return;
           }
           
@@ -902,9 +916,6 @@ wss.on("connection", (twilioWs, req) => {
           }
           console.log(`✅ Response complete (state: ${currentState})`);
           assistantTurnCount++;  // Track for filler spacing
-          
-          // CRITICAL: Save expectedTranscript BEFORE nullifying for confirmation check
-          const completedPrompt = expectedTranscript;
           
           // Reset retry count on successful completion
           if (currentPromptText) {

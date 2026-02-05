@@ -464,6 +464,18 @@ function generateCallSummary(callData, callStatus) {
     issueText = issueText.substring(0, 150) + '...';
   }
   
+  // Include severity if available (e.g., "completely out", "intermittent")
+  let severityText = '';
+  if (details.severity) {
+    const cleanedSeverity = cleanCallSummary(details.severity)
+      .replace(/\b(uh|um|er|ah|oh|yeah|yes|it'?s|that'?s)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleanedSeverity && cleanedSeverity.length > 2) {
+      severityText = cleanedSeverity;
+    }
+  }
+  
   // Combine system type and issue (make semantic, not verbatim)
   if (systemType && issueText) {
     // Clean issue text: remove filler words and rephrase
@@ -473,12 +485,15 @@ function generateCallSummary(callData, callStatus) {
       .replace(/\s+/g, ' ')
       .trim();
     
-    summary = `Caller reported no warm air coming from a ${systemType} system.`;
+    // Build comprehensive summary
+    let mainIssue = cleanedIssue && cleanedIssue.length > 10 ? cleanedIssue : 'issue';
+    summary = `Caller reported ${mainIssue} from ${systemType} system`;
     
-    // If we have more specific info, use it
-    if (cleanedIssue && cleanedIssue.length > 10 && cleanedIssue !== 'no warm air') {
-      summary = `Caller reported ${cleanedIssue} from a ${systemType} system.`;
+    // Add severity if available
+    if (severityText) {
+      summary += ` - ${severityText}`;
     }
+    summary += '.';
   } else if (systemType) {
     summary = `Caller reported issue with a ${systemType} system.`;
   } else if (issueText) {

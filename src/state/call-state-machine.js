@@ -120,6 +120,29 @@ function createCallStateMachine() {
   // Confidence threshold: >= accept and move on; < confirm immediately (Phase 2)
   const CONFIDENCE_THRESHOLD = 85;  // 85% (0.85) - below: confirm right after answer; above: accept and move on
   
+  // Human-like acknowledgments to add before prompts
+  const ACKNOWLEDGMENTS = ['Got it.', 'Okay.', 'Thanks.', 'Perfect.', 'Great.'];
+  let lastAcknowledgmentIndex = -1;
+  
+  /**
+   * Get a random acknowledgment phrase (avoiding immediate repeats)
+   */
+  function getAcknowledgment() {
+    let index;
+    do {
+      index = Math.floor(Math.random() * ACKNOWLEDGMENTS.length);
+    } while (index === lastAcknowledgmentIndex && ACKNOWLEDGMENTS.length > 1);
+    lastAcknowledgmentIndex = index;
+    return ACKNOWLEDGMENTS[index];
+  }
+  
+  /**
+   * Add acknowledgment prefix to a prompt
+   */
+  function withAcknowledgment(prompt) {
+    return `${getAcknowledgment()} ${prompt}`;
+  }
+  
   /**
    * Get the next prompt based on current state and data
    */
@@ -699,7 +722,7 @@ function createCallStateMachine() {
             data._nameComplete = true;  // ONLY set complete on positive confirmation
             console.log(`✅ Name CONFIRMED: ${data.firstName} ${data.lastName} (confidence: ${data.name_confidence}%)`);
             clearPendingClarification();
-            return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
+            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
           
           // CASE 1.5: User is providing a clarification about the spelling (not spelling new letters)
@@ -1011,7 +1034,7 @@ function createCallStateMachine() {
             data.name_confidence = nameConfidencePercent;
             data._nameComplete = true;
             console.log(`✅ Name stored: ${firstName} ${lastName} (confidence: ${nameConfidencePercent}%)`);
-            return { nextState: transitionTo(STATES.PHONE), prompt: CALLER_INFO.phone, action: 'ask' };
+            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
           // Below threshold: ask user to spell their last name instead of spelling it for them
           // This is clearer and avoids the bot rambling on with wrong spelling
@@ -1033,7 +1056,7 @@ function createCallStateMachine() {
             data.phone_confidence = adjustConfidence(data.phone_confidence != null ? data.phone_confidence : confidenceToPercentage(pendingClarification.confidence), 'confirmation');
             data._phoneComplete = true;
             clearPendingClarification();
-            return { nextState: transitionTo(STATES.EMAIL), prompt: CALLER_INFO.email.primary, action: 'ask' };
+            return { nextState: transitionTo(STATES.EMAIL), prompt: withAcknowledgment(CALLER_INFO.email.primary), action: 'ask' };
           }
           const corr = extractPhone(transcript);
           if (corr && (corr.replace(/\D/g, '').length >= 10)) {
@@ -1044,7 +1067,7 @@ function createCallStateMachine() {
           }
           data._phoneComplete = true;
           clearPendingClarification();
-          return { nextState: transitionTo(STATES.EMAIL), prompt: CALLER_INFO.email.primary, action: 'ask' };
+          return { nextState: transitionTo(STATES.EMAIL), prompt: withAcknowledgment(CALLER_INFO.email.primary), action: 'ask' };
         }
         
         // Check if caller is confused or asking for clarification
@@ -1220,7 +1243,7 @@ function createCallStateMachine() {
             data.phone_confidence = phoneConfidencePercent;
             data._phoneComplete = true;
             console.log(`✅ Phone stored: ${formattedPhone} (confidence: ${phoneConfidencePercent}%)`);
-            return { nextState: transitionTo(STATES.EMAIL), prompt: `Got it. ${CALLER_INFO.email.primary}`, action: 'ask' };
+            return { nextState: transitionTo(STATES.EMAIL), prompt: withAcknowledgment(CALLER_INFO.email.primary), action: 'ask' };
           }
           data.phone_confidence = phoneConfidencePercent;
           pendingClarification = { field: 'phone', value: formattedPhone, confidence: phoneConf, awaitingConfirmation: true };
@@ -1241,7 +1264,7 @@ function createCallStateMachine() {
             data.email_confidence = adjustConfidence(data.email_confidence != null ? data.email_confidence : confidenceToPercentage(pendingClarification.confidence), 'confirmation');
             data._emailComplete = true;
             clearPendingClarification();
-            return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: getDetailsPrompt(), action: 'ask' };
+            return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
           }
           const corr = extractEmail(transcript);
           if (corr && corr.includes('@') && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(corr)) {
@@ -1252,7 +1275,7 @@ function createCallStateMachine() {
           }
           data._emailComplete = true;
           clearPendingClarification();
-          return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: getDetailsPrompt(), action: 'ask' };
+          return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
         }
         
         // IMPORTANT: If user confirms and we already have an email, move on
@@ -1260,7 +1283,7 @@ function createCallStateMachine() {
           console.log(`✅ Email already confirmed: ${data.email} - advancing`);
           return {
             nextState: transitionTo(STATES.DETAILS_BRANCH),
-            prompt: getDetailsPrompt(),
+            prompt: withAcknowledgment(getDetailsPrompt()),
             action: 'ask'
           };
         }
@@ -1286,7 +1309,7 @@ function createCallStateMachine() {
           console.log(`✅ Email already provided: ${data.email} - advancing`);
           return {
             nextState: transitionTo(STATES.DETAILS_BRANCH),
-            prompt: getDetailsPrompt(),
+            prompt: withAcknowledgment(getDetailsPrompt()),
             action: 'ask'
           };
         }
@@ -1307,7 +1330,7 @@ function createCallStateMachine() {
             console.log(`📋 Email: declined`);
             return {
               nextState: transitionTo(STATES.DETAILS_BRANCH),
-              prompt: getDetailsPrompt(),
+              prompt: "No problem. " + getDetailsPrompt(),
               action: 'ask'
             };
           }
@@ -1325,7 +1348,7 @@ function createCallStateMachine() {
             if (!data._emailAttempts) data._emailAttempts = 0;
             data._emailAttempts++;
             if (data._emailAttempts >= 2) {
-              return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: getDetailsPrompt(), action: 'ask' };
+              return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: "No worries, we'll get it later. " + getDetailsPrompt(), action: 'ask' };
             }
             return { nextState: currentState, prompt: "I'm having trouble with that email format. Could you spell it again?", action: 'ask' };
           }
@@ -1336,7 +1359,7 @@ function createCallStateMachine() {
             data.email = email;
             data.email_confidence = emailConfidencePercent;
             data._emailComplete = true;
-            return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: getDetailsPrompt(), action: 'ask' };
+            return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
           }
           data.email = email;
           data.email_confidence = emailConfidencePercent;
@@ -1355,13 +1378,13 @@ function createCallStateMachine() {
         const fillerOnlyPattern = /^(um+|uh+|er+|hmm+|well|so|oh|okay|to be honest|let me think|let me see|i don't know|i'm not sure)[,.]?\s*$/i;
         const cleanedForFillerCheck = transcript.trim().replace(/[.,!?]+$/, '');
         if (fillerOnlyPattern.test(cleanedForFillerCheck) || cleanedForFillerCheck.length < 3) {
-          console.log(`⏭️ Skipping filler response in DETAILS_BRANCH: "${transcript}"`);
-          // Don't advance, just re-prompt the same question
-          const currentDetailPrompt = getDetailsPrompt();
+          console.log(`⏳ Detected filler in DETAILS_BRANCH: "${transcript}" - waiting for actual answer`);
+          // Don't re-prompt - wait silently for user to continue
+          // They're thinking, not done speaking
           return {
             nextState: currentState,
-            prompt: currentDetailPrompt || "Could you tell me more about that?",
-            action: 'ask'
+            prompt: null,  // No prompt - wait silently
+            action: 'wait'
           };
         }
         
@@ -1382,14 +1405,14 @@ function createCallStateMachine() {
             if (nextDetailPrompt) {
               return {
                 nextState: currentState,
-                prompt: nextDetailPrompt,
+                prompt: withAcknowledgment(nextDetailPrompt),
                 action: 'ask'
               };
             }
             // If no more detail questions, skip to availability since we have address
             return {
               nextState: transitionTo(STATES.AVAILABILITY),
-              prompt: AVAILABILITY.ask,
+              prompt: withAcknowledgment(AVAILABILITY.ask),
               action: 'ask'
             };
           }
@@ -1403,14 +1426,14 @@ function createCallStateMachine() {
         if (nextDetailPrompt) {
           return {
             nextState: currentState,
-            prompt: nextDetailPrompt,
+            prompt: withAcknowledgment(nextDetailPrompt),
             action: 'ask'
           };
         }
         
         return {
           nextState: transitionTo(STATES.ADDRESS),
-          prompt: ADDRESS.ask,
+          prompt: withAcknowledgment(ADDRESS.ask),
           action: 'ask'
         };
         
@@ -1423,7 +1446,7 @@ function createCallStateMachine() {
             data.address_confidence = adjustConfidence(data.address_confidence != null ? data.address_confidence : confidenceToPercentage(pendingClarification.confidence), 'confirmation');
             data._addressComplete = true;
             clearPendingClarification();
-            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: AVAILABILITY.ask, action: 'ask' };
+            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
           }
           
           // User provided a correction - extract what they said
@@ -1474,7 +1497,7 @@ function createCallStateMachine() {
           data.address_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
           data._addressComplete = true;
           clearPendingClarification();
-          return { nextState: transitionTo(STATES.AVAILABILITY), prompt: AVAILABILITY.ask, action: 'ask' };
+          return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
         }
         
         if (transcript.length > 2) {
@@ -1591,7 +1614,7 @@ function createCallStateMachine() {
             if (!addressParts.zip) {
               return { nextState: currentState, prompt: "Could you also provide the zip code?", action: 'ask' };
             }
-            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: AVAILABILITY.ask, action: 'ask' };
+            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
           }
           // Below threshold: confirm with street name and/or town spelled (do not spell street type).
           const confirmParts = [];
@@ -1612,7 +1635,7 @@ function createCallStateMachine() {
             data.zip = addressParts.zip;
             data.address_confidence = addressConfidencePercent;
             data._addressComplete = true;
-            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: AVAILABILITY.ask, action: 'ask' };
+            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
           }
           data.address_confidence = addressConfidencePercent;
           pendingClarification = { field: 'address', value: { address: finalAddress, city: finalCity, state: addressParts.state, zip: addressParts.zip }, confidence: overallConf, awaitingConfirmation: true };
@@ -1631,7 +1654,7 @@ function createCallStateMachine() {
               return { nextState: currentState, prompt: "Could you also provide the zip code?", action: 'ask' };
             }
             data._addressComplete = true;
-            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: AVAILABILITY.ask, action: 'ask' };
+            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
           }
         }
         return {
