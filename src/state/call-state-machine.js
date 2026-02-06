@@ -1257,6 +1257,27 @@ function createCallStateMachine() {
         };
         
       case STATES.EMAIL:
+        // CRITICAL: Check for confusion/clarification requests FIRST (before any other handling)
+        // User might say "I'm sorry, what did you say?" or "can you repeat that?"
+        if (isConfusedOrAsking(lowerTranscript)) {
+          console.log(`📋 User confused/asking in EMAIL state: "${transcript}"`);
+          // If we have a pending email confirmation, repeat it
+          if (pendingClarification.field === 'email' && pendingClarification.value) {
+            const formatted = formatEmailForReadback(pendingClarification.value);
+            return {
+              nextState: currentState,
+              prompt: `I have ${formatted}. Is that correct?`,
+              action: 'ask'
+            };
+          }
+          // Otherwise, repeat the email prompt
+          return {
+            nextState: currentState,
+            prompt: CALLER_INFO.email.primary,
+            action: 'ask'
+          };
+        }
+        
         // Immediate confirmation (Phase 2): we asked "I have X. Is that right?" Read-back only.
         if (pendingClarification.field === 'email' && pendingClarification.awaitingConfirmation) {
           if (isConfirmation(lowerTranscript)) {

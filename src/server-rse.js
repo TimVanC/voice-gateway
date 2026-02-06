@@ -587,14 +587,29 @@ wss.on("connection", (twilioWs, req) => {
               }
               
               // Resend the correct prompt after a brief delay
+              // But only if user isn't currently speaking (they might be answering what they thought they heard)
               setTimeout(() => {
                 if (promptToResend && openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
-                  console.log(`🔄 Resending correct prompt after hallucination: "${promptToResend.substring(0, 50)}..."`);
-                  sendStatePrompt(promptToResend);
+                  if (isUserSpeaking) {
+                    console.log(`⏳ User speaking - waiting to resend prompt after hallucination`);
+                    // Wait for user to finish, then send the prompt
+                    const waitForSilence = setInterval(() => {
+                      if (!isUserSpeaking && openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
+                        clearInterval(waitForSilence);
+                        console.log(`🔄 User stopped - resending correct prompt: "${promptToResend.substring(0, 50)}..."`);
+                        sendStatePrompt(promptToResend);
+                      }
+                    }, 200);
+                    // Timeout after 5s - don't wait forever
+                    setTimeout(() => clearInterval(waitForSilence), 5000);
+                  } else {
+                    console.log(`🔄 Resending correct prompt after hallucination: "${promptToResend.substring(0, 50)}..."`);
+                    sendStatePrompt(promptToResend);
+                  }
                 } else {
                   console.error(`❌ Cannot resend - OpenAI: ${openaiWs?.readyState}, Twilio: ${twilioWs?.readyState}, prompt: ${!!promptToResend}`);
                 }
-              }, 300);  // Slightly longer delay to ensure cleanup
+              }, 300);  // Brief delay to ensure cleanup
             } else {
               // Successful response - reset hallucination counters
               if (hallucinationCount > 0) {
@@ -690,8 +705,10 @@ wss.on("connection", (twilioWs, req) => {
             audioStreamingStarted = false;
             stateMachine.updateData('_closeStateReached', true);
             // Calculate remaining buffer time and add padding before hanging up
+            // Add 3s extra for Twilio→phone network latency (audio streams slower than we send it)
             const bufferSeconds = playBuffer.length / 8000;
-            const hangUpDelay = Math.max(2000, (bufferSeconds * 1000) + 1000); // Buffer time + 1s padding
+            const hangUpDelay = Math.max(3000, (bufferSeconds * 1000) + 3000); // Buffer time + 3s for network latency
+            console.log(`📞 Scheduling disconnect in ${hangUpDelay}ms (buffer: ${bufferSeconds.toFixed(1)}s)`);
             setTimeout(() => {
               console.log(`📞 Disconnecting call after goodbye`);
               if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
