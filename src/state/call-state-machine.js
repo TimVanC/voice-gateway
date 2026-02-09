@@ -850,13 +850,15 @@ function createCallStateMachine() {
                 };
               }
               
-              // User provided a valid spelled correction - store it and confirm without spelling back
-              pendingClarification.value.lastName = correctedLastName;
-              return {
-                nextState: currentState,  // STAY in NAME state
-                prompt: `Got it, ${correctedLastName}. Is that correct?`,
-                action: 'ask'
-              };
+              // SPELLING OVERRIDE: Spelled input is definitive. Treat as confirmed immediately; do not ask again.
+              data.firstName = cleanFieldValue(pendingClarification.value.firstName) || pendingClarification.value.firstName;
+              data.lastName = cleanFieldValue(correctedLastName) || correctedLastName;
+              data.name_confidence = 95;  // Spelled = explicit data, forced high
+              data._nameComplete = true;
+              data._nameLocked = true;
+              clearPendingClarification();
+              console.log(`✅ Name CONFIRMED from spelling (locked): ${data.firstName} ${data.lastName}`);
+              return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
             } else {
               console.log(`⚠️ Not enough isolated letters extracted (${letters.length}) - need at least 3`);
             }
@@ -941,7 +943,22 @@ function createCallStateMachine() {
           const extracted = extractName(transcript);
           const { firstName, lastName } = extracted;
           
-          // Log extraction result immediately (for debugging)
+          // SPELLING OVERRIDE: Letter-by-letter spelling is definitive. Bypass confidence entirely.
+          const spelledResult = normalizeSpelledName(transcript);
+          if (spelledResult && spelledResult.lastName) {
+            const useFirst = (spelledResult.firstName && spelledResult.firstName.length > 0)
+              ? spelledResult.firstName
+              : (firstName || '');
+            const useLast = spelledResult.lastName;
+            data.firstName = cleanFieldValue(useFirst) || useFirst;
+            data.lastName = cleanFieldValue(useLast) || useLast;
+            data.name_confidence = 95;
+            data._nameComplete = true;
+            data._nameLocked = true;
+            console.log(`✅ Name from spelling (locked): ${data.firstName} ${data.lastName} - bypassing confidence`);
+            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+          }
+          
           console.log(`📋 Name extraction: firstName="${firstName}", lastName="${lastName}", raw="${transcript.substring(0, 50)}"`);
           
           // Check confidence BEFORE validation (so we always log it)
