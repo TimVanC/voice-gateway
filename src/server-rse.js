@@ -707,9 +707,9 @@ wss.on("connection", (twilioWs, req) => {
             audioStreamingStarted = false;
             stateMachine.updateData('_closeStateReached', true);
             // Calculate remaining buffer time and add padding before hanging up
-            // Add 3s extra for Twilio→phone network latency (audio streams slower than we send it)
+            // Buffer + 5s so "Have a great day" and network latency don't cut off the last words
             const bufferSeconds = playBuffer.length / 8000;
-            const hangUpDelay = Math.max(3000, (bufferSeconds * 1000) + 3000); // Buffer time + 3s for network latency
+            const hangUpDelay = Math.max(5000, (bufferSeconds * 1000) + 5000);
             console.log(`📞 Scheduling disconnect in ${hangUpDelay}ms (buffer: ${bufferSeconds.toFixed(1)}s)`);
             setTimeout(() => {
               console.log(`📞 Disconnecting call after goodbye`);

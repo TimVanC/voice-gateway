@@ -1399,7 +1399,12 @@ function createCallStateMachine() {
         // CRITICAL: Filter out pure filler words/phrases that aren't actual answers
         // Examples: "Um", "uh", "to be honest", "let me think", "well", etc.
         const fillerOnlyPattern = /^(um+|uh+|er+|hmm+|well|so|oh|okay|to be honest|let me think|let me see|i don't know|i'm not sure)[,.]?\s*$/i;
+        const goodbyePattern = /^(bye|goodbye|good\s+bye|have\s+to\s+go)[,.]?\s*$/i;
         const cleanedForFillerCheck = transcript.trim().replace(/[.,!?]+$/, '');
+        if (goodbyePattern.test(cleanedForFillerCheck)) {
+          console.log(`⏳ Ignoring goodbye-like utterance in details: "${transcript}" - waiting for actual answer`);
+          return { nextState: currentState, prompt: null, action: 'wait' };
+        }
         if (fillerOnlyPattern.test(cleanedForFillerCheck) || cleanedForFillerCheck.length < 3) {
           console.log(`⏳ Detected filler in DETAILS_BRANCH: "${transcript}" - waiting for actual answer`);
           // Don't re-prompt - wait silently for user to continue
@@ -1408,6 +1413,22 @@ function createCallStateMachine() {
             nextState: currentState,
             prompt: null,  // No prompt - wait silently
             action: 'wait'
+          };
+        }
+        
+        // When on system_type question, if user asks what options exist (e.g. "what type of systems are there?"),
+        // don't store it as an answer - re-ask with options so they hear the list and can answer
+        const questions = getDetailQuestions();
+        const currentQuestion = questions[detailsQuestionIndex];
+        const isSystemTypeQuestion = (data.intent === INTENT_TYPES.HVAC_SERVICE && currentQuestion === DETAILS.hvac_service.system_type) ||
+          (data.intent === INTENT_TYPES.HVAC_INSTALLATION && currentQuestion === DETAILS.hvac_installation.system_type);
+        const looksLikeAskingOptions = /\b(what\s+(type|types|kind|kinds|are\s+the\s+options|options\s+are\s+there)|which\s+(one|type|system)|list\s+(them|the\s+options)|tell\s+me\s+(the\s+)?(options|types)|i'?m\s+not\s+sure\s+what\s+types?)\b/i;
+        if (isSystemTypeQuestion && looksLikeAskingOptions.test(transcript)) {
+          console.log(`📋 User asked for system type options - re-asking with list (not advancing)`);
+          return {
+            nextState: currentState,
+            prompt: "Common types are central air, heat pump, furnace, or boiler. Which do you have?",
+            action: 'ask'
           };
         }
         
@@ -2348,6 +2369,22 @@ function createCallStateMachine() {
       }
     }
     
+    // STEP 2a: "FirstName. My last name is LastName" (e.g. "Tim. My last name is Van Kallenberg. It's spelled...")
+    if (/\.\s*[Mm]y\s+last\s+name\s+is\b/i.test(name)) {
+      const match = name.match(/^([A-Za-z]+)\.\s+[Mm]y\s+last\s+name\s+is\s+(.+)$/i);
+      if (match) {
+        const firstName = match[1].trim();
+        let lastName = match[2].trim()
+          .replace(/\s*\.\s*It'?s(?:\s+spelled)?.*$/i, '')  // strip ". It's spelled..."
+          .replace(/\s*,?\s*spelled\s+.+$/i, '')
+          .replace(/[.,!?]+$/g, '');
+        if (firstName && lastName && looksLikeName(firstName)) {
+          console.log(`📋 Extracted from "X. My last name is Y" pattern: firstName="${firstName}", lastName="${lastName}"`);
+          return { firstName, lastName };
+        }
+      }
+    }
+    
     // STEP 2b: Check for "FirstName, [and my] last name is LastName" pattern (without "first name is")
     // Example: "Tim, last name is Van Cowenberg" or "Tim, and my last name is Van Kallenberg, spelled V-A-N..."
     if (/last\s+name\s+is/i.test(name) && !/first\s+name\s+is/i.test(name)) {
@@ -2541,11 +2578,11 @@ function createCallStateMachine() {
       .trim();
     
     // Extract just the email part (look for name pattern + "at" + domain)
-    // Pattern: "TimVanC at gmail.com" or "timvanc at gmail dot com" or "timvansi at gmail.com"
-    // Make sure we don't match "would be" as part of the email - look for actual email patterns
-    const emailMatch = email.match(/([a-z0-9]+(?:\s*[a-z0-9]+)*?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
+    // Pattern: "TimVanC at gmail.com", "tim.vc at gmail.com", or "timvanc at gmail dot com"
+    // Allow dots in local part so "tim.vc at gmail.com" is preserved
+    const emailMatch = email.match(/([a-z0-9._]+(?:\s*[a-z0-9._]+)*?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
     if (emailMatch) {
-      // Clean up the name part - remove spaces to make "Tim Van C" -> "timvanc"
+      // Clean up the name part - remove spaces but keep dots (tim.vc -> tim.vc)
       let namePart = emailMatch[1].replace(/\s+/g, '').toLowerCase();
       let domainPart = emailMatch[2];
       
@@ -2562,7 +2599,8 @@ function createCallStateMachine() {
       email = `${namePart}@${domainPart}`;
     } else {
       // Try simpler pattern if first didn't match
-      const simpleMatch = email.match(/([a-z0-9\s]+)\s+(?:at|@)\s+([a-z0-9.]+)/i);
+      // Allow dots in local part so "tim.vc at gmail.com" -> tim.vc@gmail.com (not vc@gmail.com)
+      const simpleMatch = email.match(/([a-z0-9._\s]+)\s+(?:at|@)\s+([a-z0-9.]+)/i);
       if (simpleMatch) {
         let namePart = simpleMatch[1].replace(/\s+/g, '').toLowerCase();
         let domainPart = simpleMatch[2];
