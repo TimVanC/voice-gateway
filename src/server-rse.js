@@ -1542,19 +1542,26 @@ STRICT RULES:
     
     // Avoid processing the same transcript twice
     // But if it's a duplicate, re-prompt the user after a short delay
+    // EXCEPTION: In confirmation state, accept "Yes" (or similar) even if duplicate - user is confirming the recap
     if (transcript === lastProcessedTranscript) {
-      console.log(`⏭️ Skipping duplicate transcript - will re-prompt`);
-      // Re-prompt after a short delay so user knows to try again
-      setTimeout(() => {
-        if (!responseInProgress && openaiWs?.readyState === WebSocket.OPEN) {
-          const prompt = stateMachine.getNextPrompt();
-          if (prompt) {
-            console.log(`🔄 Re-prompting after duplicate: "${prompt}"`);
-            sendStatePrompt("Sorry, I didn't catch that. " + prompt);
+      const state = stateMachine.getState();
+      const isAffirmative = /^(yes|yeah|yep|yup|correct|that'?s\s+right|sounds\s+good|all\s+good|good)$/i.test(transcript.trim());
+      if (state === STATES.CONFIRMATION && isAffirmative) {
+        console.log(`✅ Accepting confirmation "${transcript}" (not treating as duplicate)`);
+        lastProcessedTranscript = null; // allow this one through
+      } else {
+        console.log(`⏭️ Skipping duplicate transcript - will re-prompt`);
+        setTimeout(() => {
+          if (!responseInProgress && openaiWs?.readyState === WebSocket.OPEN) {
+            const prompt = stateMachine.getNextPrompt();
+            if (prompt) {
+              console.log(`🔄 Re-prompting after duplicate: "${prompt}"`);
+              sendStatePrompt("Sorry, I didn't catch that. " + prompt);
+            }
           }
-        }
-      }, 1500);
-      return;
+        }, 1500);
+        return;
+      }
     }
     lastProcessedTranscript = transcript;
     

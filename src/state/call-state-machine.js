@@ -79,6 +79,7 @@ function createCallStateMachine() {
     details: {
       // HVAC service
       systemType: null,
+      systemTypeUncertain: false,  // true when caller said "not sure", "I'd take", "maybe", etc.
       systemAge: null,
       symptoms: null,
       startTime: null,
@@ -1002,6 +1003,7 @@ function createCallStateMachine() {
               const lastNameParts = lastName.split(' ');
               data.firstName = lastNameParts[0] || lastName;
               data.lastName = lastNameParts.slice(1).join(' ') || '';
+              data.name_confidence = 50; // low - extraction fallback, not confirmed
               return {
                 nextState: transitionTo(STATES.PHONE),
                 prompt: CALLER_INFO.phone,
@@ -2346,15 +2348,17 @@ function createCallStateMachine() {
       }
     }
     
-    // STEP 2b: Check for "FirstName, last name is LastName" pattern (without "first name is")
-    // Example: "Tim, last name is Van Cowenberg"
+    // STEP 2b: Check for "FirstName, [and my] last name is LastName" pattern (without "first name is")
+    // Example: "Tim, last name is Van Cowenberg" or "Tim, and my last name is Van Kallenberg, spelled V-A-N..."
     if (/last\s+name\s+is/i.test(name) && !/first\s+name\s+is/i.test(name)) {
-      const match = name.match(/^([^,]+),\s*last\s+name\s+is\s+(.+)$/i);
+      const match = name.match(/^([^,]+),?\s*(?:and\s+my\s+)?last\s+name\s+is\s+(.+)$/i);
       if (match) {
-        const firstName = match[1].trim().replace(/[.,!?]+$/g, '');
-        const lastName = match[2].trim().replace(/[.,!?]+$/g, '');
-        if (firstName && lastName) {
-          console.log(`📋 Extracted from "FirstName, last name is LastName" pattern: firstName="${firstName}", lastName="${lastName}"`);
+        let firstName = match[1].trim().replace(/[.,!?]+$/g, '');
+        let lastName = match[2].trim()
+          .replace(/\s*,?\s*spelled\s+.+$/i, '')  // strip ", spelled V-A-N space..."
+          .replace(/[.,!?]+$/g, '');
+        if (firstName && lastName && looksLikeName(firstName)) {
+          console.log(`📋 Extracted from "FirstName, [and my] last name is LastName" pattern: firstName="${firstName}", lastName="${lastName}"`);
           return { firstName, lastName };
         }
       }
@@ -3031,6 +3035,8 @@ function createCallStateMachine() {
       if (currentQuestion === DETAILS.hvac_service.system_type) {
         // Normalize system type: "Oh, it's central here" → "central air"
         data.details.systemType = normalizeSystemType(text);
+        const uncertainPhrases = /\b(not\s+too?\s+sure|i'?d\s+take|maybe|i\s+think|unsure|not\s+sure|don'?t\s+know|might\s+be)\b/i;
+        data.details.systemTypeUncertain = uncertainPhrases.test(text);
       } else if (currentQuestion === DETAILS.hvac_service.symptoms) {
         data.details.symptoms = text;
       } else if (currentQuestion === DETAILS.hvac_service.start_time) {
@@ -3044,6 +3050,8 @@ function createCallStateMachine() {
       } else if (currentQuestion === DETAILS.hvac_installation.system_type) {
         // Normalize system type
         data.details.systemType = normalizeSystemType(text);
+        const uncertainPhrases = /\b(not\s+too?\s+sure|i'?d\s+take|maybe|i\s+think|unsure|not\s+sure|don'?t\s+know|might\s+be)\b/i;
+        data.details.systemTypeUncertain = uncertainPhrases.test(text);
       } else if (currentQuestion === DETAILS.hvac_installation.property_type) {
         data.details.propertyType = text;
       }

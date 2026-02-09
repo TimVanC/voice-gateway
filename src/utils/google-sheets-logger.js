@@ -477,6 +477,7 @@ function generateCallSummary(callData, callStatus) {
   }
   
   // Combine system type and issue (make semantic, not verbatim)
+  const systemTypeUncertain = details.systemTypeUncertain === true;
   if (systemType && issueText) {
     // Clean issue text: remove filler words and rephrase
     const cleanedIssue = issueText
@@ -485,9 +486,10 @@ function generateCallSummary(callData, callStatus) {
       .replace(/\s+/g, ' ')
       .trim();
     
-    // Build comprehensive summary
+    // Build comprehensive summary; note uncertainty if caller wasn't sure about system type
     let mainIssue = cleanedIssue && cleanedIssue.length > 10 ? cleanedIssue : 'issue';
-    summary = `Caller reported ${mainIssue} from ${systemType} system`;
+    const systemLabel = systemTypeUncertain ? `possibly ${systemType} (caller unsure)` : systemType;
+    summary = `Caller reported ${mainIssue}; ${systemLabel} system`;
     
     // Add severity if available
     if (severityText) {
@@ -495,7 +497,8 @@ function generateCallSummary(callData, callStatus) {
     }
     summary += '.';
   } else if (systemType) {
-    summary = `Caller reported issue with a ${systemType} system.`;
+    const systemLabel = systemTypeUncertain ? `possibly ${systemType} (caller unsure)` : systemType;
+    summary = `Caller reported issue with ${systemLabel} system.`;
   } else if (issueText) {
     // Clean and simplify issue text
     const cleanedIssue = issueText
