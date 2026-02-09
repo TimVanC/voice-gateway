@@ -181,8 +181,10 @@ wss.on("connection", (twilioWs, req) => {
   // GREETING STATE
   // ============================================================================
   let greetingSent = false;              // Track if greeting was sent
+  let greetingSentTime = null;          // When greeting was sent (ignore early transcripts)
   let callConnectedTime = null;          // Track when call connected (for phantom speech protection)
   const CALL_SETTLING_MS = 2000;         // Ignore speech in first 2 seconds (line noise/artifacts)
+  const GREETING_GUARD_MS = 5000;       // Don't process user input for 5s after greeting so user can hear intro
   
   // ============================================================================
   // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
@@ -590,11 +592,11 @@ wss.on("connection", (twilioWs, req) => {
               // But only if user isn't currently speaking (they might be answering what they thought they heard)
               setTimeout(() => {
                 if (promptToResend && openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
-                  if (isUserSpeaking) {
+                  if (speechStartTime !== null) {
                     console.log(`⏳ User speaking - waiting to resend prompt after hallucination`);
                     // Wait for user to finish, then send the prompt
                     const waitForSilence = setInterval(() => {
-                      if (!isUserSpeaking && openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
+                      if (speechStartTime === null && openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
                         clearInterval(waitForSilence);
                         console.log(`🔄 User stopped - resending correct prompt: "${promptToResend.substring(0, 50)}..."`);
                         sendStatePrompt(promptToResend);
@@ -1131,6 +1133,14 @@ wss.on("connection", (twilioWs, req) => {
           // Clear the waiting flag - we have the transcript now
           waitingForTranscription = false;
           
+          // Don't process transcripts that arrive right after greeting - give user time to hear intro
+          const inGreeting = stateMachine.getState() === STATES.GREETING;
+          const sinceGreeting = greetingSentTime ? Date.now() - greetingSentTime : Infinity;
+          if (inGreeting && sinceGreeting < GREETING_GUARD_MS) {
+            console.log(`⏭️ Ignoring early transcript during greeting guard (${(sinceGreeting/1000).toFixed(1)}s since greeting)`);
+            break;
+          }
+          
           // Clear confirmation recovery timer - we got a response
           clearConfirmationRecoveryTimer();
           
@@ -1441,6 +1451,7 @@ Say the ENTIRE sentence above, word for word.`,
     }
     console.log("👋 Sending greeting");
     greetingSent = true;
+    greetingSentTime = Date.now();
     currentPromptText = GREETING.primary;
     expectedTranscript = GREETING.primary;
     responseInProgress = true;
