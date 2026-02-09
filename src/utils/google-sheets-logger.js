@@ -13,6 +13,7 @@
  * CSV rule: Read ONLY from call data (locked/confirmed fields).
  * Never read from live transcript or recap text. The state machine overwrites
  * each field with cleaned values on confirm and locks it; CSV uses that single source of truth.
+ * transformCallDataToRow expects callData to contain only locked/confirmed values.
  */
 
 const { google } = require('googleapis');
@@ -432,6 +433,10 @@ function getSheetsClient() {
  * For completed calls: Include system type and key symptoms if provided
  * For incomplete calls: Summarize collected information and note early disconnect
  * Summary is cleaned and semantic (no filler words)
+ *
+ * RULE: No post-call summaries may invent dialogue. Use only structured call data
+ * (intent, details, symptoms, etc.). Never add agent or user quotes that were
+ * not actually spoken in the call.
  */
 function generateCallSummary(callData, callStatus) {
   const {
@@ -800,6 +805,10 @@ function determineCallStatus(currentState, callData) {
  * 
  * Only leave fields blank if they were never collected.
  * All fields are validated and normalized before persisting.
+ */
+/**
+ * Build one row from call data. Call data must contain only locked/confirmed fields.
+ * Never read from live transcript or recap text.
  */
 function transformCallDataToRow(callData, currentState, metadata = {}) {
   const {

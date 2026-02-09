@@ -366,16 +366,19 @@ function createCallStateMachine() {
     return words.map(w => spellOutWord(w)).join(' space ');
   }
   
+  /**
+   * Build recap prompt. READ-ONLY: uses only locked/confirmed fields from data.
+   * Never use live transcript or recap text. Disable all field parsing during recap.
+   */
   function getConfirmationPrompt() {
     const intro = confirmationAttempts > 0 
       ? CONFIRMATION.correction_reread 
       : CONFIRMATION.intro;
     
-    // Build the read-back
-    // RULES: NO SPELLING - just read everything back normally
+    // Build the read-back from locked data only (no transcript)
     let parts = [intro];
     
-    // Name - full name, spoken normally
+    // Name - from locked fields only
     if (data.firstName && data.lastName) {
       parts.push(`${data.firstName} ${data.lastName}.`);
     } else if (data.firstName) {
@@ -1861,65 +1864,9 @@ function createCallStateMachine() {
         // Mark that confirmation prompt was delivered (for completion tracking)
         data._confirmationDelivered = true;
         
-        // CSV/recap rule: only update fields that are NOT locked. Locked = confirmed; never overwrite from transcript.
-        // Check for "My first name is X, last name is Y" - only if name not locked
-        if (!data._nameLocked && (/my\s+first\s+name\s+is/i.test(transcript) || /first\s+name\s+is/i.test(transcript))) {
-          const nameExtract = extractName(transcript);
-          if (nameExtract.firstName || nameExtract.lastName) {
-            if (nameExtract.firstName) data.firstName = cleanFieldValue(nameExtract.firstName) || nameExtract.firstName;
-            if (nameExtract.lastName) data.lastName = cleanFieldValue(nameExtract.lastName) || nameExtract.lastName;
-            console.log(`✅ Name corrected (pre-lock): ${data.firstName} ${data.lastName}`);
-            return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm' };
-          }
-        }
-        
-        if (!data._nameLocked && (lowerTranscript.includes('last name') || lowerTranscript.includes('lastname')) && !lowerTranscript.includes('first name')) {
-          const lastNameMatch = transcript.match(/(?:last\s+name\s+is|lastname\s+is)\s+([^,]+)/i);
-          if (lastNameMatch) {
-            let lastNameText = lastNameMatch[1].trim().replace(/[.,!?]+$/, '');
-            if (lastNameText.includes(' and ')) {
-              const parts = lastNameText.split(/\s+and\s+/i);
-              data.lastName = cleanFieldValue(parts[0].trim()) || parts[0].trim();
-              if (parts[1] && (parts[1].includes('address') || parts[1].includes('road') || parts[1].includes('street')) && !data._addressLocked) {
-                const addressParts = extractAddress(parts[1]);
-                if (addressParts.address) {
-                  data.address = addressParts.address;
-                  data.city = addressParts.city || data.city;
-                }
-              }
-            } else {
-              data.lastName = cleanFieldValue(lastNameText) || lastNameText;
-            }
-            console.log(`✅ Last name corrected (pre-lock): ${data.lastName}`);
-            return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm' };
-          }
-        }
-        
-        if (!data._emailLocked && (lowerTranscript.includes('email') || lowerTranscript.includes('@') || lowerTranscript.includes(' at ') || 
-            lowerTranscript.includes('gmail') || lowerTranscript.includes('yahoo') || lowerTranscript.includes('hotmail'))) {
-          const emailExtracted = extractEmail(transcript);
-          if (emailExtracted && emailExtracted.includes('@') && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(emailExtracted)) {
-            data.email = emailExtracted.replace(/\s+/g, '').toLowerCase();
-            console.log(`✅ Email corrected (pre-lock): ${data.email}`);
-            return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm' };
-          }
-        }
-        
-        if (!data._addressLocked && (lowerTranscript.includes('address') || lowerTranscript.includes('street') || lowerTranscript.includes('road'))) {
-          const addressMatch = transcript.match(/(?:address\s+is|street\s+is|road\s+is|my\s+address\s+is)\s+([^,]+)/i);
-          if (addressMatch) {
-            const addressParts = extractAddress(addressMatch[1]);
-            if (addressParts.address) {
-              data.address = cleanFieldValue(addressParts.address) || addressParts.address;
-              data.city = addressParts.city ? (cleanFieldValue(addressParts.city) || addressParts.city) : data.city;
-              data.state = addressParts.state || data.state;
-              data.zip = addressParts.zip || data.zip;
-              console.log(`✅ Address corrected (pre-lock): ${data.address}, ${data.city}`);
-              return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm' };
-            }
-          }
-        }
-        
+        // RECAP IS READ-ONLY: Do not parse transcript for any field updates during confirmation.
+        // The agent's recap speech must never be treated as user input (would corrupt first_name with "Tim and last name is...").
+        // Only respond to yes/no/correction. If user says "no" or "something's wrong", we ask what to correct and handle in a follow-up.
         if (isConfirmation(lowerTranscript)) {
           // User confirmed - immediately proceed to CLOSE
           return {
@@ -2381,13 +2328,17 @@ function createCallStateMachine() {
     }
     
     // STEP 2: Check for "My first name is X, last name is Y" pattern
+    // CRITICAL: First name must be only the given name, not "Tim and last name is Van Kallenberg"
     if (/first\s+name\s+is/i.test(name) && /last\s+name\s+is/i.test(name)) {
       const firstNameMatch = name.match(/first\s+name\s+is\s+([^,]+)/i);
-      // FIXED: Don't stop at space - capture full multi-word last names like "Van Cowenberg"
       const lastNameMatch = name.match(/last\s+name\s+is\s+([^,.]+)/i);
       if (firstNameMatch && lastNameMatch) {
+        let firstPart = firstNameMatch[1].trim().replace(/[.,!?]+$/g, '');
+        // Strip " and " / " and my last name is ..." so we get only the first name (e.g. "Tim")
+        const andLast = firstPart.match(/\s+and\s+(?:my\s+)?last\s+name\s+is\b/i);
+        if (andLast) firstPart = firstPart.slice(0, andLast.index).trim();
         return {
-          firstName: firstNameMatch[1].trim().replace(/[.,!?]+$/g, ''),
+          firstName: firstPart,
           lastName: lastNameMatch[1].trim().replace(/[.,!?]+$/g, '')
         };
       }
