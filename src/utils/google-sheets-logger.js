@@ -1,19 +1,17 @@
 /**
  * Google Sheets Call Intake Logger - V1
- * 
- * Temporary client-facing solution to log call intake data.
- * Schema designed to be future-proof for HubSpot integration.
- * 
- * V1 Requirements:
- * - Only log after confirmation step succeeds (CLOSE state)
- * - Skip emergency redirects, dropped calls, out-of-scope calls
- * - Append-only (never overwrite)
- * - Human-readable call_summary (1-2 sentences plain English)
  *
- * CSV rule: Read ONLY from call data (locked/confirmed fields).
- * Never read from live transcript or recap text. The state machine overwrites
- * each field with cleaned values on confirm and locks it; CSV uses that single source of truth.
- * transformCallDataToRow expects callData to contain only locked/confirmed values.
+ * V1 Requirements:
+ * - Append-only (never overwrite), human-readable call_summary
+ *
+ * GUARDRAILS (system-wide):
+ * - Disable all parsing during recap (CONFIRMATION state).
+ * - Disable all parsing during closing (CLOSE / ENDED).
+ * - Disable all parsing once call_state = completed (_callCompleted).
+ * - Each field has confirmed + locked state; when locked, field is immutable.
+ * - CSV export reads ONLY from locked fields. Never from live transcript or recap text.
+ *
+ * ONE_LINE_SUMMARY (send last): Call completed; intake from locked fields only.
  */
 
 const { google } = require('googleapis');
@@ -290,14 +288,14 @@ function cleanName(name) {
 }
 
 /**
- * Clean availability notes: remove filler phrases
+ * Clean availability notes: remove filler phrases (say, I'd say, just, etc.)
  */
 function cleanAvailabilityNotes(availability) {
   if (!availability) return '';
   
   return availability
-    .replace(/^(i'?d\s+say|i\s+think|probably|maybe|uh|um|er|ah|oh)\s*,?\s*/gi, '')
-    .replace(/\s+(i'?d\s+say|probably|maybe)\s+/gi, ' ')
+    .replace(/^(i'?d\s+say|say|just|i\s+think|probably|maybe|uh|um|er|ah|oh)\s*,?\s*/gi, '')
+    .replace(/\s+(i'?d\s+say|say|just|probably|maybe)\s+/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -430,13 +428,12 @@ function getSheetsClient() {
 
 /**
  * Generate human-readable call summary (1-2 sentences plain English)
- * For completed calls: Include system type and key symptoms if provided
- * For incomplete calls: Summarize collected information and note early disconnect
- * Summary is cleaned and semantic (no filler words)
+ * Build from locked/structured intake only. Do not summarize from transcript slice.
  *
- * RULE: No post-call summaries may invent dialogue. Use only structured call data
- * (intent, details, symptoms, etc.). Never add agent or user quotes that were
- * not actually spoken in the call.
+ * RULES:
+ * - Summary must reflect structured intake only (intent, details.systemType, symptoms, etc.).
+ * - Include all captured system types: boiler, furnace, HVAC, heat pump, etc.
+ * - Never use transcript slice or selective transcript. Never invent dialogue.
  */
 function generateCallSummary(callData, callStatus) {
   const {
@@ -445,7 +442,8 @@ function generateCallSummary(callData, callStatus) {
   } = callData;
   
   const normalizedIntent = normalizeIntent(intent, callData);
-  const systemType = normalizeSystemType(details.systemType);
+  // Use structured data only: details.systemType from intake (boiler, furnace, central air, etc.)
+  const systemType = details.systemType ? normalizeSystemType(details.systemType) : '';
   
   // Build summary based on available details
   let summary = '';
@@ -516,7 +514,7 @@ function generateCallSummary(callData, callStatus) {
       .trim();
     summary = `Caller reported ${cleanedIssue}.`;
   } else {
-    // Fallback: basic intent description (clean and semantic)
+    // Fallback: use locked intent + structured details only (no transcript)
     const intentDescriptions = {
       'hvac_service': 'HVAC service request',
       'hvac_installation': 'HVAC installation request',
@@ -526,7 +524,10 @@ function generateCallSummary(callData, callStatus) {
       'existing_project': 'Existing project inquiry'
     };
     summary = intentDescriptions[normalizedIntent] || 'Service request';
-    
+    // Include system type from structured data when present (e.g. boiler, furnace)
+    if ((normalizedIntent === 'hvac_service' || normalizedIntent === 'hvac_installation') && systemType) {
+      summary = `Caller reported issue with ${systemType} system.`;
+    }
     // For generator_existing, add issue if available
     if (normalizedIntent === 'generator_existing' && details.generatorIssue) {
       const cleanIssue = cleanCallSummary(details.generatorIssue)
@@ -849,11 +850,16 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
   // Clean availability notes (remove fillers like "I'd say", "probably")
   const availabilityNotes = availability ? cleanAvailabilityNotes(availability) : '';
   
-  // Clean names (remove fillers, normalize spelling)
-  // CRITICAL: normalizeSpelling should preserve spaces in names like "Van Cauwenberge"
-  // Don't remove spaces - they're part of the name structure
-  const cleanFirstName = firstName ? cleanName(firstName) : '';
-  const cleanLastName = lastName ? cleanName(lastName) : '';
+  // CSV reads only from locked fields. Name must be immutable once _nameLocked.
+  // Defensively strip any contamination (e.g. "The last name is..." bleeding into first_name)
+  const nameForCSV = (callData._nameLocked && (firstName || lastName))
+    ? {
+        first: firstName ? String(firstName).replace(/\s*\.\s*(?:the\s+)?(?:my\s+)?last\s+name\s+is\b.*$/i, '').replace(/\s+and\s+(?:my\s+)?last\s+name\s+is\b.*$/i, '').trim() : '',
+        last: lastName ? String(lastName) : ''
+      }
+    : { first: firstName || '', last: lastName || '' };
+  const cleanFirstName = nameForCSV.first ? cleanName(nameForCSV.first) : '';
+  const cleanLastName = nameForCSV.last ? cleanName(nameForCSV.last) : '';
   
   // For all calls (complete and incomplete): Log all collected data
   // Only leave fields blank if they were never collected or failed validation

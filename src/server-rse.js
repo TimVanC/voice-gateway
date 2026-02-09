@@ -1,8 +1,7 @@
 /**
  * RSE Energy Group - AI Receptionist Server
- * 
- * OpenAI Realtime + Twilio Media Streams
- * Full intake flow with state machine and backchanneling
+ *
+ * GUARDRAIL: Disable all parsing and TTS once call_state = completed (_callCompleted).
  */
 
 require("dotenv").config();
@@ -157,6 +156,7 @@ wss.on("connection", (twilioWs, req) => {
   const MAX_HALLUCINATION_RETRIES = 3;  // Max hallucination retries before skipping to next state
   const GOODBYE_BUFFER_MS = 4000;  // Fixed delay after final TTS finishes playing before hangup
   let goodbyeCompletedWaitingForBuffer = false;  // Set when goodbye response.done status=completed; disconnect after buffer empties + GOODBYE_BUFFER_MS
+  let _callCompleted = false;  // Terminal state: closing ran once; no further TTS or logic, hangup only
   
   // State machine for this call
   const stateMachine = createCallStateMachine();
@@ -282,13 +282,14 @@ wss.on("connection", (twilioWs, req) => {
               }
             }, GOODBYE_BUFFER_MS);
           }
-          // Process any pending input that was queued
-          if (pendingUserInput) {
+          // Process any pending input that was queued (not once call is completed)
+          if (pendingUserInput && !_callCompleted) {
             console.log(`📤 Processing queued input after buffer emptied: "${pendingUserInput.substring(0, 50)}..."`);
             const input = pendingUserInput;
             pendingUserInput = null;
-            // Use setTimeout to avoid processing during pumpFrames interval
             setTimeout(() => processUserInput(input), 0);
+          } else if (pendingUserInput && _callCompleted) {
+            pendingUserInput = null;
           }
         }
       } catch (err) {
@@ -697,34 +698,25 @@ wss.on("connection", (twilioWs, req) => {
             return; // Don't start recovery timer
           }
           
-          // CRITICAL: For ENDED state, never accept INCOMPLETE goodbye - final sentence must complete before hangup
+          // ENDED: closing runs once. No retry - hang up after this response (complete or incomplete).
           if (currentState === STATES.ENDED) {
-            const retryCount = promptRetryCount['goodbye'] || 0;
-            const maxGoodbyeRetries = 2;
-            if (retryCount < maxGoodbyeRetries) {
-              console.log(`🔄 Goodbye response INCOMPLETE - retrying (${retryCount + 1}/${maxGoodbyeRetries}) so full sentence plays`);
-              promptRetryCount['goodbye'] = retryCount + 1;
-              responseInProgress = false;
-              audioStreamingStarted = false;
-              setTimeout(() => {
-                sendStatePrompt(CLOSE.goodbye);
-              }, 500);
-              return;
-            }
-            // Fallback: max retries reached, wait for buffer then hang up (avoid infinite loop)
-            console.log(`👋 Goodbye INCOMPLETE after ${maxGoodbyeRetries} retries - waiting for buffer then disconnect`);
+            _callCompleted = true;
             responseInProgress = false;
             audioStreamingStarted = false;
             stateMachine.updateData('_closeStateReached', true);
+            // Wait for buffer to empty then disconnect (idempotent, single run)
+            goodbyeCompletedWaitingForBuffer = true;
             const bufferSeconds = playBuffer.length / 8000;
-            const hangUpDelay = Math.max(GOODBYE_BUFFER_MS, (bufferSeconds * 1000) + GOODBYE_BUFFER_MS);
-            console.log(`📞 Scheduling disconnect in ${hangUpDelay}ms (buffer: ${bufferSeconds.toFixed(1)}s)`);
-            setTimeout(() => {
-              console.log(`📞 Disconnecting call after goodbye`);
-              if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
-                twilioWs.close(1000, 'Call completed');
-              }
-            }, hangUpDelay);
+            if (bufferSeconds < 0.1) {
+              console.log(`📞 Goodbye TTS done, buffer empty - disconnecting in ${GOODBYE_BUFFER_MS}ms`);
+              setTimeout(() => {
+                if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
+                  twilioWs.close(1000, 'Call completed');
+                }
+              }, GOODBYE_BUFFER_MS);
+            } else {
+              console.log(`📞 Goodbye TTS done - will disconnect after buffer empties (${bufferSeconds.toFixed(1)}s) + ${GOODBYE_BUFFER_MS}ms`);
+            }
             return;
           }
           
@@ -993,11 +985,14 @@ wss.on("connection", (twilioWs, req) => {
         }
         
         // Process any pending input that arrived while response was in progress
-        if (pendingUserInput && status !== "cancelled") {
+        // Do not re-process once call is completed (would re-enter closing and repeat goodbye)
+        if (pendingUserInput && status !== "cancelled" && !_callCompleted && currentState !== STATES.ENDED) {
           console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
           const input = pendingUserInput;
           pendingUserInput = null;
           processUserInput(input);
+        } else if (pendingUserInput && _callCompleted) {
+          pendingUserInput = null;  // Discard; no further logic once completed
         }
         break;
         
@@ -1536,6 +1531,7 @@ STRICT RULES:
   let lastProcessedTranscript = null;
   
   function processUserInput(transcript) {
+    if (_callCompleted) return;  // Terminal: no further TTS or logic once closing ran
     // Clear silence timer if still active
     if (silenceTimer) {
       clearTimeout(silenceTimer);
@@ -1757,8 +1753,13 @@ STRICT RULES:
     
     // Generate appropriate response based on state machine result
     if (result.action === 'end' || result.action === 'end_call') {
-      // User indicated end of call - deliver goodbye and mark complete
-      console.log(`👋 End of call - delivering goodbye`);
+      // Closing must run once and be terminal. Set completed before sending so no re-entry can send again.
+      if (_callCompleted) {
+        console.log(`⏭️ Call already completed - ignoring end_call (idempotent)`);
+        return;
+      }
+      _callCompleted = true;
+      console.log(`👋 End of call - delivering goodbye (single run)`);
       stateMachine.updateData('_closeStateReached', true);
       sendStatePrompt(result.prompt || CLOSE.goodbye);
     } else if (result.action === 'wait') {
@@ -1933,6 +1934,7 @@ Sound polite and helpful, not dismissive.`,
   // ============================================================================
   function sendStatePrompt(prompt) {
     if (openaiWs?.readyState !== WebSocket.OPEN) return;
+    if (_callCompleted) return;  // Terminal: no further TTS once closing ran
     if (responseInProgress) {
       console.log(`⏳ Skipping prompt - response in progress`);
       return;

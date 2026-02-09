@@ -1,13 +1,13 @@
 /**
  * RSE Call State Machine
- * 
- * INTAKE-ONLY: Collects info and situation details. No scheduling.
+ *
  * States: greeting → intent → safety_check → name → phone → email → details_branch → address → availability → confirmation → close
- * 
- * CONFIDENCE-BASED CLARIFICATION:
- * - High confidence: Accept silently
- * - Medium confidence: Confirm explicitly
- * - Low confidence: Ask to repeat or spell
+ *
+ * GLOBAL PARSING GUARDRAILS:
+ * - Disable all field parsing during recap (CONFIRMATION): no updates from transcript.
+ * - Disable all field parsing during closing (CLOSE / ENDED).
+ * - Each field has confirmed + locked state (_nameLocked, _availabilityLocked, etc.); when locked, immutable.
+ * - Recap and CSV read only from locked fields.
  */
 
 const { 
@@ -452,14 +452,14 @@ function createCallStateMachine() {
   }
   
   /**
-   * Clean availability notes: remove filler phrases
+   * Clean availability notes: remove filler phrases (say, I'd say, just, etc.)
    */
   function cleanAvailabilityNotes(availability) {
     if (!availability) return '';
     
     return availability
-      .replace(/^(i'?d\s+say|i\s+think|probably|maybe|uh|um|er|ah|oh)\s*,?\s*/gi, '')
-      .replace(/\s+(i'?d\s+say|probably|maybe)\s+/gi, ' ')
+      .replace(/^(i'?d\s+say|say|just|i\s+think|probably|maybe|uh|um|er|ah|oh)\s*,?\s*/gi, '')
+      .replace(/\s+(i'?d\s+say|say|just|probably|maybe)\s+/gi, ' ')
       .trim();
   }
   
@@ -733,6 +733,10 @@ function createCallStateMachine() {
         };
         
       case STATES.NAME:
+        // If name already confirmed/locked, do not parse again (immutable)
+        if (data._nameLocked) {
+          return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+        }
         // Immediate confirmation: we asked "Did I get your last name right. X Y Z." (Phase 2)
         // THIS IS A BLOCKING STATE - do not advance until confirmation equals YES
         if (pendingClarification.field === 'name' && pendingClarification.awaitingConfirmation) {
@@ -949,15 +953,19 @@ function createCallStateMachine() {
           // SPELLING OVERRIDE: Letter-by-letter spelling is definitive. Bypass confidence entirely.
           const spelledResult = normalizeSpelledName(transcript);
           if (spelledResult && spelledResult.lastName) {
-            const useFirst = (spelledResult.firstName && spelledResult.firstName.length > 0)
+            // First name only: never allow "The last name is" / filler to bleed in (confirmed = true -> immutable)
+            let useFirst = (spelledResult.firstName && spelledResult.firstName.length > 0)
               ? spelledResult.firstName
               : (firstName || '');
+            useFirst = useFirst.replace(/\s*\.\s*(?:the\s+)?(?:my\s+)?last\s+name\s+is\b.*$/i, '').trim();
+            const andLast = useFirst.match(/\s+and\s+(?:my\s+)?last\s+name\s+is\b/i);
+            if (andLast) useFirst = useFirst.slice(0, andLast.index).trim();
             const useLast = spelledResult.lastName;
             data.firstName = cleanFieldValue(useFirst) || useFirst;
             data.lastName = cleanFieldValue(useLast) || useLast;
             data.name_confidence = 95;
             data._nameComplete = true;
-            data._nameLocked = true;
+            data._nameLocked = true;  // Lock immediately; ignore all future tokens for name
             console.log(`✅ Name from spelling (locked): ${data.firstName} ${data.lastName} - bypassing confidence`);
             return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
@@ -1763,6 +1771,10 @@ function createCallStateMachine() {
         };
         
       case STATES.AVAILABILITY:
+        // If already confirmed/locked, do not parse again (immutable)
+        if (data._availabilityLocked) {
+          return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
+        }
         // Immediate confirmation (Phase 2): we asked "I have {availability}. Is that right?"
         if (pendingClarification.field === 'availability' && pendingClarification.awaitingConfirmation) {
           if (isConfirmation(lowerTranscript)) {
@@ -1772,6 +1784,7 @@ function createCallStateMachine() {
             clearPendingClarification();
             return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
           }
+          // Correction: replace, do not append
           const corr = extractAvailability(transcript);
           data.availability = (corr && corr.trim()) ? corr : pendingClarification.value;
           data._availabilityComplete = true;
@@ -2337,6 +2350,8 @@ function createCallStateMachine() {
         // Strip " and " / " and my last name is ..." so we get only the first name (e.g. "Tim")
         const andLast = firstPart.match(/\s+and\s+(?:my\s+)?last\s+name\s+is\b/i);
         if (andLast) firstPart = firstPart.slice(0, andLast.index).trim();
+        // Strip ". The last name is" / ". My last name is" and everything after (e.g. "Tim. The last name is Van..." -> "Tim")
+        firstPart = firstPart.replace(/\s*\.\s*(?:the\s+)?(?:my\s+)?last\s+name\s+is\b.*$/i, '').trim();
         return {
           firstName: firstPart,
           lastName: lastNameMatch[1].trim().replace(/[.,!?]+$/g, '')
@@ -2932,12 +2947,13 @@ function createCallStateMachine() {
   }
   
   function extractAvailability(text) {
-    // Clean up and normalize availability
-    // Remove filler phrases like "I would say", "that would be", etc.
+    // Clean up and normalize availability; strip meta-speech and fillers
     let cleaned = text
       .replace(/^(yeah|yes|oh|um|uh|so|well|okay|ok)[,.]?\s*/gi, '')
-      .replace(/^(i would say|i'd say|that would be|it would be|probably|maybe)\s*/gi, '')
+      .replace(/^(i would say|i'd say|i'd\s+say|that would be|it would be|probably|maybe)\s*/gi, '')
+      .replace(/^(just|say)\s*/gi, '')  // "just weekdays", "say weekdays" -> weekdays
       .replace(/^(i'm available|i can do|works for me|best for me is)\s*/gi, '')
+      .replace(/\s+(just|say)\s+/gi, ' ')  // mid-phrase fillers
       .trim();
     
     return cleaned;
