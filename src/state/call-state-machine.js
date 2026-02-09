@@ -75,6 +75,13 @@ function createCallStateMachine() {
     address_confidence: null,
     availability_confidence: null,
     
+    // Locked fields: once confirmed, overwrite with cleaned value and set true. CSV/recap read only these.
+    _nameLocked: false,
+    _phoneLocked: false,
+    _emailLocked: false,
+    _addressLocked: false,
+    _availabilityLocked: false,
+    
     // Details based on intent
     details: {
       // HVAC service
@@ -109,6 +116,20 @@ function createCallStateMachine() {
   let detailsQuestionIndex = 0;
   let silenceAfterGreeting = false;
   let confirmationAttempts = 0;
+  
+  /**
+   * Single source of truth: clean value before persisting on confirm.
+   * Strip punctuation, filler words (my, it's, its), trim. Used when locking name/address.
+   */
+  function cleanFieldValue(s) {
+    if (s == null || typeof s !== 'string') return s === null ? '' : String(s);
+    let t = s
+      .replace(/[.,!?;:'"]+/g, ' ')
+      .replace(/\b(my|it'?s|its)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return t;
+  }
   
   // Confidence-based clarification tracking
   let pendingClarification = {
@@ -714,14 +735,15 @@ function createCallStateMachine() {
         if (pendingClarification.field === 'name' && pendingClarification.awaitingConfirmation) {
           console.log(`📋 Name confirmation state - awaiting yes/no for: ${pendingClarification.value.firstName} ${pendingClarification.value.lastName}`);
           
-          // CASE 1: User confirms with "yes" - accept and advance
+          // CASE 1: User confirms with "yes" - overwrite with cleaned values, lock, advance
           if (isConfirmation(lowerTranscript)) {
-            data.firstName = pendingClarification.value.firstName;
-            data.lastName = pendingClarification.value.lastName;
+            data.firstName = cleanFieldValue(pendingClarification.value.firstName) || pendingClarification.value.firstName;
+            data.lastName = cleanFieldValue(pendingClarification.value.lastName) || pendingClarification.value.lastName;
             const baseConf = data.name_confidence != null ? data.name_confidence : confidenceToPercentage(pendingClarification.confidence);
             data.name_confidence = adjustConfidence(baseConf, 'confirmation');
-            data._nameComplete = true;  // ONLY set complete on positive confirmation
-            console.log(`✅ Name CONFIRMED: ${data.firstName} ${data.lastName} (confidence: ${data.name_confidence}%)`);
+            data._nameComplete = true;
+            data._nameLocked = true;  // CSV/recap read only this; ignore future transcript for name
+            console.log(`✅ Name CONFIRMED (locked): ${data.firstName} ${data.lastName} (confidence: ${data.name_confidence}%)`);
             clearPendingClarification();
             return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
@@ -843,14 +865,14 @@ function createCallStateMachine() {
           // CASE 3: User says "no" clearly without providing correction
           if (isNegation(lowerTranscript)) {
             console.log(`❌ Name REJECTED by user - clearing and re-asking`);
-            // CRITICAL: Reset the field completely and re-ask
             data.firstName = null;
             data.lastName = null;
             data.name_confidence = null;
-            data._nameComplete = false;  // Explicitly ensure NOT complete
+            data._nameComplete = false;
+            data._nameLocked = false;
             clearPendingClarification();
             return {
-              nextState: currentState,  // STAY in NAME state
+              nextState: currentState,
               prompt: "No problem. Let me get that again. What is your first and last name?",
               action: 'ask'
             };
@@ -998,12 +1020,12 @@ function createCallStateMachine() {
             
             // If we have lastName but no firstName, and lastName doesn't have a prefix, maybe it's reversed or single name
             if (lastName && looksLikeName(lastName) && !lastNameHasPrefix) {
-              // Maybe they gave last name first, or it's just one name
               console.log(`🔄 lastName looks valid, treating as full name: "${lastName}"`);
               const lastNameParts = lastName.split(' ');
-              data.firstName = lastNameParts[0] || lastName;
-              data.lastName = lastNameParts.slice(1).join(' ') || '';
-              data.name_confidence = 50; // low - extraction fallback, not confirmed
+              data.firstName = cleanFieldValue(lastNameParts[0] || lastName) || (lastNameParts[0] || lastName);
+              data.lastName = cleanFieldValue(lastNameParts.slice(1).join(' ') || '') || (lastNameParts.slice(1).join(' ') || '');
+              data.name_confidence = 50;
+              data._nameLocked = true;  // Persist only this; will not overwrite from transcript
               return {
                 nextState: transitionTo(STATES.PHONE),
                 prompt: CALLER_INFO.phone,
@@ -1031,11 +1053,12 @@ function createCallStateMachine() {
           
           // Phase 2: >= threshold accept and move on; < threshold confirm immediately (spell last name).
           if (nameConfidencePercent >= CONFIDENCE_THRESHOLD) {
-            data.firstName = firstName;
-            data.lastName = lastName;
+            data.firstName = cleanFieldValue(firstName) || firstName;
+            data.lastName = cleanFieldValue(lastName) || lastName;
             data.name_confidence = nameConfidencePercent;
             data._nameComplete = true;
-            console.log(`✅ Name stored: ${firstName} ${lastName} (confidence: ${nameConfidencePercent}%)`);
+            data._nameLocked = true;  // Single source of truth; CSV/recap read only this
+            console.log(`✅ Name stored (locked): ${data.firstName} ${data.lastName} (confidence: ${nameConfidencePercent}%)`);
             return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
           // Below threshold: ask user to spell their last name instead of spelling it for them
@@ -1056,6 +1079,7 @@ function createCallStateMachine() {
           if (isConfirmation(lowerTranscript)) {
             data.phone = pendingClarification.value;
             data.phone_confidence = adjustConfidence(data.phone_confidence != null ? data.phone_confidence : confidenceToPercentage(pendingClarification.confidence), 'confirmation');
+            data._phoneLocked = true;
             data._phoneComplete = true;
             clearPendingClarification();
             return { nextState: transitionTo(STATES.EMAIL), prompt: withAcknowledgment(CALLER_INFO.email.primary), action: 'ask' };
@@ -1092,11 +1116,11 @@ function createCallStateMachine() {
         // User corrections always take priority over linear progression
         if (isReferringToName(lowerTranscript)) {
           console.log(`📋 User referenced NAME in PHONE state - routing back to NAME`);
-          // Reset name data to allow re-capture
           data.firstName = null;
           data.lastName = null;
           data.name_confidence = null;
           data._nameComplete = false;
+          data._nameLocked = false;
           clearPendingClarification();
           return {
             nextState: transitionTo(STATES.NAME),
@@ -1280,23 +1304,29 @@ function createCallStateMachine() {
           };
         }
         
-        // Immediate confirmation (Phase 2): we asked "I have X. Is that right?" Read-back only.
+        // Immediate confirmation (Phase 2): we asked "I have X. Is that right?" Overwrite with normalized value, lock.
         if (pendingClarification.field === 'email' && pendingClarification.awaitingConfirmation) {
+          function normalizeEmailForPersist(e) {
+            if (!e || typeof e !== 'string') return e || '';
+            return e.replace(/\s+/g, '').toLowerCase().trim();
+          }
           if (isConfirmation(lowerTranscript)) {
-            data.email = pendingClarification.value;
+            data.email = normalizeEmailForPersist(pendingClarification.value);
             data.email_confidence = adjustConfidence(data.email_confidence != null ? data.email_confidence : confidenceToPercentage(pendingClarification.confidence), 'confirmation');
             data._emailComplete = true;
+            data._emailLocked = true;
             clearPendingClarification();
             return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
           }
           const corr = extractEmail(transcript);
           if (corr && corr.includes('@') && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(corr)) {
-            data.email = corr;
+            data.email = normalizeEmailForPersist(corr);
             data.email_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
           } else {
-            data.email = pendingClarification.value;
+            data.email = normalizeEmailForPersist(pendingClarification.value);
           }
           data._emailComplete = true;
+          data._emailLocked = true;
           clearPendingClarification();
           return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
         }
@@ -1319,6 +1349,7 @@ function createCallStateMachine() {
           data.lastName = null;
           data.name_confidence = null;
           data._nameComplete = false;
+          data._nameLocked = false;
           clearPendingClarification();
           return {
             nextState: transitionTo(STATES.NAME),
@@ -1486,9 +1517,13 @@ function createCallStateMachine() {
         if (pendingClarification.field === 'address' && pendingClarification.awaitingConfirmation) {
           if (isConfirmation(lowerTranscript)) {
             const v = pendingClarification.value;
-            data.address = v.address; data.city = v.city; data.state = v.state; data.zip = v.zip;
+            data.address = cleanFieldValue(v.address) || v.address;
+            data.city = cleanFieldValue(v.city) || v.city;
+            data.state = v.state;
+            data.zip = v.zip;
             data.address_confidence = adjustConfidence(data.address_confidence != null ? data.address_confidence : confidenceToPercentage(pendingClarification.confidence), 'confirmation');
             data._addressComplete = true;
+            data._addressLocked = true;  // Do not re-parse during recap; CSV reads only this
             clearPendingClarification();
             return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
           }
@@ -1713,12 +1748,14 @@ function createCallStateMachine() {
           if (isConfirmation(lowerTranscript)) {
             data.availability = pendingClarification.value;
             data._availabilityComplete = true;
+            data._availabilityLocked = true;
             clearPendingClarification();
             return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
           }
           const corr = extractAvailability(transcript);
           data.availability = (corr && corr.trim()) ? corr : pendingClarification.value;
           data._availabilityComplete = true;
+          data._availabilityLocked = true;
           clearPendingClarification();
           return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
         }
@@ -1807,40 +1844,26 @@ function createCallStateMachine() {
         // Mark that confirmation prompt was delivered (for completion tracking)
         data._confirmationDelivered = true;
         
-        // CRITICAL: Handle corrections more intelligently
-        // Check for "My first name is X, last name is Y" pattern first
-        if (/my\s+first\s+name\s+is/i.test(transcript) || /first\s+name\s+is/i.test(transcript)) {
+        // CSV/recap rule: only update fields that are NOT locked. Locked = confirmed; never overwrite from transcript.
+        // Check for "My first name is X, last name is Y" - only if name not locked
+        if (!data._nameLocked && (/my\s+first\s+name\s+is/i.test(transcript) || /first\s+name\s+is/i.test(transcript))) {
           const nameExtract = extractName(transcript);
-          if (nameExtract.firstName) {
-            data.firstName = nameExtract.firstName;
-            console.log(`✅ First name corrected to: ${data.firstName}`);
-          }
-          if (nameExtract.lastName) {
-            data.lastName = nameExtract.lastName;
-            console.log(`✅ Last name corrected to: ${data.lastName}`);
-          }
           if (nameExtract.firstName || nameExtract.lastName) {
-            return {
-              nextState: currentState,
-              prompt: getConfirmationPrompt(),
-              action: 'confirm'
-            };
+            if (nameExtract.firstName) data.firstName = cleanFieldValue(nameExtract.firstName) || nameExtract.firstName;
+            if (nameExtract.lastName) data.lastName = cleanFieldValue(nameExtract.lastName) || nameExtract.lastName;
+            console.log(`✅ Name corrected (pre-lock): ${data.firstName} ${data.lastName}`);
+            return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm' };
           }
         }
         
-        // Handle "last name is X" separately
-        if ((lowerTranscript.includes('last name') || lowerTranscript.includes('lastname')) && 
-            !lowerTranscript.includes('first name')) {
-          // Extract just the last name part
+        if (!data._nameLocked && (lowerTranscript.includes('last name') || lowerTranscript.includes('lastname')) && !lowerTranscript.includes('first name')) {
           const lastNameMatch = transcript.match(/(?:last\s+name\s+is|lastname\s+is)\s+([^,]+)/i);
           if (lastNameMatch) {
-            const lastNameText = lastNameMatch[1].trim().replace(/[.,!?]+$/, '');
-            // If it contains "and my address", split it
+            let lastNameText = lastNameMatch[1].trim().replace(/[.,!?]+$/, '');
             if (lastNameText.includes(' and ')) {
               const parts = lastNameText.split(/\s+and\s+/i);
-              data.lastName = parts[0].trim();
-              // Check if second part is address
-              if (parts[1] && (parts[1].includes('address') || parts[1].includes('road') || parts[1].includes('street'))) {
+              data.lastName = cleanFieldValue(parts[0].trim()) || parts[0].trim();
+              if (parts[1] && (parts[1].includes('address') || parts[1].includes('road') || parts[1].includes('street')) && !data._addressLocked) {
                 const addressParts = extractAddress(parts[1]);
                 if (addressParts.address) {
                   data.address = addressParts.address;
@@ -1848,50 +1871,34 @@ function createCallStateMachine() {
                 }
               }
             } else {
-              data.lastName = lastNameText;
+              data.lastName = cleanFieldValue(lastNameText) || lastNameText;
             }
-            console.log(`✅ Last name corrected to: ${data.lastName}`);
-            return {
-              nextState: currentState,
-              prompt: getConfirmationPrompt(),
-              action: 'confirm'
-            };
+            console.log(`✅ Last name corrected (pre-lock): ${data.lastName}`);
+            return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm' };
           }
         }
         
-        // Handle email corrections
-        // Patterns: "email is X", "it's X at gmail", "timvanc@gmail.com", spelled letters like "T-I-M-V-A-N-C"
-        if (lowerTranscript.includes('email') || lowerTranscript.includes('@') || lowerTranscript.includes(' at ') || 
-            lowerTranscript.includes('gmail') || lowerTranscript.includes('yahoo') || lowerTranscript.includes('hotmail')) {
+        if (!data._emailLocked && (lowerTranscript.includes('email') || lowerTranscript.includes('@') || lowerTranscript.includes(' at ') || 
+            lowerTranscript.includes('gmail') || lowerTranscript.includes('yahoo') || lowerTranscript.includes('hotmail'))) {
           const emailExtracted = extractEmail(transcript);
-          if (emailExtracted && emailExtracted.includes('@')) {
-            data.email = emailExtracted;
-            console.log(`✅ Email corrected to: ${data.email}`);
-            return {
-              nextState: currentState,
-              prompt: getConfirmationPrompt(),
-              action: 'confirm'
-            };
+          if (emailExtracted && emailExtracted.includes('@') && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(emailExtracted)) {
+            data.email = emailExtracted.replace(/\s+/g, '').toLowerCase();
+            console.log(`✅ Email corrected (pre-lock): ${data.email}`);
+            return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm' };
           }
         }
         
-        // Handle address corrections
-        if (lowerTranscript.includes('address') || lowerTranscript.includes('street') || lowerTranscript.includes('road')) {
-          // Extract address from transcript, but be careful not to extract name parts
+        if (!data._addressLocked && (lowerTranscript.includes('address') || lowerTranscript.includes('street') || lowerTranscript.includes('road'))) {
           const addressMatch = transcript.match(/(?:address\s+is|street\s+is|road\s+is|my\s+address\s+is)\s+([^,]+)/i);
           if (addressMatch) {
             const addressParts = extractAddress(addressMatch[1]);
             if (addressParts.address) {
-              data.address = addressParts.address;
-              data.city = addressParts.city || data.city;
+              data.address = cleanFieldValue(addressParts.address) || addressParts.address;
+              data.city = addressParts.city ? (cleanFieldValue(addressParts.city) || addressParts.city) : data.city;
               data.state = addressParts.state || data.state;
               data.zip = addressParts.zip || data.zip;
-              console.log(`✅ Address corrected: ${data.address}, ${data.city}`);
-              return {
-                nextState: currentState,
-                prompt: getConfirmationPrompt(),
-                action: 'confirm'
-              };
+              console.log(`✅ Address corrected (pre-lock): ${data.address}, ${data.city}`);
+              return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm' };
             }
           }
         }

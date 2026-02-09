@@ -9,6 +9,10 @@
  * - Skip emergency redirects, dropped calls, out-of-scope calls
  * - Append-only (never overwrite)
  * - Human-readable call_summary (1-2 sentences plain English)
+ *
+ * CSV rule: Read ONLY from call data (locked/confirmed fields).
+ * Never read from live transcript or recap text. The state machine overwrites
+ * each field with cleaned values on confirm and locks it; CSV uses that single source of truth.
  */
 
 const { google } = require('googleapis');
