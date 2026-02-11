@@ -132,10 +132,11 @@ function createCallStateMachine() {
   
   // Confidence-based clarification tracking
   let pendingClarification = {
-    field: null,           // Which field needs clarification
-    value: null,           // The value we heard
-    confidence: null,      // Confidence result
-    awaitingConfirmation: false  // Are we waiting for yes/no?
+    field: null,
+    value: null,
+    confidence: null,
+    awaitingConfirmation: false,
+    spellingAttempts: 0    // Name spelling: 0 = first attempt, 1 = one retry used. Max 2 attempts then force lock.
   };
   
   // Confidence threshold: >= accept and move on; < confirm immediately (Phase 2)
@@ -780,13 +781,11 @@ function createCallStateMachine() {
           const isSpellingClarification = clarificationPatterns.some(p => p.test(lowerTranscript));
           if (isSpellingClarification && pendingClarification && pendingClarification.field === 'name') {
             console.log(`📋 Detected spelling clarification: "${transcript}"`);
-            // User is telling us about an error in what we have stored
-            // Ask them to spell it again correctly
-            return {
-              nextState: currentState,
-              prompt: "I understand. Could you please spell your last name again for me?",
-              action: 'ask'
-            };
+            if ((pendingClarification.spellingAttempts || 0) >= 1) {
+              return forceLockNameAndAdvance(null, transcript);
+            }
+            pendingClarification.spellingAttempts = 1;
+            return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           }
           
           // CASE 2: Negation (user says "no" without spelling) — clear and re-ask name
@@ -805,13 +804,12 @@ function createCallStateMachine() {
             };
           }
           
-          // CASE 3: SPELLING MODE — deterministic letter-only. No fuzzy ASR/LLM interpretation.
-          // Only single-letter tokens A–Z and the word "space" are accepted; all other tokens ignored.
+          // CASE 3: SPELLING MODE — deterministic letter-only. Max 2 attempts: one retry then force lock. No diagnostic prompts.
           const strictSpelling = parseSpelledLettersOnly(transcript);
+          const spellingAttempts = pendingClarification.spellingAttempts || 0;
           if (strictSpelling !== null) {
             const { lastName: spelledLastName, letterCount } = strictSpelling;
             if (letterCount >= 3 && spelledLastName) {
-              // Force confirm, lock, advance. No fuzzy interpretation.
               data.firstName = cleanFieldValue(pendingClarification.value.firstName) || pendingClarification.value.firstName;
               data.lastName = cleanFieldValue(spelledLastName) || spelledLastName;
               data.name_confidence = 95;
@@ -821,22 +819,17 @@ function createCallStateMachine() {
               console.log(`✅ Name CONFIRMED from spelling (letter-only, locked): ${data.firstName} ${data.lastName}`);
               return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
             }
-            if (letterCount === 1 || letterCount === 2) {
-              console.log(`📋 Spelling mode: only ${letterCount} letter(s) — asking for full spelling`);
-              return {
-                nextState: currentState,
-                prompt: "I only got a couple of letters. Please spell your last name one letter at a time, A through Z only. Say 'space' between parts if needed.",
-                action: 'ask'
-              };
+            if (spellingAttempts >= 1) {
+              return forceLockNameAndAdvance(spelledLastName || null, transcript);
             }
+            pendingClarification.spellingAttempts = 1;
+            return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           } else {
-            // strictSpelling === null: 0 valid letter tokens (e.g. ASR "bye van kallenberg") — do not use extractName
-            console.log(`📋 Spelling mode: no valid letter tokens in "${transcript.substring(0, 50)}..." — requesting letter-by-letter only`);
-            return {
-              nextState: currentState,
-              prompt: "I'm only listening for letters A through Z and the word 'space'. Please spell your last name one letter at a time.",
-              action: 'ask'
-            };
+            if (spellingAttempts >= 1) {
+              return forceLockNameAndAdvance(null, transcript);
+            }
+            pendingClarification.spellingAttempts = 1;
+            return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           }
           
           // CASE 4: User provides a name correction (not spelled, e.g., "It's Smith, not Smythe")
@@ -856,13 +849,13 @@ function createCallStateMachine() {
             };
           }
           
-          // CASE 5: Unclear response - ask them to spell again
-          console.log(`⚠️ Unclear name confirmation response: "${transcript}" - asking to spell again`);
-          return {
-            nextState: currentState,  // STAY in NAME state
-            prompt: `I'm still having trouble with that. Could you spell your last name for me one more time?`,
-            action: 'ask'
-          };
+          // CASE 5: Unclear response — one retry then force lock (spelling cap = 2)
+          const attempt = pendingClarification.spellingAttempts || 0;
+          if (attempt >= 1) {
+            return forceLockNameAndAdvance(null, transcript);
+          }
+          pendingClarification.spellingAttempts = 1;
+          return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
         }
         
         // Check if caller is confused or asking for clarification (NOT a name)
@@ -913,15 +906,11 @@ function createCallStateMachine() {
             console.log(`✅ Name from spelling letter-only (locked): ${data.firstName} ${data.lastName}`);
             return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
-          // 0 letter tokens but transcript looks like misheard spelling (e.g. "bye van kallenberg") — do NOT lock extractName; enter spelling mode
+          // 0 letter tokens but transcript looks like misheard spelling — enter spelling mode (silent). One user-facing retry only.
           if (strictFirst === null && looksLikeMisheardSpelling(transcript)) {
-            console.log(`📋 Possible misheard spelling ("${transcript.substring(0, 40)}...") — entering spelling mode, letter-by-letter only`);
-            pendingClarification = { field: 'name', value: { firstName: data.firstName || '', lastName: '' }, confidence: { level: 'low' }, awaitingConfirmation: true };
-            return {
-              nextState: currentState,
-              prompt: "I'm only listening for letters A through Z and the word 'space'. Please spell your last name one letter at a time.",
-              action: 'ask'
-            };
+            console.log(`📋 Possible misheard spelling ("${transcript.substring(0, 40)}...") — entering spelling mode`);
+            pendingClarification = { field: 'name', value: { firstName: data.firstName || '', lastName: '' }, confidence: { level: 'low' }, awaitingConfirmation: true, spellingAttempts: 0 };
+            return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           }
           const spelledResult = normalizeSpelledName(transcript);
           const nonNameWords = /\b(not|heat|yes|no|out|working|the|and|all|say|just|hot|cold|warm|cool|working|any|its|there|here)\b/i;
@@ -1072,10 +1061,9 @@ function createCallStateMachine() {
             console.log(`✅ Name stored (locked): ${data.firstName} ${data.lastName} (confidence: ${nameConfidencePercent}%)`);
             return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
-          // Below threshold: ask user to spell their last name instead of spelling it for them
-          // This is clearer and avoids the bot rambling on with wrong spelling
+          // Below threshold: ask user to spell (attempt 1). Max 2 attempts then force lock.
           data.name_confidence = nameConfidencePercent;
-          pendingClarification = { field: 'name', value: { firstName, lastName }, confidence: overallConf, awaitingConfirmation: true };
+          pendingClarification = { field: 'name', value: { firstName, lastName }, confidence: overallConf, awaitingConfirmation: true, spellingAttempts: 0 };
           return {
             nextState: currentState,
             prompt: `I'm having a little trouble with your last name. Could you spell it for me?`,
@@ -2511,8 +2499,31 @@ function createCallStateMachine() {
       field: null,
       value: null,
       confidence: null,
-      awaitingConfirmation: false
+      awaitingConfirmation: false,
+      spellingAttempts: 0
     };
+  }
+
+  /** Force lock name from best available (spelled, pending, or extract) and advance. Spelling max attempts reached. */
+  function forceLockNameAndAdvance(spelledLastNameOrNull, transcript) {
+    const first = cleanFieldValue(pendingClarification.value?.firstName) || pendingClarification.value?.firstName || data.firstName || '';
+    let last = spelledLastNameOrNull && String(spelledLastNameOrNull).trim()
+      ? cleanFieldValue(spelledLastNameOrNull) || spelledLastNameOrNull
+      : (pendingClarification.value?.lastName && String(pendingClarification.value.lastName).trim())
+        ? cleanFieldValue(pendingClarification.value.lastName) || pendingClarification.value.lastName
+        : null;
+    if (!last && transcript) {
+      const corr = extractName(transcript);
+      last = (corr.lastName && corr.lastName.trim()) ? cleanFieldValue(corr.lastName) || corr.lastName : null;
+    }
+    data.firstName = first || data.firstName || '';
+    data.lastName = last || data.lastName || 'Unknown';
+    data.name_confidence = 85;
+    data._nameComplete = true;
+    data._nameLocked = true;
+    clearPendingClarification();
+    console.log(`✅ Name force-locked (spelling cap): ${data.firstName} ${data.lastName}`);
+    return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
   }
   
   function getLowestConfidence(...confidences) {

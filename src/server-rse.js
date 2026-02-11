@@ -1040,11 +1040,12 @@ wss.on("connection", (twilioWs, req) => {
         backchannel.resetTurn();
         
         // BARGE-IN: Stop assistant audio when user speaks
-        // BUT: During greeting/safety_check/ENDED, let the prompt finish - don't cut it off
+        // BUT: During greeting/safety/intent/NAME/ENDED, let the prompt finish - no mid-sentence cutoff
         const currentStateForBargeIn = stateMachine.getState();
-        const isProtectedPrompt = currentStateForBargeIn === STATES.GREETING || 
+        const isProtectedPrompt = currentStateForBargeIn === STATES.GREETING ||
                                    currentStateForBargeIn === STATES.SAFETY_CHECK ||
-                                   currentStateForBargeIn === STATES.INTENT;
+                                   currentStateForBargeIn === STATES.INTENT ||
+                                   currentStateForBargeIn === STATES.NAME;
         // Never cancel or clear buffer when playing goodbye - let it finish then hangup
         if (currentStateForBargeIn === STATES.ENDED || _callCompleted) {
           console.log(`⏸️ User spoke during ENDED - letting goodbye finish`);
@@ -1232,9 +1233,9 @@ wss.on("connection", (twilioWs, req) => {
       console.log(`⏸️  Silence recovery disabled - TTS playing`);
       return;
     }
-    // CRITICAL: Do NOT start recovery timer during CONFIRMATION or CLOSE states
+    // CRITICAL: Do NOT start recovery timer during CONFIRMATION, CLOSE, or NAME (spelling) — no re-prompt while same state
     const currentState = stateMachine.getState();
-    if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE) {
+    if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE || currentState === STATES.NAME) {
       console.log(`⏸️  Silence recovery disabled in ${currentState} state - waiting for user response`);
       return;
     }
@@ -1249,7 +1250,7 @@ wss.on("connection", (twilioWs, req) => {
       }
       // Double-check state hasn't changed
       const state = stateMachine.getState();
-      if (state === STATES.CONFIRMATION || state === STATES.CLOSE) {
+      if (state === STATES.CONFIRMATION || state === STATES.CLOSE || state === STATES.NAME) {
         console.log(`⏸️  Silence recovery cancelled - now in ${state} state`);
         return;
       }
