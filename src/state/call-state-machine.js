@@ -165,6 +165,15 @@ function createCallStateMachine() {
     return `${getAcknowledgment()} ${prompt}`;
   }
   
+  /** No call completes without name unless explicitly configured. Required before CONFIRMATION/CLOSE. */
+  function hasRequiredName() {
+    if (!data._nameLocked || !data.firstName || !data.lastName) return false;
+    const nonName = /\b(not|heat|yes|no|out|working|the|and|all|say|just|hot|cold|warm|cool|any|its)\b/i;
+    if (nonName.test(String(data.firstName).trim()) || nonName.test(String(data.lastName).trim())) return false;
+    if (String(data.firstName).trim().length < 2 || String(data.lastName).trim().length < 2) return false;
+    return true;
+  }
+
   /**
    * Get the next prompt based on current state and data
    */
@@ -950,10 +959,16 @@ function createCallStateMachine() {
           const extracted = extractName(transcript);
           const { firstName, lastName } = extracted;
           
-          // SPELLING OVERRIDE: Letter-by-letter spelling is definitive. Bypass confidence entirely.
+          // SPELLING OVERRIDE: only when transcript looks like intentional name spelling (not symptom text)
           const spelledResult = normalizeSpelledName(transcript);
-          if (spelledResult && spelledResult.lastName) {
-            // First name only: never allow "The last name is" / filler to bleed in (confirmed = true -> immutable)
+          const nonNameWords = /\b(not|heat|yes|no|out|working|the|and|all|say|just|hot|cold|warm|cool|working|any|its|there|here)\b/i;
+          const looksLikeSymptom = nonNameWords.test(transcript) && (/\b(heat|working|out|no\s+heat|not\s+working)\b/i.test(transcript) || transcript.length > 25);
+          const hasSpellingIntent = /\bspelled?|spell\s+it|letters?|letter\s+by\s+letter\b/i.test(transcript);
+          const spelledLooksReal = spelledResult && spelledResult.lastName &&
+            !nonNameWords.test(spelledResult.lastName) &&
+            !(spelledResult.firstName && nonNameWords.test(spelledResult.firstName)) &&
+            (hasSpellingIntent || (spelledResult.lastName.length >= 4 && spelledResult.lastName.length <= 20));
+          if (spelledLooksReal && !looksLikeSymptom) {
             let useFirst = (spelledResult.firstName && spelledResult.firstName.length > 0)
               ? spelledResult.firstName
               : (firstName || '');
@@ -1782,6 +1797,11 @@ function createCallStateMachine() {
             data._availabilityComplete = true;
             data._availabilityLocked = true;
             clearPendingClarification();
+            if (!hasRequiredName()) {
+              console.log(`📋 Name required before confirmation - forcing name intake`);
+              data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
+              return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+            }
             return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
           }
           // Correction: replace, do not append
@@ -1790,6 +1810,25 @@ function createCallStateMachine() {
           data._availabilityComplete = true;
           data._availabilityLocked = true;
           clearPendingClarification();
+          if (!hasRequiredName()) {
+            console.log(`📋 Name required before confirmation - forcing name intake`);
+            data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
+            return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+          }
+          return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
+        }
+        // Urgency-based availability: heat off, no heat, emergency, anytime, asap → accept and advance (no time parsing)
+        if (hasUrgencyAvailability(lowerTranscript)) {
+          data.availability = URGENCY_AVAILABILITY_NOTES;
+          data._availabilityComplete = true;
+          data._availabilityLocked = true;
+          data.availability_confidence = 100;
+          console.log(`📋 Availability (urgency): ${data.availability} - advancing`);
+          if (!hasRequiredName()) {
+            console.log(`📋 Name required before confirmation - forcing name intake`);
+            data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
+            return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+          }
           return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
         }
         // CRITICAL: Check if this is actually an address correction, not availability
@@ -1845,6 +1884,11 @@ function createCallStateMachine() {
           if (availabilityConfidencePercent >= CONFIDENCE_THRESHOLD) {
             data.availability = extracted;
             data._availabilityComplete = true;
+            if (!hasRequiredName()) {
+              console.log(`📋 Name required before confirmation - forcing name intake`);
+              data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
+              return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+            }
             return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
           }
           // Below threshold: immediate confirmation, read-back only (no spelling)
@@ -1881,7 +1925,11 @@ function createCallStateMachine() {
         // The agent's recap speech must never be treated as user input (would corrupt first_name with "Tim and last name is...").
         // Only respond to yes/no/correction. If user says "no" or "something's wrong", we ask what to correct and handle in a follow-up.
         if (isConfirmation(lowerTranscript)) {
-          // User confirmed - immediately proceed to CLOSE
+          if (!hasRequiredName()) {
+            console.log(`📋 Name required before close - forcing name intake`);
+            data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
+            return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+          }
           return {
             nextState: transitionTo(STATES.CLOSE),
             prompt: CLOSE.anything_else,
@@ -1916,6 +1964,14 @@ function createCallStateMachine() {
         // Mark that close state was reached
         data._closeStateReached = true;
         
+        // Hard rule: negative response ("no", "nope", "that's all", etc.) → immediately closing, play goodbye once, hang up on TTS complete
+        if (isNegativeResponse(lowerTranscript)) {
+          return {
+            nextState: transitionTo(STATES.ENDED),
+            prompt: CLOSE.goodbye,
+            action: 'end_call'
+          };
+        }
         if (hasMoreQuestions(lowerTranscript)) {
           return {
             nextState: currentState,
@@ -1923,27 +1979,15 @@ function createCallStateMachine() {
             action: 'answer_question'
           };
         }
-        // If user says no, nothing else, or gives a short response, deliver goodbye immediately
-        if (lowerTranscript.includes('no') || lowerTranscript.includes('nothing') || 
-            lowerTranscript === 'no thanks' || lowerTranscript === 'no thank you' ||
-            lowerTranscript.length < 3) {
-          return {
-            nextState: transitionTo(STATES.ENDED),
-            prompt: CLOSE.goodbye,
-            action: 'end_call'
-          };
-        }
-        // If user says yes, wait to see what they need, otherwise deliver goodbye after a pause
-        // For now, default to goodbye after asking once
+        // Longer response without clear "no" → treat as possible follow-up question
         if (lowerTranscript.length > 3) {
-          // User has more questions - answer it (handled by answer_question action)
           return {
             nextState: currentState,
             prompt: null,
             action: 'answer_question'
           };
         }
-        // Default: deliver goodbye
+        // Very short / ambiguous → end call (safe default after "anything else?")
         return {
           nextState: transitionTo(STATES.ENDED),
           prompt: CLOSE.goodbye,
@@ -3003,6 +3047,25 @@ function createCallStateMachine() {
            !text.includes('evening');
   }
   
+  /** Urgency-based availability: no heat, emergency, anytime, as soon as possible. Do not over-structure. */
+  const URGENCY_AVAILABILITY_NOTES = 'Anytime. No heat. Urgent.';
+  function hasUrgencyAvailability(text) {
+    if (!text || text.length < 2) return false;
+    const lower = text.toLowerCase();
+    const urgencyPhrases = [
+      /\bheat\s+is\s+off\b/i,
+      /\bno\s+heat\b/i,
+      /\bemergency\b/i,
+      /\banytime\b/i,
+      /\bas\s+soon\s+as\s+possible\b/i,
+      /\basap\b/i,
+      /\burgent\b/i,
+      /\bwhenever\s+(you\s+can|possible)\b/i,
+      /\b(soonest|earliest)\s+(you\s+can|possible)\b/i
+    ];
+    return urgencyPhrases.some(p => p.test(lower));
+  }
+  
   /**
    * Normalize system type: clean up filler phrases and map to canonical values
    * Examples: "Oh, it's central here" → "central air", "central ac" → "central air"
@@ -3187,6 +3250,34 @@ function createCallStateMachine() {
     return questionPatterns.some(p => text.includes(p)) || 
            text.includes('?') ||
            (text.includes('yes') && text.length > 10);
+  }
+  
+  /** "No" / nothing else in CLOSE state → must terminate call (goodbye then hangup). */
+  function isNegativeResponse(text) {
+    if (!text || !text.trim()) return true;
+    const lower = text.trim().toLowerCase();
+    const negativePatterns = [
+      /^no\.?$/i,
+      /^nope\.?$/i,
+      /^nah\.?$/i,
+      /\bno\s+thanks?\b/i,
+      /\bno\s+thank\s+you\b/i,
+      /\bnothing\s+else\b/i,
+      /\bthat'?s\s+it\b/i,
+      /\bwe'?re\s+good\b/i,
+      /\bi'?m\s+good\b/i,
+      /\ball\s+set\b/i,
+      /\ball\s+good\b/i,
+      /\bthat'?s\s+all\b/i,
+      /\bi'?m\s+done\b/i,
+      /\bwe'?re\s+done\b/i,
+      /\bthat\s+would\s+be\s+all\b/i,
+      /\bnot\s+really\b/i,
+      /\bno\s+that'?s\s+all\b/i
+    ];
+    if (negativePatterns.some(p => p.test(lower))) return true;
+    if (lower.length < 4 && /^n[o0]\.?$/i.test(lower)) return true;
+    return false;
   }
   
   // ============================================================================

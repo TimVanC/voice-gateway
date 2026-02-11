@@ -136,6 +136,7 @@ wss.on("connection", (twilioWs, req) => {
   let audioFramesSent = 0;  // Track frames sent for debugging
   let responseInProgress = false;
   let audioStreamingStarted = false;
+  let tts_active = false;  // TTS guardrail: true from response start until buffer emptied; no state change while true
   let totalAudioBytesSent = 0;  // Track total audio in current response
   let currentResponseId = null;  // Track current OpenAI response ID for cancellation
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
@@ -266,10 +267,11 @@ wss.on("connection", (twilioWs, req) => {
         }
         
         // If buffer just emptied and we're waiting for it to finish (audioDoneReceived=true but responseInProgress=true),
-        // reset responseInProgress now that all audio has been sent
+        // reset responseInProgress and tts_active now that all audio has been sent
         if (playBuffer.length === 0 && audioDoneReceived && responseInProgress) {
-          console.log(`✅ Audio buffer emptied - resetting responseInProgress`);
+          console.log(`✅ Audio buffer emptied - TTS complete, allowing next state`);
           responseInProgress = false;
+          tts_active = false;
           audioStreamingStarted = false;
           // Hangup only after final TTS finishes playing + fixed buffer (no cut-off mid-sentence)
           if (goodbyeCompletedWaitingForBuffer) {
@@ -464,6 +466,7 @@ wss.on("connection", (twilioWs, req) => {
         // Audio from new response will be appended, not replace
         // Only clear on explicit cancellation or barge-in
         responseInProgress = true;
+        tts_active = true;  // No state change until TTS completes (buffer emptied)
         audioStreamingStarted = false;
         totalAudioBytesSent = 0;  // Reset for new response
         audioFramesSent = 0;  // Reset frame counter
@@ -565,6 +568,7 @@ wss.on("connection", (twilioWs, req) => {
               // CRITICAL: Clear the bad audio
               playBuffer = Buffer.alloc(0);
               responseInProgress = false;
+              tts_active = false;
               audioStreamingStarted = false;
               
               // Check if we've exceeded max retries
@@ -694,6 +698,7 @@ wss.on("connection", (twilioWs, req) => {
             }
             // NO recovery timer - just wait for user to respond naturally
             responseInProgress = false;
+            tts_active = false;
             audioStreamingStarted = false;
             return; // Don't start recovery timer
           }
@@ -702,6 +707,7 @@ wss.on("connection", (twilioWs, req) => {
           if (currentState === STATES.ENDED) {
             _callCompleted = true;
             responseInProgress = false;
+            tts_active = false;
             audioStreamingStarted = false;
             stateMachine.updateData('_closeStateReached', true);
             // Wait for buffer to empty then disconnect (idempotent, single run)
@@ -733,6 +739,7 @@ wss.on("connection", (twilioWs, req) => {
               console.error(`🚨 NO AUDIO GENERATED ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
               transferToRealPerson();
               responseInProgress = false;
+              tts_active = false;
               currentPromptText = null;
               expectedTranscript = null;
               actualTranscript = null;
@@ -742,6 +749,7 @@ wss.on("connection", (twilioWs, req) => {
             promptRetryCount[promptKey] = retryCount + 1;
             console.log(`🔄 No audio was sent - will retry prompt (attempt ${retryCount + 1}/${maxRetries})`);
             responseInProgress = false;
+            tts_active = false;
             setTimeout(() => {
               let toSend = currentPromptText;
               if (promptKey === SAFETY.check && (promptRetryCount[SAFETY.check] || 0) === 1) {
@@ -830,6 +838,7 @@ wss.on("connection", (twilioWs, req) => {
               } else {
                 // Buffer is nearly empty, safe to reset
                 responseInProgress = false;
+                tts_active = false;
                 audioStreamingStarted = false;
               }
               
@@ -891,6 +900,7 @@ wss.on("connection", (twilioWs, req) => {
               console.error(`🚨 INCOMPLETE RESPONSE ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
               transferToRealPerson();
               responseInProgress = false;
+              tts_active = false;
               audioStreamingStarted = false;
               currentPromptText = null;
               expectedTranscript = null;
@@ -902,6 +912,7 @@ wss.on("connection", (twilioWs, req) => {
             
             promptRetryCount[promptKey] = retryCount + 1;
             responseInProgress = false;
+            tts_active = false;
             audioStreamingStarted = false;
             totalAudioBytesSent = 0;
             lastAudioDeltaTime = null;
@@ -967,6 +978,7 @@ wss.on("connection", (twilioWs, req) => {
           }
         }
         responseInProgress = false;
+        tts_active = false;
         audioStreamingStarted = false;  // Reset for next response
         
         // Reset dynamic silence to default after turn completes
@@ -1026,12 +1038,16 @@ wss.on("connection", (twilioWs, req) => {
         backchannel.resetTurn();
         
         // BARGE-IN: Stop assistant audio when user speaks
-        // BUT: During greeting/safety_check, let the prompt finish - don't cut it off
+        // BUT: During greeting/safety_check/ENDED, let the prompt finish - don't cut it off
         const currentStateForBargeIn = stateMachine.getState();
         const isProtectedPrompt = currentStateForBargeIn === STATES.GREETING || 
                                    currentStateForBargeIn === STATES.SAFETY_CHECK ||
                                    currentStateForBargeIn === STATES.INTENT;
-        
+        // Never cancel or clear buffer when playing goodbye - let it finish then hangup
+        if (currentStateForBargeIn === STATES.ENDED || _callCompleted) {
+          console.log(`⏸️ User spoke during ENDED - letting goodbye finish`);
+          break;
+        }
         if (playBuffer.length > 0 || responseInProgress) {
           if (isProtectedPrompt && playBuffer.length > 1600) {
             // During greeting/safety/intent: DON'T clear buffer if substantial audio remains
@@ -1044,6 +1060,7 @@ wss.on("connection", (twilioWs, req) => {
             console.log("🛑 Barge-in: stopping assistant audio");
             playBuffer = Buffer.alloc(0);  // Clear audio buffer immediately
             responseInProgress = false;
+            tts_active = false;
             audioStreamingStarted = false;
             
             // CRITICAL: Also cancel OpenAI's response generation if it's in progress
@@ -1101,12 +1118,19 @@ wss.on("connection", (twilioWs, req) => {
         // 
         // EXCEPTION: If speech was very short (< 1 second), user might still
         // be thinking or about to continue. Wait a bit before canceling.
+        // EXCEPTION: If we're in ENDED or _callCompleted, we're playing goodbye - do NOT cancel.
         // ===================================================================
+        const stateForCancel = stateMachine.getState();
+        if (stateForCancel === STATES.ENDED || _callCompleted) {
+          console.log(`⏸️ Speech stopped during ENDED - not cancelling (goodbye playing)`);
+          break;
+        }
         if (openaiWs?.readyState === WebSocket.OPEN) {
           if (speechDuration < 1000) {
             // Very short speech - wait a bit in case user continues
             setTimeout(() => {
               if (openaiWs?.readyState === WebSocket.OPEN && !speechStartTime) {
+                if (stateMachine.getState() === STATES.ENDED || _callCompleted) return;
                 console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response (after short speech delay)`);
                 openaiWs.send(JSON.stringify({ type: "response.cancel" }));
                 waitingForTranscription = true;
@@ -1141,16 +1165,17 @@ wss.on("connection", (twilioWs, req) => {
           // Clear confirmation recovery timer - we got a response
           clearConfirmationRecoveryTimer();
           
-          // If a response is already in progress (shouldn't happen after our cancel),
-          // log it but still process the input
-          if (responseInProgress) {
-            console.log(`⚠️ Response was in progress when transcript arrived`);
-            if (audioStreamingStarted) {
-              console.log(`🎵 Audio already streaming - will queue input`);
-              // Let current response finish, queue this input
-              pendingUserInput = transcript;
-              return;
-            }
+          // TTS guardrail: no state change while TTS is playing (email confirmation must play fully)
+          if (tts_active) {
+            console.log(`🔒 TTS active - queuing transcript until playback completes: "${transcript.substring(0, 40)}..."`);
+            pendingUserInput = transcript;
+            return;
+          }
+          // Legacy: if response in progress but tts_active not set, still queue when audio streaming
+          if (responseInProgress && audioStreamingStarted) {
+            console.log(`🎵 Audio streaming - queuing input`);
+            pendingUserInput = transcript;
+            return;
           }
           
           // Process through state machine
@@ -1200,8 +1225,12 @@ wss.on("connection", (twilioWs, req) => {
       clearTimeout(silenceRecoveryTimer);
     }
     
+    // CRITICAL: Do NOT start recovery timer while TTS is playing (email confirmation must be atomic)
+    if (tts_active) {
+      console.log(`⏸️  Silence recovery disabled - TTS playing`);
+      return;
+    }
     // CRITICAL: Do NOT start recovery timer during CONFIRMATION or CLOSE states
-    // These states need uninterrupted audio delivery
     const currentState = stateMachine.getState();
     if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE) {
       console.log(`⏸️  Silence recovery disabled in ${currentState} state - waiting for user response`);
@@ -1211,6 +1240,11 @@ wss.on("connection", (twilioWs, req) => {
     silenceRecoveryTimer = setTimeout(() => {
       silenceRecoveryTimer = null;
       
+      // Do not run recovery while TTS is playing
+      if (tts_active) {
+        console.log(`⏸️  Silence recovery skipped - TTS still playing`);
+        return;
+      }
       // Double-check state hasn't changed
       const state = stateMachine.getState();
       if (state === STATES.CONFIRMATION || state === STATES.CLOSE) {
@@ -1313,6 +1347,10 @@ Say the ENTIRE sentence above, word for word.`,
       const isUserSpeaking = speechStartTime !== null;
       const currentState = stateMachine.getState();
       
+      // Do not run silence timeout while TTS is playing (email confirmation must play fully)
+      if (tts_active) {
+        return;
+      }
       // Don't trigger during critical states (user needs time to listen and respond)
       if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE || currentState === STATES.ENDED || 
           currentState === STATES.SAFETY_CHECK || currentState === STATES.GREETING || currentState === STATES.INTENT) {
@@ -1416,6 +1454,7 @@ Say the ENTIRE sentence above, word for word.`,
       console.log(`🔄 Retrying prompt (attempt ${retryCount + 1}/${maxRetries})`);
       
       responseInProgress = false;
+      tts_active = false;
       audioStreamingStarted = false;
       totalAudioBytesSent = 0;
       lastAudioDeltaTime = null;
@@ -1532,6 +1571,12 @@ STRICT RULES:
   
   function processUserInput(transcript) {
     if (_callCompleted) return;  // Terminal: no further TTS or logic once closing ran
+    // TTS guardrail: no state change while TTS is playing (email confirmation atomic)
+    if (tts_active) {
+      console.log(`🔒 processUserInput deferred - TTS active, queuing`);
+      pendingUserInput = transcript;
+      return;
+    }
     // Clear silence timer if still active
     if (silenceTimer) {
       clearTimeout(silenceTimer);
@@ -1572,11 +1617,16 @@ STRICT RULES:
     }
     
     // If response just started but no audio yet, we can safely cancel and take over
+    // Unless we're in ENDED - then we're delivering goodbye, don't cancel
     if (responseInProgress && !audioStreamingStarted) {
-      console.log(`🛑 Cancelling OpenAI auto-response (no audio yet)`);
-      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-      playBuffer = Buffer.alloc(0);  // Clear buffer since we're cancelling
-      responseInProgress = false;
+      const stateNow = stateMachine.getState();
+      if (stateNow !== STATES.ENDED && !_callCompleted) {
+        console.log(`🛑 Cancelling OpenAI auto-response (no audio yet)`);
+        openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+        playBuffer = Buffer.alloc(0);  // Clear buffer since we're cancelling
+        responseInProgress = false;
+        tts_active = false;
+      }
     }
     
     // Process immediately - no delay needed for name collection
