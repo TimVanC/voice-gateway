@@ -1,7 +1,9 @@
 /**
  * RSE Energy Group - AI Receptionist Server
  *
- * GUARDRAIL: Disable all parsing and TTS once call_state = completed (_callCompleted).
+ * CANONICAL RULES: See project root cursor-rules.md. Rules file wins over any conflicting implementation.
+ * TTS lifecycle: no state transitions while TTS active; hangup only after final TTS + buffer. Model session isolated per call.
+ * Terminal: _callCompleted = true → no further parsing or TTS; hangup only.
  */
 
 require("dotenv").config();

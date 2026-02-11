@@ -1,13 +1,12 @@
 /**
  * RSE Call State Machine
  *
- * States: greeting → intent → safety_check → name → phone → email → details_branch → address → availability → confirmation → close
+ * CANONICAL RULES: See project root cursor-rules.md. Rules file wins over any conflicting implementation.
+ * This system is deterministic, not conversational.
  *
- * GLOBAL PARSING GUARDRAILS:
- * - Disable all field parsing during recap (CONFIRMATION): no updates from transcript.
- * - Disable all field parsing during closing (CLOSE / ENDED).
- * - Each field has confirmed + locked state (_nameLocked, _availabilityLocked, etc.); when locked, immutable.
- * - Recap and CSV read only from locked fields.
+ * States: greeting → intent → safety_check → name → phone → email → details_branch → address → availability → confirmation → close → ended (completed).
+ *
+ * Field lifecycle: value + confirmed + locked; once locked, immutable. Parsing disabled during recap (CONFIRMATION) and closing (CLOSE/ENDED).
  */
 
 const { 
@@ -790,97 +789,7 @@ function createCallStateMachine() {
             };
           }
           
-          // CASE 2: User provides a spelled correction (e.g., "No, it's V-A-N...")
-          // Patterns: "Uh, no, it's V-A-N-C-A-U-W-E-N-B-E-R-G-E.", "V A N space C A U W E N B E R G E"
-          // CRITICAL: Only extract ISOLATED single letters (not letters within words like "uh", "no", "it's")
-          const hasSpelledLetters = /([A-Z])[-.\s]+([A-Z])[-.\s]+([A-Z])/i.test(transcript);
-          if (hasSpelledLetters) {
-            console.log(`📋 Detected spelled letters in: "${transcript}"`);
-            
-            // CRITICAL: First remove contractions like "it's", "that's", "what's" to avoid
-            // extracting the trailing letter (e.g., 'S' from "it's")
-            let cleanedForLetters = transcript
-              .replace(/\b(it'?s|that'?s|what'?s|there'?s|here'?s|let'?s|he'?s|she'?s|who'?s)\b/gi, '')
-              .replace(/\b(i'm|you're|we're|they're|isn't|aren't|won't|can't|don't)\b/gi, '')
-              // Remove "letter as in word" patterns (phonetic alphabet) to avoid double-counting
-              // e.g., "V as in Victor" should only count as one V, not two
-              .replace(/\b([A-Z])\s+(as\s+in|like|for)\s+\w+/gi, '$1');
-            
-            // Extract ONLY isolated single letters (letters surrounded by non-letter characters)
-            // This ignores filler words like "uh", "no" because their letters aren't isolated
-            // Pattern: single letter preceded and followed by non-letter (or start/end)
-            const isolatedLetters = cleanedForLetters.toUpperCase().match(/(?:^|[^A-Z])([A-Z])(?=[^A-Z]|$)/g) || [];
-            const letters = isolatedLetters.map(m => m.replace(/[^A-Z]/g, '')).filter(l => l.length === 1);
-            
-            console.log(`📋 Extracted isolated letters: [${letters.join(', ')}] (${letters.length} letters)`);
-            
-            // Handle "space" as word separator in names like "V-A-N space C-A-U-W-E-N-B-E-R-G-E"
-            const hasSpace = /\bspace\b/i.test(transcript);
-            let correctedLastName = '';
-            
-            if (letters.length >= 3) {
-              if (hasSpace) {
-                // Find where "space" appears and split the letters accordingly
-                // For now, handle common pattern: first 3 letters are prefix (Van, De, etc.)
-                const raw = letters.join('');
-                // Check for common Dutch/German name prefixes
-                if (raw.length > 3 && /^(VAN|VON|DE|DU|LA|LE)/i.test(raw)) {
-                  const prefix = raw.slice(0, 3);
-                  const rest = raw.slice(3);
-                  correctedLastName = prefix.charAt(0).toUpperCase() + prefix.slice(1).toLowerCase() + 
-                                      ' ' + rest.charAt(0).toUpperCase() + rest.slice(1).toLowerCase();
-                } else {
-                  correctedLastName = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
-                }
-              } else {
-                // Single word - capitalize first letter
-                const raw = letters.join('');
-                // Check for common prefixes even without explicit "space"
-                if (raw.length > 5 && /^(VAN|VON)/i.test(raw)) {
-                  const prefix = raw.slice(0, 3);
-                  const rest = raw.slice(3);
-                  correctedLastName = prefix.charAt(0).toUpperCase() + prefix.slice(1).toLowerCase() + 
-                                      ' ' + rest.charAt(0).toUpperCase() + rest.slice(1).toLowerCase();
-                } else {
-                  correctedLastName = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
-                }
-              }
-              
-              console.log(`📋 Parsed spelled correction: "${correctedLastName}" (from ${letters.length} letters)`);
-              
-              // CRITICAL: If only 3-4 letters and looks like a prefix (Van, De, La, etc.),
-              // the user might have been cut off mid-spelling. Ask for more instead of confirming.
-              const commonPrefixes = ['van', 'von', 'de', 'du', 'la', 'le', 'da', 'di', 'mc', 'mac', 'o\''];
-              const looksLikePrefix = letters.length <= 4 && commonPrefixes.some(p => 
-                correctedLastName.toLowerCase() === p || correctedLastName.toLowerCase().startsWith(p)
-              );
-              
-              if (looksLikePrefix) {
-                console.log(`⏳ Detected possible incomplete prefix "${correctedLastName}" - asking for more`);
-                // Store what we have so far but ask if there's more
-                pendingClarification.value.lastName = correctedLastName;
-                return {
-                  nextState: currentState,
-                  prompt: `I heard ${correctedLastName}. Is there more to your last name, or is that it?`,
-                  action: 'ask'
-                };
-              }
-              
-              // SPELLING OVERRIDE: Spelled input is definitive. Treat as confirmed immediately; do not ask again.
-              data.firstName = cleanFieldValue(pendingClarification.value.firstName) || pendingClarification.value.firstName;
-              data.lastName = cleanFieldValue(correctedLastName) || correctedLastName;
-              data.name_confidence = 95;  // Spelled = explicit data, forced high
-              data._nameComplete = true;
-              data._nameLocked = true;
-              clearPendingClarification();
-              console.log(`✅ Name CONFIRMED from spelling (locked): ${data.firstName} ${data.lastName}`);
-              return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
-            } else {
-              console.log(`⚠️ Not enough isolated letters extracted (${letters.length}) - need at least 3`);
-            }
-          }
-          
-          // CASE 3: User says "no" clearly without providing correction
+          // CASE 2: Negation (user says "no" without spelling) — clear and re-ask name
           if (isNegation(lowerTranscript)) {
             console.log(`❌ Name REJECTED by user - clearing and re-asking`);
             data.firstName = null;
@@ -892,6 +801,40 @@ function createCallStateMachine() {
             return {
               nextState: currentState,
               prompt: "No problem. Let me get that again. What is your first and last name?",
+              action: 'ask'
+            };
+          }
+          
+          // CASE 3: SPELLING MODE — deterministic letter-only. No fuzzy ASR/LLM interpretation.
+          // Only single-letter tokens A–Z and the word "space" are accepted; all other tokens ignored.
+          const strictSpelling = parseSpelledLettersOnly(transcript);
+          if (strictSpelling !== null) {
+            const { lastName: spelledLastName, letterCount } = strictSpelling;
+            if (letterCount >= 3 && spelledLastName) {
+              // Force confirm, lock, advance. No fuzzy interpretation.
+              data.firstName = cleanFieldValue(pendingClarification.value.firstName) || pendingClarification.value.firstName;
+              data.lastName = cleanFieldValue(spelledLastName) || spelledLastName;
+              data.name_confidence = 95;
+              data._nameComplete = true;
+              data._nameLocked = true;
+              clearPendingClarification();
+              console.log(`✅ Name CONFIRMED from spelling (letter-only, locked): ${data.firstName} ${data.lastName}`);
+              return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+            }
+            if (letterCount === 1 || letterCount === 2) {
+              console.log(`📋 Spelling mode: only ${letterCount} letter(s) — asking for full spelling`);
+              return {
+                nextState: currentState,
+                prompt: "I only got a couple of letters. Please spell your last name one letter at a time, A through Z only. Say 'space' between parts if needed.",
+                action: 'ask'
+              };
+            }
+          } else {
+            // strictSpelling === null: 0 valid letter tokens (e.g. ASR "bye van kallenberg") — do not use extractName
+            console.log(`📋 Spelling mode: no valid letter tokens in "${transcript.substring(0, 50)}..." — requesting letter-by-letter only`);
+            return {
+              nextState: currentState,
+              prompt: "I'm only listening for letters A through Z and the word 'space'. Please spell your last name one letter at a time.",
               action: 'ask'
             };
           }
@@ -959,7 +902,27 @@ function createCallStateMachine() {
           const extracted = extractName(transcript);
           const { firstName, lastName } = extracted;
           
-          // SPELLING OVERRIDE: only when transcript looks like intentional name spelling (not symptom text)
+          // SPELLING OVERRIDE: prefer deterministic letter-only so ASR words (e.g. "bye van kallenberg") are never used
+          const strictFirst = parseSpelledLettersOnly(transcript);
+          if (strictFirst && strictFirst.letterCount >= 3 && strictFirst.lastName) {
+            data.firstName = cleanFieldValue(firstName) || firstName || '';
+            data.lastName = cleanFieldValue(strictFirst.lastName) || strictFirst.lastName;
+            data.name_confidence = 95;
+            data._nameComplete = true;
+            data._nameLocked = true;
+            console.log(`✅ Name from spelling letter-only (locked): ${data.firstName} ${data.lastName}`);
+            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+          }
+          // 0 letter tokens but transcript looks like misheard spelling (e.g. "bye van kallenberg") — do NOT lock extractName; enter spelling mode
+          if (strictFirst === null && looksLikeMisheardSpelling(transcript)) {
+            console.log(`📋 Possible misheard spelling ("${transcript.substring(0, 40)}...") — entering spelling mode, letter-by-letter only`);
+            pendingClarification = { field: 'name', value: { firstName: data.firstName || '', lastName: '' }, confidence: { level: 'low' }, awaitingConfirmation: true };
+            return {
+              nextState: currentState,
+              prompt: "I'm only listening for letters A through Z and the word 'space'. Please spell your last name one letter at a time.",
+              action: 'ask'
+            };
+          }
           const spelledResult = normalizeSpelledName(transcript);
           const nonNameWords = /\b(not|heat|yes|no|out|working|the|and|all|say|just|hot|cold|warm|cool|working|any|its|there|here)\b/i;
           const looksLikeSymptom = nonNameWords.test(transcript) && (/\b(heat|working|out|no\s+heat|not\s+working)\b/i.test(transcript) || transcript.length > 25);
@@ -968,7 +931,12 @@ function createCallStateMachine() {
             !nonNameWords.test(spelledResult.lastName) &&
             !(spelledResult.firstName && nonNameWords.test(spelledResult.firstName)) &&
             (hasSpellingIntent || (spelledResult.lastName.length >= 4 && spelledResult.lastName.length <= 20));
-          if (spelledLooksReal && !looksLikeSymptom) {
+          // If strict letter-only returned 0 letters or spelling intent but no letter tokens, do NOT use normalizeSpelledName (would capture "bye van kallenberg" etc.)
+          const skipFuzzySpelled = (strictFirst && strictFirst.letterCount === 0) || (strictFirst === null && hasSpellingIntent);
+          if (skipFuzzySpelled) {
+            console.log(`📋 Spelling input but 0 letter tokens — skipping fuzzy spelled result`);
+          }
+          if (!skipFuzzySpelled && spelledLooksReal && !looksLikeSymptom) {
             let useFirst = (spelledResult.firstName && spelledResult.firstName.length > 0)
               ? spelledResult.firstName
               : (firstName || '');
@@ -2267,6 +2235,47 @@ function createCallStateMachine() {
     return emergencyKeywords.some(kw => text.includes(kw));
   }
   
+  /**
+   * Transcript looks like ASR mishearing of letter-by-letter spelling (e.g. "bye van kallenberg" for B-Y V-A-N ...).
+   * When true, do NOT lock extractName result — ask for letter-by-letter spelling instead.
+   */
+  function looksLikeMisheardSpelling(text) {
+    if (!text || text.trim().length < 4) return false;
+    const words = text.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (words.length < 2) return false;
+    const letterSoundWords = new Set(['bye', 'by', 'be', 'see', 'sea', 'are', 'you', 'why', 'tea', 'pea', 'kay', 'jay', 'eye', 'oh', 'ex', 'zee', 'van', 'ell', 'em', 'en', 'queue', 'double', 'eff', 'gee', 'aitch', 'cue', 'ess', 'tee', 'vee', 'dubya', 'wye']);
+    return words.some(w => letterSoundWords.has(w));
+  }
+
+  /**
+   * SPELLING MODE: deterministic letter-only assembly. Bypasses ASR/LLM.
+   * Only accepts: single-letter tokens A–Z and the word "space". Ignores all other tokens.
+   * Use when we've asked "Could you spell it for me?" — no fuzzy interpretation.
+   * @returns {{ lastName: string, letterCount: number } | null} null if 0 valid letters
+   */
+  function parseSpelledLettersOnly(text) {
+    if (!text || typeof text !== 'string') return null;
+    const tokens = text.trim().split(/\s+/).filter(Boolean);
+    const sequence = []; // each element is a letter (uppercase) or '\x00' for word boundary
+    for (const token of tokens) {
+      if (token.length === 1 && /^[A-Za-z]$/.test(token)) {
+        sequence.push(token.toUpperCase());
+      } else if (token.toLowerCase() === 'space') {
+        sequence.push('\x00'); // word boundary
+      }
+      // else: ignore (bye, van, kallenberg, etc.)
+    }
+    const letterCount = sequence.filter(c => c !== '\x00').length;
+    if (letterCount < 3) return letterCount === 0 ? null : { lastName: '', letterCount };
+    // Build name: split by word boundary, capitalize each part
+    const raw = sequence.map(c => c === '\x00' ? ' ' : c).join('');
+    const parts = raw.split(/\s+/).filter(Boolean).map(part =>
+      part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+    );
+    const lastName = parts.join(' ');
+    return { lastName, letterCount };
+  }
+
   /**
    * Normalize spelled name: convert "V-A-N space C-A-U-W-E-N-B-E-R-G-E" to "Van Cauwenberge"
    */
