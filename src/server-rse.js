@@ -296,10 +296,12 @@ wss.on("connection", (twilioWs, req) => {
           // Hangup only after final TTS finishes playing + fixed buffer (no cut-off mid-sentence)
           if (goodbyeCompletedWaitingForBuffer) {
             goodbyeCompletedWaitingForBuffer = false;
+            stateMachine.intakeLog('state_event', { event: 'goodbye_buffer_emptied', hangup_in_ms: GOODBYE_BUFFER_MS });
             console.log(`📞 Goodbye buffer emptied - disconnecting in ${GOODBYE_BUFFER_MS}ms`);
             setTimeout(() => {
               if (closingFailsafeTimer) { clearTimeout(closingFailsafeTimer); closingFailsafeTimer = null; }
               console.log(`📞 Disconnecting call after goodbye`);
+              stateMachine.intakeLog('state_event', { event: 'hangup_executed', state: 'completed' });
               if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
                 twilioWs.close(1000, 'Call completed');
               }
@@ -1021,6 +1023,7 @@ wss.on("connection", (twilioWs, req) => {
             _callCompleted = true;  // Ensure no further prompts can fire
             stateMachine.updateData('_closeStateReached', true);
             goodbyeCompletedWaitingForBuffer = true;
+            stateMachine.intakeLog('state_event', { event: 'goodbye_tts_complete', buffer_seconds: (playBuffer.length / 8000).toFixed(1) });
             console.log(`📞 Goodbye TTS complete - will disconnect after buffer empties + ${GOODBYE_BUFFER_MS}ms`);
           }
         }
@@ -1891,15 +1894,18 @@ STRICT RULES:
       }
       // Send the goodbye FIRST, then set _callCompleted to prevent any further prompts
       console.log(`👋 End of call - delivering goodbye (single run)`);
+      stateMachine.intakeLog('state_event', { event: 'closing_started', state: 'ended' });
       stateMachine.updateData('_closeStateReached', true);
       const goodbyePrompt = result.prompt || CLOSE.goodbye;
       sendStatePrompt(goodbyePrompt);
       _callCompleted = true;  // Set AFTER sending goodbye - sendStatePrompt checks this flag
+      console.log(`🔒 _callCompleted = true (no further prompts allowed)`);
       if (closingFailsafeTimer) clearTimeout(closingFailsafeTimer);
       closingFailsafeTimer = setTimeout(() => {
         closingFailsafeTimer = null;
         if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
           console.log(`📞 Closing fail-safe: forcing hangup after ${CLOSING_FAILSAFE_MS}ms`);
+          stateMachine.intakeLog('state_event', { event: 'failsafe_hangup', elapsed_ms: CLOSING_FAILSAFE_MS });
           twilioWs.close(1000, 'Call completed');
         }
       }, CLOSING_FAILSAFE_MS);
@@ -1925,14 +1931,22 @@ STRICT RULES:
         // If state machine returned a prompt for correction, use it
         sendStatePrompt(result.prompt);
       } else {
-        // Otherwise, get the next prompt from state machine
-        console.log(`⚠️  Unexpected action: ${result.action} - falling back to state prompt`);
-        const fallbackPrompt = stateMachine.getNextPrompt();
-        if (fallbackPrompt) {
-          sendStatePrompt(fallbackPrompt);
-        } else {
-          // Last resort: use natural response but keep it brief
+        const currentStateForAction = stateMachine.getState();
+        // CLOSE state: user asked a follow-up question. Answer naturally, then ask "anything else?" once more.
+        if (currentStateForAction === STATES.CLOSE) {
+          console.log(`💬 Answering follow-up question in CLOSE state: "${transcript.substring(0, 50)}"`);
+          // Reset the flag so "anything else?" can be asked ONE more time after answering
+          stateMachine.updateData('_anythingElsePrompted', false);
           sendNaturalResponse(transcript, result.action);
+        } else {
+          // Other states: get the next prompt from state machine
+          const fallbackPrompt = stateMachine.getNextPrompt();
+          if (fallbackPrompt) {
+            sendStatePrompt(fallbackPrompt);
+          } else {
+            // Last resort: use natural response but keep it brief
+            sendNaturalResponse(transcript, result.action);
+          }
         }
       }
     }

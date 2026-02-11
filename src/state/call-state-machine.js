@@ -272,6 +272,8 @@ function createCallStateMachine() {
         return getConfirmationPrompt();
         
       case STATES.CLOSE:
+        // Only return the "anything else?" prompt ONCE per call
+        if (data._anythingElsePrompted) return null;
         return CLOSE.anything_else;
         
       case STATES.ENDED:
@@ -2124,33 +2126,27 @@ function createCallStateMachine() {
         };
         
       case STATES.CLOSE:
-        // Mark that close state was reached
+        // Mark that close state was reached and anything_else was prompted
         data._closeStateReached = true;
+        data._anythingElsePrompted = true;
+        intakeLog('state_event', { event: 'anything_else_prompted', state: 'close' });
         
-        // Hard rule: negative response ("no", "nope", "that's all", etc.) → immediately closing, play goodbye once, hang up on TTS complete
-        if (isNegativeResponse(lowerTranscript)) {
-          return {
-            nextState: transitionTo(STATES.ENDED),
-            prompt: CLOSE.goodbye,
-            action: 'end_call'
-          };
-        }
+        // INVERTED DEFAULT: In CLOSE state, user is responding to "Is there anything else?"
+        // Default assumption = NO. Only stay in CLOSE if user CLEARLY asks a new question.
+        
+        // Check if user has a new question (explicit question or request)
         if (hasMoreQuestions(lowerTranscript)) {
+          console.log(`📋 User has follow-up question in CLOSE state: "${transcript.substring(0, 50)}"`);
           return {
             nextState: currentState,
             prompt: null,
             action: 'answer_question'
           };
         }
-        // Longer response without clear "no" → treat as possible follow-up question
-        if (lowerTranscript.length > 3) {
-          return {
-            nextState: currentState,
-            prompt: null,
-            action: 'answer_question'
-          };
-        }
-        // Very short / ambiguous → end call (safe default after "anything else?")
+        
+        // Everything else = end call (negative response, short answer, "no thanks", etc.)
+        console.log(`📋 CLOSE → ENDED: treating "${transcript.substring(0, 40)}" as end-of-call`);
+        intakeLog('state_event', { event: 'close_to_ended', transcript: transcript.substring(0, 60) });
         return {
           nextState: transitionTo(STATES.ENDED),
           prompt: CLOSE.goodbye,
@@ -3491,13 +3487,20 @@ function createCallStateMachine() {
   }
   
   function hasMoreQuestions(text) {
+    // Only return true if user is CLEARLY asking a follow-up question
+    // Must contain explicit question markers — do NOT match vague affirmatives
     const questionPatterns = [
       'question', 'actually', 'what about', 'how about', 'can you',
-      'one more', 'also', 'wait', 'before you go', 'hold on'
+      'one more', 'also', 'wait', 'before you go', 'hold on',
+      'i also need', 'i have another', 'one more thing'
     ];
-    return questionPatterns.some(p => text.includes(p)) || 
-           text.includes('?') ||
-           (text.includes('yes') && text.length > 10);
+    // Explicit question mark = user is asking something
+    if (text.includes('?')) return true;
+    // Explicit question keywords
+    if (questionPatterns.some(p => text.includes(p))) return true;
+    // "yes" alone is NOT a question — "yes I have a question" IS
+    if (text.includes('yes') && questionPatterns.some(p => text.includes(p))) return true;
+    return false;
   }
   
   /** "No" / nothing else in CLOSE state → must terminate call (goodbye then hangup). */
