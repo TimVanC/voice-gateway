@@ -155,14 +155,34 @@ function createCallStateMachine() {
   // Confidence threshold: >= accept and move on; < confirm immediately (Phase 2)
   const CONFIDENCE_THRESHOLD = 85;  // 85% (0.85) - below: confirm right after answer; above: accept and move on
   
-  // Human-like acknowledgments to add before prompts
-  const ACKNOWLEDGMENTS = ['Got it.', 'Okay.', 'Thanks.', 'Perfect.', 'Great.'];
+  // Neutral acknowledgments only - no "Great!" or "Perfect!" (inappropriate when caller has an issue)
+  const ACKNOWLEDGMENTS = ['Got it.', 'Okay.', 'Thanks.'];
+  const EMPATHETIC_ACKNOWLEDGMENTS = [
+    "I'm sorry to hear that.",
+    "I'm sorry you're dealing with that.",
+    "Thanks for letting me know."
+  ];
+  // Keywords that indicate the caller is describing an urgent or distressing situation
+  const URGENCY_KEYWORDS = /\b(no heat|freezing|emergency|completely out|not working|not turning on|no hot|no cold|no air|broken|dangerous|smoke|gas smell|sparks|flooding|leaking|out of service)\b/i;
   let lastAcknowledgmentIndex = -1;
+  let lastEmpatheticIndex = -1;
+  // Track the last user transcript so acknowledgments can be context-aware
+  let _lastUserTranscript = '';
   
   /**
-   * Get a random acknowledgment phrase (avoiding immediate repeats)
+   * Get a random acknowledgment phrase (avoiding immediate repeats).
+   * If the last user transcript contains urgency keywords, use empathetic acknowledgment instead.
    */
   function getAcknowledgment() {
+    // Check if last user transcript contains urgency/distress keywords
+    if (_lastUserTranscript && URGENCY_KEYWORDS.test(_lastUserTranscript)) {
+      let index;
+      do {
+        index = Math.floor(Math.random() * EMPATHETIC_ACKNOWLEDGMENTS.length);
+      } while (index === lastEmpatheticIndex && EMPATHETIC_ACKNOWLEDGMENTS.length > 1);
+      lastEmpatheticIndex = index;
+      return EMPATHETIC_ACKNOWLEDGMENTS[index];
+    }
     let index;
     do {
       index = Math.floor(Math.random() * ACKNOWLEDGMENTS.length);
@@ -642,6 +662,8 @@ function createCallStateMachine() {
    */
   function processInput(transcript, analysis = {}) {
     const lowerTranscript = transcript.toLowerCase();
+    // Track user transcript for context-aware acknowledgments (empathy detection)
+    _lastUserTranscript = transcript;
     
     // Snapshot lock state before processing — we'll log any new locks after
     const _locksBefore = {
@@ -1650,6 +1672,10 @@ function createCallStateMachine() {
         };
         
       case STATES.ADDRESS:
+        // If address already locked, skip to next state immediately
+        if (data._addressLocked) {
+          return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
+        }
         // Immediate confirmation (Phase 2): we asked "Did you say the street name was X? Did you say the town was Y?"
         if (pendingClarification.field === 'address' && pendingClarification.awaitingConfirmation) {
           if (isConfirmation(lowerTranscript)) {
@@ -1712,6 +1738,7 @@ function createCallStateMachine() {
           data.zip = pendingAddr.zip;
           data.address_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
           data._addressComplete = true;
+          data._addressLocked = true;
           clearPendingClarification();
           return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
         }
@@ -1752,6 +1779,9 @@ function createCallStateMachine() {
             }
           }
           
+          // Track address prompt attempts (persists across turns)
+          if (!data._addressAttempts) data._addressAttempts = 0;
+          
           // First check if this actually looks like an address
           if (!looksLikeAddress(transcript)) {
             // If user says goodbye or thanks, transition to close
@@ -1763,7 +1793,29 @@ function createCallStateMachine() {
                 action: 'end'
               };
             }
-            console.log(`📋 Response doesn't look like an address: "${transcript}" - re-asking`);
+            data._addressAttempts++;
+            intakeLog('field_parse', { field: 'address', parsed_value: null, raw: transcript.substring(0, 60), attempt: data._addressAttempts, reason: 'not_recognized_as_address' });
+            // After MAX_PROMPT_ATTEMPTS: force-accept whatever we have and move on
+            if (data._addressAttempts >= MAX_PROMPT_ATTEMPTS) {
+              console.log(`📋 Address attempt cap reached (${data._addressAttempts}) - forcing advance`);
+              intakeLog('retry_cap_reached', { field: 'address', attempts: data._addressAttempts });
+              // Try to extract SOMETHING from the transcript even if it doesn't look like an address
+              const forceParts = extractAddress(transcript);
+              if (forceParts.address || forceParts.city) {
+                data.address = forceParts.address || transcript.substring(0, 60);
+                data.city = forceParts.city;
+                data.state = forceParts.state;
+                data.zip = forceParts.zip;
+              } else {
+                // Last resort: store the raw transcript
+                data.address = transcript.replace(/^(that\s+would\s+be|that'?s|it'?s)\s+/gi, '').substring(0, 80);
+              }
+              data.address_confidence = 40;
+              data._addressComplete = true;
+              data._addressLocked = true;
+              return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
+            }
+            console.log(`📋 Response doesn't look like an address (attempt ${data._addressAttempts}/${MAX_PROMPT_ATTEMPTS}): "${transcript}" - re-asking`);
             return {
               nextState: currentState,
               prompt: ADDRESS.ask,
@@ -1799,6 +1851,7 @@ function createCallStateMachine() {
             addressConfidencePercent = adjustConfidence(addressConfidencePercent, 'hesitation');
             console.log(`📉 Address confidence reduced due to hesitation: ${addressConfidencePercent}%`);
           }
+          intakeLog('field_parse', { field: 'address', parsed_value: addressParts.address, city: addressParts.city, state: addressParts.state, zip: addressParts.zip, confidence: addressConfidencePercent, attempt: data._addressAttempts || 0 });
           
           console.log(`📋 Address: ${addressParts.address || 'N/A'} (confidence: ${addressConf.level}, reason: ${addressConf.reason || 'N/A'}, percentage=${addressConfidencePercent}%)`);
           if (addressParts.city) console.log(`📋 City: ${addressParts.city} (confidence: ${cityConf.level}, reason: ${cityConf.reason || 'N/A'})`);
@@ -1820,7 +1873,9 @@ function createCallStateMachine() {
             data.zip = addressParts.zip;
             data.address_confidence = addressConfidencePercent;
             data._addressComplete = true;
-            console.log(`✅ Address stored: ${finalAddress} (confidence: ${addressConfidencePercent}%)`);
+            data._addressLocked = true;
+            console.log(`✅ Address stored (locked): ${finalAddress} (confidence: ${addressConfidencePercent}%)`);
+            intakeLog('field_locked', { field: 'address', value: finalAddress });
             if (!addressParts.state && !addressParts.zip) {
               return { nextState: currentState, prompt: "Could you also provide the state and zip code?", action: 'ask' };
             }
@@ -1851,6 +1906,7 @@ function createCallStateMachine() {
             data.zip = addressParts.zip;
             data.address_confidence = addressConfidencePercent;
             data._addressComplete = true;
+            data._addressLocked = true;
             return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
           }
           data.address_confidence = addressConfidencePercent;
@@ -1870,8 +1926,21 @@ function createCallStateMachine() {
               return { nextState: currentState, prompt: "Could you also provide the zip code?", action: 'ask' };
             }
             data._addressComplete = true;
+            data._addressLocked = true;
             return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
           }
+        }
+        // Fallback: increment attempt counter and check cap
+        if (!data._addressAttempts) data._addressAttempts = 0;
+        data._addressAttempts++;
+        if (data._addressAttempts >= MAX_PROMPT_ATTEMPTS) {
+          console.log(`📋 Address fallback cap reached (${data._addressAttempts}) - forcing advance with whatever we have`);
+          intakeLog('retry_cap_reached', { field: 'address', attempts: data._addressAttempts });
+          if (!data.address) data.address = transcript.replace(/^(that\s+would\s+be|that'?s|it'?s)\s+/gi, '').substring(0, 80);
+          data.address_confidence = data.address_confidence || 40;
+          data._addressComplete = true;
+          data._addressLocked = true;
+          return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
         }
         return {
           nextState: currentState,
@@ -2313,15 +2382,7 @@ function createCallStateMachine() {
     
     const lowerText = cleaned.toLowerCase();
     
-    // Must have a street number (1-6 digits at start, or after filler removal)
-    const hasNumber = /\d{1,6}\s+/.test(cleaned);
-    if (!hasNumber) return false;
-    
-    // Must have a street type indicator
-    const hasStreetType = /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|place|pl|terrace|terr)\b/i.test(cleaned);
-    if (!hasStreetType) return false;
-    
-    // Reject if it contains symptom/problem descriptions
+    // Reject if it contains symptom/problem descriptions (before positive checks)
     const symptomPatterns = [
       /\b(blowing|heating|cooling|not working|broken|issue|problem|symptom|error|fault)\b/i,
       /\b(lukewarm|warm|cold|hot|air|unit|system|hvac|furnace|boiler|running|still)\b/i,
@@ -2332,7 +2393,6 @@ function createCallStateMachine() {
       /\b(send|sending|technician|someone|person)\b/i,
       /\b(troubleshooting|thermostat|filter|filters)\b/i
     ];
-    
     if (symptomPatterns.some(pattern => pattern.test(text))) {
       return false;
     }
@@ -2343,7 +2403,29 @@ function createCallStateMachine() {
       return false;
     }
     
-    return true;
+    // Reject obvious non-address responses (frustration, confusion, meta-comments)
+    if (/\b(i just told you|already told you|i said|what do you mean|excuse me)\b/i.test(lowerText)) {
+      return false;
+    }
+    
+    const hasNumber = /\d{1,6}\s+/.test(cleaned);
+    const hasStreetType = /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|place|pl|terrace|terr)\b/i.test(cleaned);
+    const hasCityStateZip = /\b(new\s+jersey|nj|new\s+york|ny|connecticut|ct|pennsylvania|pa)\b/i.test(cleaned) || /\b\d{5}\b/.test(cleaned);
+    const hasCityName = /,\s*[A-Z][a-z]+/.test(cleaned);  // "..., Madison" or "..., West Orange"
+    
+    // CASE 1: Has house number + street type (classic: "12 Main Street")
+    if (hasNumber && hasStreetType) return true;
+    
+    // CASE 2: Has street type + city/state/zip (ASR split: "Mallory Drive, West Orange, NJ 07940")
+    if (hasStreetType && (hasCityStateZip || hasCityName)) return true;
+    
+    // CASE 3: Has house number + city/state/zip (partial: "171, Madison, NJ 07940")
+    if (hasNumber && hasCityStateZip) return true;
+    
+    // CASE 4: Has street type + number (e.g., "12 Mallory Dr" without city)
+    if (hasNumber && hasStreetType) return true;
+    
+    return false;
   }
   
   function isGeneratorInstallation() {
