@@ -381,63 +381,44 @@ function createCallStateMachine() {
   }
   
   /**
-   * Build recap prompt. READ-ONLY: uses only locked/confirmed fields from data.
-   * Never use live transcript or recap text. Disable all field parsing during recap.
+   * Build recap prompt. READ-ONLY: locked data only. NO letter-by-letter spelling ever.
+   * Format: Name: X. Phone: Y. Email: ... Address: ... System: ... Issue: ... Availability: ...
    */
   function getConfirmationPrompt() {
-    const intro = confirmationAttempts > 0 
-      ? CONFIRMATION.correction_reread 
-      : CONFIRMATION.intro;
-    
-    // Build the read-back from locked data only (no transcript)
-    let parts = [intro];
-    
-    // Name - from locked fields only
+    const intro = confirmationAttempts > 0 ? CONFIRMATION.correction_reread : CONFIRMATION.intro;
+    const parts = [intro];
     if (data.firstName && data.lastName) {
-      parts.push(`${data.firstName} ${data.lastName}.`);
+      parts.push(`Name: ${data.firstName} ${data.lastName}.`);
     } else if (data.firstName) {
-      parts.push(`${data.firstName}.`);
+      parts.push(`Name: ${data.firstName}.`);
     } else if (data.lastName) {
-      parts.push(`${data.lastName}.`);
+      parts.push(`Name: ${data.lastName}.`);
     }
-    
-    // Phone - speak normally (e.g., "973-885-2528")
     if (data.phone) {
-      parts.push(`Phone, ${data.phone}.`);
+      parts.push(`Phone: ${data.phone}.`);
     }
-    
-    // Email - speak normally (e.g., "mj23 at gmail dot com")
     if (data.email) {
-      const emailSpoken = data.email
-        .replace(/@/g, ' at ')
-        .replace(/\./g, ' dot ');
-      parts.push(`Email, ${emailSpoken}.`);
+      const emailSpoken = data.email.replace(/@/g, ' at ').replace(/\./g, ' dot ');
+      parts.push(`Email: ${emailSpoken}.`);
     }
-    
-    // Address - speak everything normally (NO spelling)
     if (data.address) {
       let addressPart = data.address;
-      
-      // Add city, state, zip
-      if (data.city) {
-        addressPart += `, ${data.city}`;
-      }
-      if (data.state) {
-        addressPart += `, ${data.state}`;
-      }
-      if (data.zip) {
-        addressPart += ` ${data.zip}`;
-      }
-      
-      parts.push(`Address, ${addressPart}.`);
+      if (data.city) addressPart += `, ${data.city}`;
+      if (data.state) addressPart += `, ${data.state}`;
+      if (data.zip) addressPart += ` ${data.zip}`;
+      parts.push(`Address: ${addressPart}.`);
     }
-    
-    // NOTE: We do NOT include availability or issue details in the recap
-    // The user already provided those and doesn't need them read back
-    
-    // Recap is read-only: one verify at the end, no new per-field confirmations
+    if (data.details && data.details.systemType) {
+      parts.push(`System: ${data.details.systemType}.`);
+    }
+    const issueShort = getIssueSummaryShort();
+    if (issueShort) {
+      parts.push(`Issue: ${issueShort}.`);
+    }
+    if (data.availability) {
+      parts.push(`Availability: ${data.availability}.`);
+    }
     parts.push(CONFIRMATION.verify);
-    
     return parts.join(' ');
   }
   

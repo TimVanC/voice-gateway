@@ -157,7 +157,9 @@ wss.on("connection", (twilioWs, req) => {
   const TTS_FAILURE_TIMEOUT_MS = 8000;  // 8 seconds - if no audio for this long, consider it failed
   const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before transferring to human
   const MAX_HALLUCINATION_RETRIES = 3;  // Max hallucination retries before skipping to next state
-  const GOODBYE_BUFFER_MS = 4000;  // Fixed delay after final TTS finishes playing before hangup
+  const GOODBYE_BUFFER_MS = 4000;
+  const CLOSING_FAILSAFE_MS = 5000;  // If closing state active longer than 5s, force hangup
+  let closingFailsafeTimer = null;
   let goodbyeCompletedWaitingForBuffer = false;  // Set when goodbye response.done status=completed; disconnect after buffer empties + GOODBYE_BUFFER_MS
   let _callCompleted = false;  // Terminal state: closing ran once; no further TTS or logic, hangup only
   
@@ -192,10 +194,25 @@ wss.on("connection", (twilioWs, req) => {
   const GREETING_GUARD_MS = 5000;       // Don't process user input for 5s after greeting so user can hear intro
   
   // ============================================================================
+  // 3-SECOND WATCHDOG: No dead air. If no response within 3s after speech_end, send fallback.
+  // ============================================================================
+  let watchdogTimer = null;
+  let speechEndedAt = null;
+  const WATCHDOG_MS = 3000;
+
+  function clearWatchdog() {
+    if (watchdogTimer) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
+    speechEndedAt = null;
+  }
+
+  // ============================================================================
   // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
   // ============================================================================
-  let silenceRecoveryTimer = null;       // Timer to recover from stuck state
-  const SILENCE_RECOVERY_MS = 6000;      // Wait 6 seconds before prompting
+  let silenceRecoveryTimer = null;
+  const SILENCE_RECOVERY_MS = 6000;
   
   // ============================================================================
   // CONFIRMATION RECOVERY (for when user doesn't respond to yes/no questions)
@@ -280,6 +297,7 @@ wss.on("connection", (twilioWs, req) => {
             goodbyeCompletedWaitingForBuffer = false;
             console.log(`📞 Goodbye buffer emptied - disconnecting in ${GOODBYE_BUFFER_MS}ms`);
             setTimeout(() => {
+              if (closingFailsafeTimer) { clearTimeout(closingFailsafeTimer); closingFailsafeTimer = null; }
               console.log(`📞 Disconnecting call after goodbye`);
               if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
                 twilioWs.close(1000, 'Call completed');
@@ -462,6 +480,7 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.created":
+        clearWatchdog();
         currentResponseId = event.response?.id;
         console.log(`🚀 Response started (id: ${currentResponseId})`);
         // DON'T clear playBuffer here - let existing audio finish playing!
@@ -1111,6 +1130,20 @@ wss.on("connection", (twilioWs, req) => {
           longSpeechTimer = null;
         }
         speechStartTime = null;
+        speechEndedAt = Date.now();
+        if (watchdogTimer) clearTimeout(watchdogTimer);
+        watchdogTimer = setTimeout(() => {
+          watchdogTimer = null;
+          if (_callCompleted) return;
+          if (responseInProgress) return;
+          const elapsed = speechEndedAt ? Date.now() - speechEndedAt : 0;
+          if (elapsed < WATCHDOG_MS) return;
+          console.error(`⚠️ WATCHDOG: No response within ${WATCHDOG_MS}ms after speech_end - sending fallback`);
+          const fallback = stateMachine.getNextPrompt();
+          if (fallback && openaiWs?.readyState === WebSocket.OPEN) {
+            sendStatePrompt(fallback);
+          }
+        }, WATCHDOG_MS);
         
         // ===================================================================
         // CRITICAL: Cancel OpenAI's auto-response!
@@ -1809,7 +1842,6 @@ STRICT RULES:
     
     // Generate appropriate response based on state machine result
     if (result.action === 'end' || result.action === 'end_call') {
-      // Closing must run once and be terminal. Set completed before sending so no re-entry can send again.
       if (_callCompleted) {
         console.log(`⏭️ Call already completed - ignoring end_call (idempotent)`);
         return;
@@ -1818,6 +1850,14 @@ STRICT RULES:
       console.log(`👋 End of call - delivering goodbye (single run)`);
       stateMachine.updateData('_closeStateReached', true);
       sendStatePrompt(result.prompt || CLOSE.goodbye);
+      if (closingFailsafeTimer) clearTimeout(closingFailsafeTimer);
+      closingFailsafeTimer = setTimeout(() => {
+        closingFailsafeTimer = null;
+        if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
+          console.log(`📞 Closing fail-safe: forcing hangup after ${CLOSING_FAILSAFE_MS}ms`);
+          twilioWs.close(1000, 'Call completed');
+        }
+      }, CLOSING_FAILSAFE_MS);
     } else if (result.action === 'wait') {
       // Incomplete utterance detected - wait silently for user to continue
       // Don't send any prompt, just let the user keep talking
@@ -1990,12 +2030,12 @@ Sound polite and helpful, not dismissive.`,
   // ============================================================================
   function sendStatePrompt(prompt) {
     if (openaiWs?.readyState !== WebSocket.OPEN) return;
-    if (_callCompleted) return;  // Terminal: no further TTS once closing ran
+    if (_callCompleted) return;
+    clearWatchdog();
     if (responseInProgress) {
       console.log(`⏳ Skipping prompt - response in progress`);
       return;
     }
-    
     const currentState = stateMachine.getState();
     console.log(`🗣️ State prompt: "${prompt}"`);
     

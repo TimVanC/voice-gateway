@@ -132,7 +132,7 @@ const AVAILABILITY = {
 // ============================================================================
 const CONFIRMATION = {
   intro: "Let me read that back.",
-  verify: "Is all of that correct?",
+  verify: "Is everything correct?",
   correction_reread: "I've updated that. Let me read that back again.",
   // Immediate confirmation (right after answer, when confidence < threshold). Recap never uses these.
   immediate_name: "Did I get your last name right.",  // Append: " {lastNameSpelled}." e.g. "V A N C A U W E N B E R G E."
