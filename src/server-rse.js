@@ -159,7 +159,7 @@ wss.on("connection", (twilioWs, req) => {
   const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before transferring to human
   const MAX_HALLUCINATION_RETRIES = 3;  // Max hallucination retries before skipping to next state
   const GOODBYE_BUFFER_MS = 4000;
-  const CLOSING_FAILSAFE_MS = 5000;  // If closing state active longer than 5s, force hangup
+  const CLOSING_FAILSAFE_MS = 15000;  // If closing state active longer than 15s, force hangup (goodbye ~8s audio + 4s buffer)
   let closingFailsafeTimer = null;
   let goodbyeCompletedWaitingForBuffer = false;  // Set when goodbye response.done status=completed; disconnect after buffer empties + GOODBYE_BUFFER_MS
   let _callCompleted = false;  // Terminal state: closing ran once; no further TTS or logic, hangup only
@@ -595,19 +595,43 @@ wss.on("connection", (twilioWs, req) => {
               
               // Check if we've exceeded max retries
               if (hallucinationCount >= MAX_HALLUCINATION_RETRIES) {
-                console.error(`🛑 Max hallucination retries reached - skipping to next state`);
+                console.error(`🛑 Max hallucination retries reached - forcing state progression`);
                 // Reset counters
                 hallucinationCount = 0;
                 lastHallucinationPrompt = null;
                 
-                // Skip to next state - let state machine handle this gracefully
+                // Force state progression based on current state
                 setTimeout(() => {
+                  if (_callCompleted) return;
                   if (openaiWs?.readyState === WebSocket.OPEN && twilioWs?.readyState === WebSocket.OPEN) {
                     const currentState = stateMachine.getState();
                     console.log(`🔄 Forcing state transition from ${currentState} due to persistent hallucination`);
                     
-                    // Tell the user we're having trouble and move on
-                    sendStatePrompt("I'm sorry, let me continue. " + (stateMachine.getNextPrompt() || "Is there anything else I can help with?"));
+                    // CONFIRMATION: skip recap, go to CLOSE (anything_else)
+                    if (currentState === STATES.CONFIRMATION) {
+                      stateMachine.transitionTo(STATES.CLOSE);
+                      sendStatePrompt(CLOSE.anything_else);
+                    }
+                    // CLOSE: skip to ENDED (goodbye)
+                    else if (currentState === STATES.CLOSE) {
+                      stateMachine.transitionTo(STATES.ENDED);
+                      const goodbyePrompt = CLOSE.goodbye;
+                      sendStatePrompt(goodbyePrompt);
+                      _callCompleted = true;
+                      if (closingFailsafeTimer) clearTimeout(closingFailsafeTimer);
+                      closingFailsafeTimer = setTimeout(() => {
+                        closingFailsafeTimer = null;
+                        if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
+                          console.log(`📞 Closing fail-safe: forcing hangup after ${CLOSING_FAILSAFE_MS}ms`);
+                          twilioWs.close(1000, 'Call completed');
+                        }
+                      }, CLOSING_FAILSAFE_MS);
+                    }
+                    // Other states: move on with next prompt
+                    else {
+                      const nextPrompt = stateMachine.getNextPrompt();
+                      sendStatePrompt("I'm sorry, let me continue. " + (nextPrompt || "Is there anything else I can help with?"));
+                    }
                   }
                 }, 300);
                 return;  // Don't try to resend the same prompt
@@ -994,6 +1018,7 @@ wss.on("connection", (twilioWs, req) => {
           
           // HANG UP only after goodbye TTS completes and buffer has played out (see audio pump)
           if (currentState === STATES.ENDED) {
+            _callCompleted = true;  // Ensure no further prompts can fire
             stateMachine.updateData('_closeStateReached', true);
             goodbyeCompletedWaitingForBuffer = true;
             console.log(`📞 Goodbye TTS complete - will disconnect after buffer empties + ${GOODBYE_BUFFER_MS}ms`);
@@ -1060,12 +1085,16 @@ wss.on("connection", (twilioWs, req) => {
         backchannel.resetTurn();
         
         // BARGE-IN: Stop assistant audio when user speaks
-        // ATOMIC CONFIRMATION: During greeting/safety/intent/NAME/CONFIRMATION/ENDED, let the prompt finish - no mid-sentence cutoff
+        // ATOMIC CONFIRMATION: During critical states, let the prompt finish - no mid-sentence cutoff
+        // EMAIL included so "I have X@Y. Is that right?" plays fully before accepting input
+        // CLOSE included so "Is there anything else?" plays fully
         const currentStateForBargeIn = stateMachine.getState();
         const isProtectedPrompt = currentStateForBargeIn === STATES.GREETING ||
                                    currentStateForBargeIn === STATES.SAFETY_CHECK ||
                                    currentStateForBargeIn === STATES.INTENT ||
                                    currentStateForBargeIn === STATES.NAME ||
+                                   currentStateForBargeIn === STATES.EMAIL ||
+                                   currentStateForBargeIn === STATES.CLOSE ||
                                    currentStateForBargeIn === STATES.CONFIRMATION;
         // Never cancel or clear buffer when playing goodbye - let it finish then hangup
         if (currentStateForBargeIn === STATES.ENDED || _callCompleted) {
@@ -1350,8 +1379,10 @@ Say the ENTIRE sentence above, word for word.`,
     
     confirmationRecoveryTimer = setTimeout(() => {
       confirmationRecoveryTimer = null;
+      if (_callCompleted) return;  // No recovery during/after closing
       
       const currentState = stateMachine.getState();
+      if (currentState === STATES.ENDED) return;  // No recovery during goodbye
       
       // Only trigger if we're still waiting for input and not already responding
       if (!responseInProgress && !speechStartTime && openaiWs?.readyState === WebSocket.OPEN) {
@@ -1384,6 +1415,8 @@ Say the ENTIRE sentence above, word for word.`,
     }
     
     globalSilenceMonitor = setInterval(() => {
+      if (_callCompleted) return;  // No recovery during/after closing
+      
       const timeSinceLastAudio = Date.now() - lastAudioPlaybackTime;
       const hasAudioInBuffer = playBuffer.length > 0;
       const isUserSpeaking = speechStartTime !== null;
@@ -1613,6 +1646,11 @@ STRICT RULES:
   
   function processUserInput(transcript) {
     if (_callCompleted) return;  // Terminal: no further TTS or logic once closing ran
+    // ENDED state: goodbye is playing or queued. No further processing.
+    if (stateMachine.getState() === STATES.ENDED) {
+      console.log(`⏭️ In ENDED state - ignoring input`);
+      return;
+    }
     // TTS guardrail: no state change while TTS is playing (email confirmation atomic)
     if (tts_active) {
       console.log(`🔒 processUserInput deferred - TTS active, queuing`);
@@ -1627,12 +1665,14 @@ STRICT RULES:
     
     // Avoid processing the same transcript twice
     // But if it's a duplicate, re-prompt the user after a short delay
-    // EXCEPTION: In confirmation state, accept "Yes" (or similar) even if duplicate - user is confirming the recap
+    // EXCEPTION: In confirmation/close states, accept "Yes"/"No" even if duplicate
     if (transcript === lastProcessedTranscript) {
       const state = stateMachine.getState();
-      const isAffirmative = /^(yes|yeah|yep|yup|correct|that'?s\s+right|sounds\s+good|all\s+good|good)$/i.test(transcript.trim());
-      if (state === STATES.CONFIRMATION && isAffirmative) {
-        console.log(`✅ Accepting confirmation "${transcript}" (not treating as duplicate)`);
+      // Strip trailing punctuation before matching (user says "Yes." not "Yes")
+      const cleaned = transcript.trim().replace(/[.,!?]+$/, '');
+      const isAffirmative = /^(yes|yeah|yep|yup|correct|that'?s\s+right|sounds\s+good|all\s+good|good|no|nope|nah)$/i.test(cleaned);
+      if ((state === STATES.CONFIRMATION || state === STATES.CLOSE) && isAffirmative) {
+        console.log(`✅ Accepting "${transcript}" in ${state} (not treating as duplicate)`);
         lastProcessedTranscript = null; // allow this one through
       } else {
         console.log(`⏭️ Skipping duplicate transcript - will re-prompt`);
@@ -1849,10 +1889,12 @@ STRICT RULES:
         console.log(`⏭️ Call already completed - ignoring end_call (idempotent)`);
         return;
       }
-      _callCompleted = true;
+      // Send the goodbye FIRST, then set _callCompleted to prevent any further prompts
       console.log(`👋 End of call - delivering goodbye (single run)`);
       stateMachine.updateData('_closeStateReached', true);
-      sendStatePrompt(result.prompt || CLOSE.goodbye);
+      const goodbyePrompt = result.prompt || CLOSE.goodbye;
+      sendStatePrompt(goodbyePrompt);
+      _callCompleted = true;  // Set AFTER sending goodbye - sendStatePrompt checks this flag
       if (closingFailsafeTimer) clearTimeout(closingFailsafeTimer);
       closingFailsafeTimer = setTimeout(() => {
         closingFailsafeTimer = null;
@@ -1900,6 +1942,7 @@ STRICT RULES:
   // SEND OUT OF SCOPE RESPONSE
   // ============================================================================
   function sendOutOfScopeResponse(transcript) {
+    if (_callCompleted) return;
     if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
       const lowerTranscript = transcript.toLowerCase();
       
@@ -2092,9 +2135,9 @@ STRICT RULES:
 
 DO NOT DEVIATE FROM THE SCRIPT.`;
       maxTokens = 1200; // More tokens for long confirmation recap
-    } else if (currentState === STATES.CLOSE) {
-      // Close state - deliver goodbye cleanly
-      instructions = `CRITICAL - CLOSE STATE:
+    } else if (currentState === STATES.CLOSE || currentState === STATES.ENDED) {
+      // Close/Ended state - deliver goodbye cleanly, single hardcoded string
+      instructions = `CRITICAL - CLOSING STATE:
 
 Say EXACTLY this text word-for-word:
 "${prompt}"
@@ -2104,8 +2147,8 @@ STRICT RULES:
 - DO NOT add commentary or continue beyond this prompt
 - DO NOT mention technicians, appointments, or scheduling
 - DO NOT say "I'll have someone reach out" or "confirm an appointment"
-- After saying the text, the call is complete
-- If user hangs up, that's expected behavior
+- After saying the text, STOP. The call is complete.
+- No additional sentences, no follow-ups.
 
 FORBIDDEN: technician, tech, schedule, appointment, next week, confirm
 
@@ -2159,6 +2202,7 @@ You are a script-reading robot. Read the script. Stop.`;
   // ============================================================================
   function sendNaturalResponse(userInput, action) {
     if (openaiWs?.readyState !== WebSocket.OPEN) return;
+    if (_callCompleted) return;  // No further TTS once closing ran
     if (responseInProgress) {
       console.log(`⏳ Skipping natural response - response in progress`);
       return;
