@@ -1040,12 +1040,13 @@ wss.on("connection", (twilioWs, req) => {
         backchannel.resetTurn();
         
         // BARGE-IN: Stop assistant audio when user speaks
-        // BUT: During greeting/safety/intent/NAME/ENDED, let the prompt finish - no mid-sentence cutoff
+        // ATOMIC CONFIRMATION: During greeting/safety/intent/NAME/CONFIRMATION/ENDED, let the prompt finish - no mid-sentence cutoff
         const currentStateForBargeIn = stateMachine.getState();
         const isProtectedPrompt = currentStateForBargeIn === STATES.GREETING ||
                                    currentStateForBargeIn === STATES.SAFETY_CHECK ||
                                    currentStateForBargeIn === STATES.INTENT ||
-                                   currentStateForBargeIn === STATES.NAME;
+                                   currentStateForBargeIn === STATES.NAME ||
+                                   currentStateForBargeIn === STATES.CONFIRMATION;
         // Never cancel or clear buffer when playing goodbye - let it finish then hangup
         if (currentStateForBargeIn === STATES.ENDED || _callCompleted) {
           console.log(`⏸️ User spoke during ENDED - letting goodbye finish`);
@@ -1105,7 +1106,6 @@ wss.on("connection", (twilioWs, req) => {
         const speechDuration = speechStartTime ? Date.now() - speechStartTime : 0;
         console.log(`🔇 User stopped speaking (${speechDuration}ms)`);
         
-        // Clear long-speech timer
         if (longSpeechTimer) {
           clearTimeout(longSpeechTimer);
           longSpeechTimer = null;
@@ -1154,10 +1154,8 @@ wss.on("connection", (twilioWs, req) => {
           const transcript = event.transcript.trim();
           console.log(`📝 User said: "${transcript}"`);
           
-          // Clear the waiting flag - we have the transcript now
           waitingForTranscription = false;
           
-          // Don't process transcripts that arrive right after greeting - give user time to hear intro
           const inGreeting = stateMachine.getState() === STATES.GREETING;
           const sinceGreeting = greetingSentTime ? Date.now() - greetingSentTime : Infinity;
           if (inGreeting && sinceGreeting < GREETING_GUARD_MS) {
@@ -1165,10 +1163,15 @@ wss.on("connection", (twilioWs, req) => {
             break;
           }
           
-          // Clear confirmation recovery timer - we got a response
+          // SPEECH_END GATING: Do not evaluate transcript while user audio is still active (partial transcript)
+          if (speechStartTime !== null) {
+            console.log(`🔇 Transcript while user still speaking - queuing until speech_end: "${transcript.substring(0, 40)}..."`);
+            pendingUserInput = transcript;
+            break;
+          }
+          
           clearConfirmationRecoveryTimer();
           
-          // TTS guardrail: no state change while TTS is playing (email confirmation must play fully)
           if (tts_active) {
             console.log(`🔒 TTS active - queuing transcript until playback completes: "${transcript.substring(0, 40)}..."`);
             pendingUserInput = transcript;

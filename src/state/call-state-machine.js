@@ -209,21 +209,26 @@ function createCallStateMachine() {
         return SAFETY.check;
         
       case STATES.NAME:
+        if (data._nameLocked) return CALLER_INFO.phone;
         return CALLER_INFO.name;
         
       case STATES.PHONE:
+        if (data._phoneLocked) return CALLER_INFO.email.primary;
         return CALLER_INFO.phone;
         
       case STATES.EMAIL:
+        if (data._emailLocked) return getDetailsPrompt() || ADDRESS.ask;
         return CALLER_INFO.email.primary;
         
       case STATES.DETAILS_BRANCH:
         return getDetailsPrompt();
         
       case STATES.ADDRESS:
+        if (data._addressLocked) return AVAILABILITY.ask;
         return ADDRESS.ask;
         
       case STATES.AVAILABILITY:
+        if (data._availabilityLocked) return getConfirmationPrompt();
         return AVAILABILITY.ask;
         
       case STATES.CONFIRMATION:
@@ -559,22 +564,58 @@ function createCallStateMachine() {
     return summary;
   }
   
-  /**
-   * Transition to next state
-   */
+  /** Allowed backward transitions only for explicit correction. No backward transition when field is locked. */
+  const ALLOWED_PREVIOUS = {
+    [STATES.NAME]: [STATES.GREETING, STATES.INTENT, STATES.SAFETY_CHECK],
+    [STATES.PHONE]: [STATES.GREETING, STATES.INTENT, STATES.SAFETY_CHECK, STATES.NAME],
+    [STATES.EMAIL]: [STATES.PHONE],
+    [STATES.ADDRESS]: [STATES.DETAILS_BRANCH],
+    [STATES.AVAILABILITY]: [STATES.ADDRESS, STATES.DETAILS_BRANCH],
+    [STATES.CONFIRMATION]: [STATES.AVAILABILITY, STATES.ADDRESS, STATES.PHONE, STATES.EMAIL, STATES.NAME],
+    [STATES.CLOSE]: [STATES.CONFIRMATION],
+    [STATES.ENDED]: [STATES.CLOSE],
+    [STATES.DETAILS_BRANCH]: [STATES.INTENT, STATES.SAFETY_CHECK, STATES.NAME, STATES.PHONE, STATES.EMAIL]
+  };
+
   function transitionTo(newState) {
     const oldState = currentState;
-    // Track previous state for backtracking (but don't track same state or greeting)
-    if (oldState !== newState && oldState !== STATES.GREETING) {
-      previousState = oldState;
+    if (oldState === newState) return newState;
+    // Hard lock: never transition back to a state whose field is already locked
+    if (newState === STATES.NAME && data._nameLocked) {
+      console.log(`🚫 Blocked transition to NAME - name already locked`);
+      return currentState;
     }
+    if (newState === STATES.PHONE && data._phoneLocked) {
+      console.log(`🚫 Blocked transition to PHONE - phone already locked`);
+      return currentState;
+    }
+    if (newState === STATES.EMAIL && data._emailLocked) {
+      console.log(`🚫 Blocked transition to EMAIL - email already locked`);
+      return currentState;
+    }
+    if (newState === STATES.ADDRESS && data._addressLocked) {
+      console.log(`🚫 Blocked transition to ADDRESS - address already locked`);
+      return currentState;
+    }
+    if (newState === STATES.AVAILABILITY && data._availabilityLocked) {
+      console.log(`🚫 Blocked transition to AVAILABILITY - availability already locked`);
+      return currentState;
+    }
+    // Optional: enforce forward-only unless explicit correction (allow CONFIRMATION->NAME only for correction)
+    const allowed = ALLOWED_PREVIOUS[newState];
+    if (allowed && !allowed.includes(oldState) && oldState !== STATES.GREETING && oldState !== STATES.INTENT && oldState !== STATES.SAFETY_CHECK) {
+      const order = [STATES.GREETING, STATES.INTENT, STATES.SAFETY_CHECK, STATES.NAME, STATES.PHONE, STATES.EMAIL, STATES.DETAILS_BRANCH, STATES.ADDRESS, STATES.AVAILABILITY, STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED];
+      const oldIdx = order.indexOf(oldState);
+      const newIdx = order.indexOf(newState);
+      if (newIdx >= 0 && oldIdx >= 0 && newIdx < oldIdx) {
+        console.log(`🚫 Blocked backward transition ${oldState} → ${newState}`);
+        return currentState;
+      }
+    }
+    if (oldState !== STATES.GREETING) previousState = oldState;
     currentState = newState;
     console.log(`📍 State: ${oldState} → ${newState}`);
-    
-    if (newState === STATES.DETAILS_BRANCH) {
-      detailsQuestionIndex = 0;
-    }
-    
+    if (newState === STATES.DETAILS_BRANCH) detailsQuestionIndex = 0;
     return newState;
   }
   
@@ -603,15 +644,16 @@ function createCallStateMachine() {
   function processInput(transcript, analysis = {}) {
     const lowerTranscript = transcript.toLowerCase();
     
-    // CRITICAL: Detect user frustration and respond appropriately
-    // Don't treat frustrated speech as data input
+    // CRITICAL: Detect user frustration - acknowledge but do NOT re-send full confirmation/recap (would cut off TTS)
     if (isUserFrustrated(transcript)) {
       console.log(`⚠️ User frustration detected: "${transcript.substring(0, 50)}..."`);
-      // Acknowledge and re-prompt for current state
+      if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE) {
+        return { nextState: currentState, prompt: "I'm sorry, still there? Is that correct?", action: 'ask' };
+      }
       const currentPrompt = getNextPrompt();
       return {
         nextState: currentState,
-        prompt: "I'm sorry, I'm having trouble hearing you clearly. Let me try again. " + (currentPrompt || "How can I help you?"),
+        prompt: "I'm sorry, I'm having trouble hearing. " + (currentPrompt || "How can I help you?"),
         action: 'ask'
       };
     }
