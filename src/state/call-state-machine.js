@@ -136,8 +136,11 @@ function createCallStateMachine() {
     value: null,
     confidence: null,
     awaitingConfirmation: false,
-    spellingAttempts: 0    // Name spelling: 0 = first attempt, 1 = one retry used. Max 2 attempts then force lock.
+    spellingAttempts: 0    // Name: 1 = first ask to spell, 2 = second ask. If >= 2: lock, advance, never ask again.
   };
+
+  const MAX_SPELLING_ATTEMPTS = 2;
+  const MAX_PROMPT_ATTEMPTS = 2;
   
   // Confidence threshold: >= accept and move on; < confirm immediately (Phase 2)
   const CONFIDENCE_THRESHOLD = 85;  // 85% (0.85) - below: confirm right after answer; above: accept and move on
@@ -206,6 +209,10 @@ function createCallStateMachine() {
         return getIntentPrompt();
         
       case STATES.SAFETY_CHECK:
+        // Global retry: safety question one ask + one retry max (max_prompt_attempts = 2).
+        const safetyAttempts = (data._safetyPromptAttempts || 0) + 1;
+        data._safetyPromptAttempts = safetyAttempts;
+        if (safetyAttempts > MAX_PROMPT_ATTEMPTS) return `${SAFETY.all_clear} ${CALLER_INFO.name}`;
         return SAFETY.check;
         
       case STATES.NAME:
@@ -664,6 +671,7 @@ function createCallStateMachine() {
           
           // Advance directly to next state based on intent
           if (needsSafetyCheck()) {
+            data._safetyPromptAttempts = 1;
             return {
               nextState: transitionTo(STATES.SAFETY_CHECK),
               prompt: SAFETY.check,
@@ -691,6 +699,7 @@ function createCallStateMachine() {
           console.log(`📋 Intent already locked: ${data.intent} - advancing`);
           
           if (needsSafetyCheck()) {
+            data._safetyPromptAttempts = 1;
             return {
               nextState: transitionTo(STATES.SAFETY_CHECK),
               prompt: SAFETY.check,
@@ -727,6 +736,7 @@ function createCallStateMachine() {
           }
           
           if (needsSafetyCheck()) {
+            data._safetyPromptAttempts = 1;
             return {
               nextState: transitionTo(STATES.SAFETY_CHECK),
               prompt: SAFETY.check,
@@ -757,7 +767,6 @@ function createCallStateMachine() {
             action: 'end_call'
           };
         }
-        
         return {
           nextState: transitionTo(STATES.NAME),
           prompt: `${SAFETY.all_clear} ${CALLER_INFO.name}`,
@@ -804,10 +813,10 @@ function createCallStateMachine() {
           const isSpellingClarification = clarificationPatterns.some(p => p.test(lowerTranscript));
           if (isSpellingClarification && pendingClarification && pendingClarification.field === 'name') {
             console.log(`📋 Detected spelling clarification: "${transcript}"`);
-            if ((pendingClarification.spellingAttempts || 0) >= 1) {
+            if ((pendingClarification.spellingAttempts || 0) >= MAX_SPELLING_ATTEMPTS) {
               return forceLockNameAndAdvance(null, transcript);
             }
-            pendingClarification.spellingAttempts = 1;
+            pendingClarification.spellingAttempts = 2;
             return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           }
           
@@ -842,16 +851,16 @@ function createCallStateMachine() {
               console.log(`✅ Name CONFIRMED from spelling (letter-only, locked): ${data.firstName} ${data.lastName}`);
               return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
             }
-            if (spellingAttempts >= 1) {
+            if (spellingAttempts >= MAX_SPELLING_ATTEMPTS) {
               return forceLockNameAndAdvance(spelledLastName || null, transcript);
             }
-            pendingClarification.spellingAttempts = 1;
+            pendingClarification.spellingAttempts = 2;
             return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           } else {
-            if (spellingAttempts >= 1) {
+            if (spellingAttempts >= MAX_SPELLING_ATTEMPTS) {
               return forceLockNameAndAdvance(null, transcript);
             }
-            pendingClarification.spellingAttempts = 1;
+            pendingClarification.spellingAttempts = 2;
             return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           }
           
@@ -874,10 +883,10 @@ function createCallStateMachine() {
           
           // CASE 5: Unclear response — one retry then force lock (spelling cap = 2)
           const attempt = pendingClarification.spellingAttempts || 0;
-          if (attempt >= 1) {
+          if (attempt >= MAX_SPELLING_ATTEMPTS) {
             return forceLockNameAndAdvance(null, transcript);
           }
-          pendingClarification.spellingAttempts = 1;
+          pendingClarification.spellingAttempts = 2;
           return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
         }
         
@@ -932,7 +941,7 @@ function createCallStateMachine() {
           // 0 letter tokens but transcript looks like misheard spelling — enter spelling mode (silent). One user-facing retry only.
           if (strictFirst === null && looksLikeMisheardSpelling(transcript)) {
             console.log(`📋 Possible misheard spelling ("${transcript.substring(0, 40)}...") — entering spelling mode`);
-            pendingClarification = { field: 'name', value: { firstName: data.firstName || '', lastName: '' }, confidence: { level: 'low' }, awaitingConfirmation: true, spellingAttempts: 0 };
+            pendingClarification = { field: 'name', value: { firstName: data.firstName || '', lastName: '' }, confidence: { level: 'low' }, awaitingConfirmation: true, spellingAttempts: 1 };
             return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           }
           const spelledResult = normalizeSpelledName(transcript);
@@ -1084,9 +1093,9 @@ function createCallStateMachine() {
             console.log(`✅ Name stored (locked): ${data.firstName} ${data.lastName} (confidence: ${nameConfidencePercent}%)`);
             return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
-          // Below threshold: ask user to spell (attempt 1). Max 2 attempts then force lock.
+          // Below threshold: ask user to spell (first ask). Max 2 attempts then force lock.
           data.name_confidence = nameConfidencePercent;
-          pendingClarification = { field: 'name', value: { firstName, lastName }, confidence: overallConf, awaitingConfirmation: true, spellingAttempts: 0 };
+          pendingClarification = { field: 'name', value: { firstName, lastName }, confidence: overallConf, awaitingConfirmation: true, spellingAttempts: 1 };
           return {
             nextState: currentState,
             prompt: `I'm having a little trouble with your last name. Could you spell it for me?`,
