@@ -1382,13 +1382,14 @@ function createCallStateMachine() {
           };
         }
         
-        // Immediate confirmation (Phase 2): we asked "I have X. Is that right?" Overwrite with normalized value, lock.
+        // EMAIL CONFIRMATION — binary yes/no only. No re-evaluation of confidence.
         if (pendingClarification.field === 'email' && pendingClarification.awaitingConfirmation) {
           function normalizeEmailForPersist(e) {
             if (!e || typeof e !== 'string') return e || '';
             return e.replace(/\s+/g, '').toLowerCase().trim();
           }
           if (isConfirmation(lowerTranscript)) {
+            // YES → lock with confirmed value
             data.email = normalizeEmailForPersist(pendingClarification.value);
             data.email_confidence = adjustConfidence(data.email_confidence != null ? data.email_confidence : confidenceToPercentage(pendingClarification.confidence), 'confirmation');
             data._emailComplete = true;
@@ -1396,6 +1397,32 @@ function createCallStateMachine() {
             clearPendingClarification();
             return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
           }
+          if (isNegation(lowerTranscript)) {
+            // NO → try to extract a correction from transcript; if none, ask once more
+            const corr = extractEmail(transcript);
+            if (corr && corr.includes('@') && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(corr)) {
+              data.email = normalizeEmailForPersist(corr);
+              data.email_confidence = adjustConfidence(confidenceToPercentage(pendingClarification.confidence), 'correction');
+              data._emailComplete = true;
+              data._emailLocked = true;
+              clearPendingClarification();
+              return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
+            }
+            // No valid correction — ask once: "What is the correct email?"
+            clearPendingClarification();
+            if (!data._emailAttempts) data._emailAttempts = 0;
+            data._emailAttempts++;
+            if (data._emailAttempts >= MAX_PROMPT_ATTEMPTS) {
+              // Cap reached — accept pending value and move on
+              data.email = normalizeEmailForPersist(pendingClarification.value || data.email);
+              data._emailComplete = true;
+              data._emailLocked = true;
+              return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: "No worries, we'll confirm the email later. " + getDetailsPrompt(), action: 'ask' };
+            }
+            return { nextState: currentState, prompt: "What is the correct email?", action: 'ask' };
+          }
+          // Neither yes nor no — user gave a new email or something else.
+          // Try to extract, accept and lock (no more prompts).
           const corr = extractEmail(transcript);
           if (corr && corr.includes('@') && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(corr)) {
             data.email = normalizeEmailForPersist(corr);
@@ -1409,9 +1436,11 @@ function createCallStateMachine() {
           return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
         }
         
-        // IMPORTANT: If user confirms and we already have an email, move on
+        // IMPORTANT: If user confirms and we already have an email, lock and move on
         if (data.email && isConfirmation(lowerTranscript)) {
           console.log(`✅ Email already confirmed: ${data.email} - advancing`);
+          data._emailComplete = true;
+          data._emailLocked = true;
           return {
             nextState: transitionTo(STATES.DETAILS_BRANCH),
             prompt: withAcknowledgment(getDetailsPrompt()),
@@ -1439,6 +1468,8 @@ function createCallStateMachine() {
         // Handle "we already did that" / "you already have it" type responses
         if (data.email && isAlreadyProvidedResponse(lowerTranscript)) {
           console.log(`✅ Email already provided: ${data.email} - advancing`);
+          data._emailComplete = true;
+          data._emailLocked = true;
           return {
             nextState: transitionTo(STATES.DETAILS_BRANCH),
             prompt: withAcknowledgment(getDetailsPrompt()),
@@ -1457,9 +1488,14 @@ function createCallStateMachine() {
           };
         }
         
+        // Global email attempt counter — max 2 prompts total, then accept best and move on
+        if (!data._emailAttempts) data._emailAttempts = 0;
+        
         if (hasEmail(lowerTranscript) || isEmailDeclined(lowerTranscript)) {
           if (isEmailDeclined(lowerTranscript)) {
             console.log(`📋 Email: declined`);
+            data._emailComplete = true;
+            data._emailLocked = true;
             return {
               nextState: transitionTo(STATES.DETAILS_BRANCH),
               prompt: "No problem. " + getDetailsPrompt(),
@@ -1470,33 +1506,56 @@ function createCallStateMachine() {
           const email = extractEmail(transcript);
           const emailConf = estimateEmailConfidence(transcript);
           let emailConfidencePercent = confidenceToPercentage(emailConf);
-          if (/\b(um|uh|er|hmm|like|maybe|i think|i guess)\b/.test(lowerTranscript)) {
-            emailConfidencePercent = adjustConfidence(emailConfidencePercent, 'hesitation');
-          }
+          
           if (!email || !email.includes('@')) {
+            data._emailAttempts++;
+            intakeLog('field_parse', { field: 'email', parsed_value: email, attempt: data._emailAttempts, reason: 'no_at_sign' });
+            if (data._emailAttempts >= MAX_PROMPT_ATTEMPTS) {
+              // Accept whatever we have and move on
+              data.email = email || null;
+              data._emailComplete = true;
+              data._emailLocked = true;
+              return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: "No worries, we'll confirm the email later. " + getDetailsPrompt(), action: 'ask' };
+            }
             return { nextState: currentState, prompt: "I'm having trouble catching that. Could you spell out the email address for me?", action: 'ask' };
           }
           if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email)) {
-            if (!data._emailAttempts) data._emailAttempts = 0;
             data._emailAttempts++;
-            if (data._emailAttempts >= 2) {
-              return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: "No worries, we'll get it later. " + getDetailsPrompt(), action: 'ask' };
+            intakeLog('field_parse', { field: 'email', parsed_value: email, attempt: data._emailAttempts, reason: 'invalid_format' });
+            if (data._emailAttempts >= MAX_PROMPT_ATTEMPTS) {
+              // Accept best parsed value, lock, advance
+              data.email = email;
+              data.email_confidence = emailConfidencePercent;
+              data._emailComplete = true;
+              data._emailLocked = true;
+              return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: "No worries, we'll confirm the email later. " + getDetailsPrompt(), action: 'ask' };
             }
             return { nextState: currentState, prompt: "I'm having trouble with that email format. Could you spell it again?", action: 'ask' };
           }
-          data._emailAttempts = 0;
           console.log(`📋 Email: ${email} (confidence: ${emailConfidencePercent}%)`);
-          // Phase 2: >=85 accept; <85 confirm immediately (read back normally, no spelling).
+          intakeLog('field_parse', { field: 'email', parsed_value: email, confidence: emailConfidencePercent, attempt: data._emailAttempts });
+          
+          // Deterministic: >= threshold accept and lock; < threshold confirm once (binary yes/no)
           if (emailConfidencePercent >= CONFIDENCE_THRESHOLD) {
             data.email = email;
             data.email_confidence = emailConfidencePercent;
             data._emailComplete = true;
+            data._emailLocked = true;
             return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
           }
           data.email = email;
           data.email_confidence = emailConfidencePercent;
           pendingClarification = { field: 'email', value: email, confidence: emailConf, awaitingConfirmation: true };
           return { nextState: currentState, prompt: `${CONFIRMATION.immediate_email} ${formatEmailForReadback(email)}. Is that right?`, action: 'ask' };
+        }
+        
+        // No email detected in input — cap re-prompts
+        data._emailAttempts++;
+        if (data._emailAttempts >= MAX_PROMPT_ATTEMPTS) {
+          // Tried twice, no email captured — skip and move on
+          data._emailComplete = true;
+          data._emailLocked = true;
+          return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: "No worries, we can get the email later. " + getDetailsPrompt(), action: 'ask' };
         }
         return {
           nextState: currentState,
@@ -2453,7 +2512,7 @@ function createCallStateMachine() {
     // This handles: "Yeah, that would be Jimmy Crickets"
     // Pattern: optional fillers, then optional phrases like "that would be"
     const fillerPatterns = [
-      /^(yeah|yes|yep|yup|oh|um|uh|so|well|okay|ok|alright|sure)[,.]?\s*/gi,
+      /^(yeah|yes|yep|yup|oh|um|uh|so|well|okay|ok|alright|sure|sir|ma'?am)[,.]?\s*/gi,
       /^(that\s+would\s+be|that'?s|it'?s|it\s+is|this\s+is|i'?m|i\s+am|my\s+name\s+is|the\s+name\s+is|name'?s)\s*/gi
     ];
     
@@ -2471,8 +2530,8 @@ function createCallStateMachine() {
       const lastNameMatch = name.match(/last\s+name\s+is\s+([^,.]+)/i);
       if (firstNameMatch && lastNameMatch) {
         let firstPart = firstNameMatch[1].trim().replace(/[.,!?]+$/g, '');
-        // Strip " and " / " and my last name is ..." so we get only the first name (e.g. "Tim")
-        const andLast = firstPart.match(/\s+and\s+(?:my\s+)?last\s+name\s+is\b/i);
+        // Strip " and " / " and my/the last name is ..." so we get only the first name (e.g. "Tim")
+        const andLast = firstPart.match(/\s+and\s+(?:(?:my|the)\s+)?last\s+name\s+is\b/i);
         if (andLast) firstPart = firstPart.slice(0, andLast.index).trim();
         // Strip ". The last name is" / ". My last name is" and everything after (e.g. "Tim. The last name is Van..." -> "Tim")
         firstPart = firstPart.replace(/\s*\.\s*(?:the\s+)?(?:my\s+)?last\s+name\s+is\b.*$/i, '').trim();
@@ -2704,9 +2763,11 @@ function createCallStateMachine() {
     }
     
     // Remove common prefixes and extract email portion
-    // Handle "that would be", "yeah that would be", etc. - be aggressive about removing these
+    // Step 1: Strip leading response words (no, yeah, sure, etc.)
+    // Step 2: Strip email preamble phrases (it's, that would be, etc.)
     let email = text
-      .replace(/^(yeah\s*,?\s*)?(so\s+the\s+|that\s+would\s+be|that's|it's|it\s+is|my\s+email\s+is|email\s+is|you\s+can\s+reach\s+me\s+at|reach\s+me\s+at|the\s+email\s+is)\s*/gi, '')
+      .replace(/^(no|nope|nah|yeah|yes|sure|okay|ok|um|uh)\s*,?\s*/gi, '')
+      .replace(/^(so\s+the\s+|that\s+would\s+be|that's|it's|it\s+is|my\s+email\s+is|email\s+is|you\s+can\s+reach\s+me\s+at|reach\s+me\s+at|the\s+email\s+is)\s*/gi, '')
       .trim();
     
     // Remove spelling instructions and trailing clarifications

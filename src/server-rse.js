@@ -2039,6 +2039,13 @@ Sound polite and helpful, not dismissive.`,
       console.log(`⏳ Skipping prompt - response in progress`);
       return;
     }
+    // CRITICAL: Clear any queued input when sending a new prompt.
+    // Queued input was from BEFORE this prompt — it is stale. Processing it after
+    // this prompt finishes would double-prompt the same field.
+    if (pendingUserInput) {
+      console.log(`🗑️ Clearing stale queued input on new prompt: "${pendingUserInput.substring(0, 40)}..."`);
+      pendingUserInput = null;
+    }
     const currentState = stateMachine.getState();
     console.log(`🗣️ State prompt: "${prompt}"`);
     stateMachine.intakeLog('prompt', { prompt: prompt.substring(0, 120) });
