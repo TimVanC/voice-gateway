@@ -141,6 +141,16 @@ function createCallStateMachine() {
 
   const MAX_SPELLING_ATTEMPTS = 2;
   const MAX_PROMPT_ATTEMPTS = 2;
+
+  // ============================================================================
+  // STRUCTURED INTAKE DEBUG LOGGING
+  // High-signal, JSON-structured logs for debugging intake flow.
+  // Covers: state_transition, field_parse, field_locked, retry_cap_reached, prompt
+  // ============================================================================
+  function intakeLog(event, details) {
+    const entry = { intake_debug: true, ts: Date.now(), state: currentState, event, ...details };
+    console.log(`[INTAKE] ${JSON.stringify(entry)}`);
+  }
   
   // Confidence threshold: >= accept and move on; < confirm immediately (Phase 2)
   const CONFIDENCE_THRESHOLD = 85;  // 85% (0.85) - below: confirm right after answer; above: accept and move on
@@ -603,6 +613,7 @@ function createCallStateMachine() {
     if (oldState !== STATES.GREETING) previousState = oldState;
     currentState = newState;
     console.log(`📍 State: ${oldState} → ${newState}`);
+    intakeLog('state_transition', { from: oldState, to: newState });
     if (newState === STATES.DETAILS_BRANCH) detailsQuestionIndex = 0;
     return newState;
   }
@@ -632,6 +643,38 @@ function createCallStateMachine() {
   function processInput(transcript, analysis = {}) {
     const lowerTranscript = transcript.toLowerCase();
     
+    // Snapshot lock state before processing — we'll log any new locks after
+    const _locksBefore = {
+      name: data._nameLocked, phone: data._phoneLocked, email: data._emailLocked,
+      address: data._addressLocked, availability: data._availabilityLocked
+    };
+    
+    // Wrap the actual logic so we can log field_locked events on return
+    const result = _processInputInner(transcript, lowerTranscript, analysis);
+    
+    // Check for newly locked fields
+    const fieldMap = { name: '_nameLocked', phone: '_phoneLocked', email: '_emailLocked', address: '_addressLocked', availability: '_availabilityLocked' };
+    const valueMap = { name: `${data.firstName || ''} ${data.lastName || ''}`.trim(), phone: data.phone, email: data.email, address: data.address, availability: data.availability };
+    for (const [field, key] of Object.entries(fieldMap)) {
+      if (data[key] && !_locksBefore[field]) {
+        intakeLog('field_locked', { field, value: valueMap[field] });
+      }
+    }
+    
+    // Log spelling state for name if in spelling mode
+    if (pendingClarification.field === 'name' && pendingClarification.spellingAttempts > 0) {
+      intakeLog('field_parse', {
+        field: 'last_name', spelling_mode: true,
+        spelling_attempt_count: pendingClarification.spellingAttempts,
+        parsed_value: pendingClarification.value?.lastName || null,
+        will_reprompt: result.nextState === currentState
+      });
+    }
+    
+    return result;
+  }
+  
+  function _processInputInner(transcript, lowerTranscript, analysis) {
     // CRITICAL: Detect user frustration - acknowledge but do NOT re-send full confirmation/recap (would cut off TTS)
     if (isUserFrustrated(transcript)) {
       console.log(`⚠️ User frustration detected: "${transcript.substring(0, 50)}..."`);
@@ -941,7 +984,9 @@ function createCallStateMachine() {
           // 0 letter tokens but transcript looks like misheard spelling — enter spelling mode (silent). One user-facing retry only.
           if (strictFirst === null && looksLikeMisheardSpelling(transcript)) {
             console.log(`📋 Possible misheard spelling ("${transcript.substring(0, 40)}...") — entering spelling mode`);
-            pendingClarification = { field: 'name', value: { firstName: data.firstName || '', lastName: '' }, confidence: { level: 'low' }, awaitingConfirmation: true, spellingAttempts: 1 };
+            // Extract firstName from transcript before entering spelling mode (don't lose "Tim" from "first name is Tim...")
+            const misheardFirst = firstName || data.firstName || '';
+            pendingClarification = { field: 'name', value: { firstName: misheardFirst, lastName: '' }, confidence: { level: 'low' }, awaitingConfirmation: true, spellingAttempts: 1 };
             return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
           }
           const spelledResult = normalizeSpelledName(transcript);
@@ -993,6 +1038,7 @@ function createCallStateMachine() {
           
           // Log confidence IMMEDIATELY (before any validation)
           console.log(`📋 Name confidence: firstName="${firstName}" (${firstNameConf.level}, ${firstNameConf.reason || 'N/A'}), lastName="${lastName}" (${lastNameConf.level}, ${lastNameConf.reason || 'N/A'}), overall=${overallConf.level}, percentage=${nameConfidencePercent}%`);
+          intakeLog('field_parse', { field: 'name', parsed_first: firstName, parsed_last: lastName, spelling_mode: false, confidence: nameConfidencePercent, will_reprompt: nameConfidencePercent < CONFIDENCE_THRESHOLD });
           
           // If extraction failed completely, check if it's an incomplete utterance
           if (!firstName && !lastName) {
@@ -1096,6 +1142,7 @@ function createCallStateMachine() {
           // Below threshold: ask user to spell (first ask). Max 2 attempts then force lock.
           data.name_confidence = nameConfidencePercent;
           pendingClarification = { field: 'name', value: { firstName, lastName }, confidence: overallConf, awaitingConfirmation: true, spellingAttempts: 1 };
+          intakeLog('prompt', { field: 'last_name', attempt_number: 1, reason: 'low_confidence', confidence: nameConfidencePercent });
           return {
             nextState: currentState,
             prompt: `I'm having a little trouble with your last name. Could you spell it for me?`,
@@ -2263,8 +2310,10 @@ function createCallStateMachine() {
     if (!text || text.trim().length < 4) return false;
     const words = text.trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (words.length < 2) return false;
-    const letterSoundWords = new Set(['bye', 'by', 'be', 'see', 'sea', 'are', 'you', 'why', 'tea', 'pea', 'kay', 'jay', 'eye', 'oh', 'ex', 'zee', 'van', 'ell', 'em', 'en', 'queue', 'double', 'eff', 'gee', 'aitch', 'cue', 'ess', 'tee', 'vee', 'dubya', 'wye']);
-    return words.some(w => letterSoundWords.has(w));
+    // Removed 'van' — it's a real name prefix (Van Cauwenberge). Require >= 3 matches to avoid false positives.
+    const letterSoundWords = new Set(['bye', 'by', 'be', 'see', 'sea', 'are', 'you', 'why', 'tea', 'pea', 'kay', 'jay', 'eye', 'oh', 'ex', 'zee', 'ell', 'em', 'en', 'queue', 'double', 'eff', 'gee', 'aitch', 'cue', 'ess', 'tee', 'vee', 'dubya', 'wye']);
+    const matchCount = words.filter(w => letterSoundWords.has(w)).length;
+    return matchCount >= 3;
   }
 
   /**
@@ -2275,7 +2324,9 @@ function createCallStateMachine() {
    */
   function parseSpelledLettersOnly(text) {
     if (!text || typeof text !== 'string') return null;
-    const tokens = text.trim().split(/\s+/).filter(Boolean);
+    // CRITICAL: Split on whitespace, dashes, periods, and commas.
+    // ASR often returns "V-A-N-C-A-U-W-E-N-B-E-R-G-E" as one dash-separated token.
+    const tokens = text.trim().split(/[\s\-.,]+/).filter(Boolean);
     const sequence = []; // each element is a letter (uppercase) or '\x00' for word boundary
     for (const token of tokens) {
       if (token.length === 1 && /^[A-Za-z]$/.test(token)) {
@@ -2283,7 +2334,7 @@ function createCallStateMachine() {
       } else if (token.toLowerCase() === 'space') {
         sequence.push('\x00'); // word boundary
       }
-      // else: ignore (bye, van, kallenberg, etc.)
+      // else: ignore (bye, van, kallenberg, Sure, That's, etc.)
     }
     const letterCount = sequence.filter(c => c !== '\x00').length;
     if (letterCount < 3) return letterCount === 0 ? null : { lastName: '', letterCount };
@@ -2555,6 +2606,8 @@ function createCallStateMachine() {
     data._nameLocked = true;
     clearPendingClarification();
     console.log(`✅ Name force-locked (spelling cap): ${data.firstName} ${data.lastName}`);
+    intakeLog('retry_cap_reached', { field: 'last_name', spelling_attempt_count: pendingClarification.spellingAttempts || 0 });
+    intakeLog('field_locked', { field: 'name', value: `${data.firstName} ${data.lastName}` });
     return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
   }
   
@@ -3362,6 +3415,7 @@ function createCallStateMachine() {
     setSilenceAfterGreeting: () => { silenceAfterGreeting = true; },
     incrementConfirmationAttempts: () => { confirmationAttempts++; },
     getConfirmationPrompt,
+    intakeLog,
     
     STATES,
     INTENT_TYPES

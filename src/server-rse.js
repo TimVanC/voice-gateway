@@ -29,6 +29,7 @@ const { logCallIntake } = require('./utils/google-sheets-logger');
 const PORT = process.env.PORT || 8080;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+const VERBOSE_DEBUG = process.env.VERBOSE_DEBUG === 'true';  // Gate noisy logs (audio progress, keep-alive, heartbeat)
 
 // Twilio configuration for transfers
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
@@ -280,7 +281,7 @@ wss.on("connection", (twilioWs, req) => {
           lastAudioPlaybackTime = Date.now();
           audioFramesSent++;
           // Log every 2 seconds (100 frames) to show progress
-          if (audioFramesSent % 100 === 0) {
+          if (VERBOSE_DEBUG && audioFramesSent % 100 === 0) {
             console.log(`🔊 Audio progress: ${(audioFramesSent * 0.02).toFixed(1)}s sent, ${(playBuffer.length/8000).toFixed(1)}s remaining`);
           }
         }
@@ -319,7 +320,7 @@ wss.on("connection", (twilioWs, req) => {
       }
     }, FRAME_INTERVAL);
     
-    console.log("🎵 Audio pump started - will send frames every 20ms");
+    if (VERBOSE_DEBUG) console.log("🎵 Audio pump started - will send frames every 20ms");
   }
   
   // ============================================================================
@@ -415,7 +416,7 @@ wss.on("connection", (twilioWs, req) => {
     keepAliveTimer = setInterval(() => {
       if (openaiWs?.readyState === WebSocket.OPEN) {
         const elapsed = Date.now() - lastActivityTime;
-        console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()}, audio packets: ${audioPacketsForwarded})`);
+        if (VERBOSE_DEBUG) console.log(`💓 Keep-alive (last activity: ${elapsed}ms ago, state: ${stateMachine.getState()}, audio packets: ${audioPacketsForwarded})`);
         
         if (elapsed > 20000) {
           // CRITICAL: Do NOT trigger recovery during critical states
@@ -423,7 +424,7 @@ wss.on("connection", (twilioWs, req) => {
           const state = stateMachine.getState();
           if (state === STATES.CONFIRMATION || state === STATES.CLOSE || state === STATES.ENDED || 
               state === STATES.SAFETY_CHECK || state === STATES.GREETING || state === STATES.INTENT) {
-            console.log(`⏸️ Keep-alive: Waiting patiently in ${state} state (${elapsed}ms)`);
+            if (VERBOSE_DEBUG) console.log(`⏸️ Keep-alive: Waiting patiently in ${state} state (${elapsed}ms)`);
           } else {
             console.log(`⚠️ No OpenAI activity for ${elapsed}ms in ${state} state`);
             // If we've been waiting too long and no response is in progress, send recovery prompt
@@ -851,7 +852,7 @@ wss.on("connection", (twilioWs, req) => {
               // so the global silence monitor knows audio is still playing
               // Only reset when buffer is empty or nearly empty
               if (playBuffer.length > 3200) { // More than 400ms of audio remaining
-                console.log(`⏳ Keeping responseInProgress=true until buffer empties (${bufferSeconds.toFixed(1)}s remaining)`);
+                if (VERBOSE_DEBUG) console.log(`⏳ Keeping responseInProgress=true until buffer empties (${bufferSeconds.toFixed(1)}s remaining)`);
                 // Don't reset responseInProgress yet - let audio finish playing
                 // The response.done handler will reset it when buffer is empty
                 // But mark that we've accepted this response
@@ -867,7 +868,7 @@ wss.on("connection", (twilioWs, req) => {
               // This prevents global silence monitor from triggering while audio is still playing
               if (bufferSeconds > 0) {
                 lastAudioPlaybackTime = Date.now();
-                console.log(`🔄 Updated lastAudioPlaybackTime - ${bufferSeconds.toFixed(1)}s of audio still playing`);
+                if (VERBOSE_DEBUG) console.log(`🔄 Updated lastAudioPlaybackTime - ${bufferSeconds.toFixed(1)}s of audio still playing`);
               }
               
               // Mark confirmation if in confirmation state
@@ -1111,7 +1112,7 @@ wss.on("connection", (twilioWs, req) => {
                 const phrase = LONG_SPEECH_CONFIG.phrases[
                   Math.floor(Math.random() * LONG_SPEECH_CONFIG.phrases.length)
                 ];
-                console.log(`💬 Long-speech backchannel: "${phrase}" (${speechDuration}ms)`);
+                if (VERBOSE_DEBUG) console.log(`💬 Long-speech backchannel: "${phrase}" (${speechDuration}ms)`);
                 longSpeechBackchannelSent = true;
                 // Note: We don't actually speak this - just log it
                 // OpenAI will naturally handle turn-taking
@@ -1124,6 +1125,7 @@ wss.on("connection", (twilioWs, req) => {
       case "input_audio_buffer.speech_stopped":
         const speechDuration = speechStartTime ? Date.now() - speechStartTime : 0;
         console.log(`🔇 User stopped speaking (${speechDuration}ms)`);
+        stateMachine.intakeLog('speech_end', { duration_ms: speechDuration });
         
         if (longSpeechTimer) {
           clearTimeout(longSpeechTimer);
@@ -1186,6 +1188,7 @@ wss.on("connection", (twilioWs, req) => {
         if (event.transcript) {
           const transcript = event.transcript.trim();
           console.log(`📝 User said: "${transcript}"`);
+          stateMachine.intakeLog('transcript', { transcript: transcript.substring(0, 100) });
           
           waitingForTranscription = false;
           
@@ -2038,12 +2041,15 @@ Sound polite and helpful, not dismissive.`,
     }
     const currentState = stateMachine.getState();
     console.log(`🗣️ State prompt: "${prompt}"`);
+    stateMachine.intakeLog('prompt', { prompt: prompt.substring(0, 120) });
     
     // LOGGING: Detect spelling playback prompts (for debugging TTS cutoffs)
-    const hasSpelling = /\b([A-Z]\s){2,}[A-Z]\.?\b/.test(prompt) || /\b[A-Z]\s[A-Z]\s[A-Z]\b/.test(prompt);
-    if (hasSpelling) {
-      console.log(`🔤 TTS SPELLING START: Prompt contains spelled content`);
-      console.log(`🔤 Spelled prompt length: ${prompt.length} chars`);
+    if (VERBOSE_DEBUG) {
+      const hasSpelling = /\b([A-Z]\s){2,}[A-Z]\.?\b/.test(prompt) || /\b[A-Z]\s[A-Z]\s[A-Z]\b/.test(prompt);
+      if (hasSpelling) {
+        console.log(`🔤 TTS SPELLING START: Prompt contains spelled content`);
+        console.log(`🔤 Spelled prompt length: ${prompt.length} chars`);
+      }
     }
     
     // Track the prompt for failure detection
@@ -2387,6 +2393,6 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // Heartbeat
 setInterval(() => {
-  console.log(`💗 Process heartbeat - event loop alive`);
+  if (VERBOSE_DEBUG) console.log(`💗 Process heartbeat - event loop alive`);
 }, 30000);
 
