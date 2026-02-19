@@ -30,12 +30,32 @@ function v(value) {
 
 function formatDateTime(date) {
   const d = date instanceof Date ? date : new Date();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  const yyyy = d.getFullYear();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const min = String(d.getMinutes()).padStart(2, '0');
-  return `${mm}/${dd}/${yyyy} ${hh}:${min}`;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    month: '2-digit',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+    timeZoneName: 'short',
+  }).formatToParts(d);
+
+  const get = (type) => parts.find((p) => p.type === type)?.value || '';
+  return `${get('month')}/${get('day')}/${get('year')} ${get('hour')}:${get('minute')} ${get('dayPeriod')} ${get('timeZoneName')}`;
+}
+
+function toConfidence10(percentage) {
+  const n = Number(percentage);
+  if (!Number.isFinite(n)) return 0;
+  const score = Math.round(n / 10);
+  return Math.max(0, Math.min(10, score));
+}
+
+function valueWithConfidence(value, percentage) {
+  const valueText = v(value);
+  const confidence = valueText === NP ? 0 : toConfidence10(percentage);
+  return `${valueText} (Confidence: ${confidence}/10)`;
 }
 
 function formatDuration(ms) {
@@ -64,6 +84,9 @@ function buildEmailBody(callData, metadata) {
     firstName, lastName, phone, email,
     address, city, state, zip,
     isSafetyRisk, intent,
+    availability,
+    name_confidence, phone_confidence, email_confidence,
+    address_confidence, availability_confidence,
     details = {},
   } = callData;
 
@@ -74,15 +97,19 @@ function buildEmailBody(callData, metadata) {
     'RSE Energy – Call Intake Summary',
     '',
     'Caller Information',
-    `Name: ${name}`,
-    `Phone: ${v(phone || metadata.callerNumber)}`,
-    `Email: ${v(email)}`,
+    `Name: ${valueWithConfidence(name, name_confidence)}`,
+    `Phone: ${valueWithConfidence(phone || metadata.callerNumber, phone_confidence)}`,
+    `Email: ${valueWithConfidence(email, email_confidence)}`,
     '',
     'Service Address',
     `Street: ${v(address)}`,
     `City: ${v(city)}`,
     `State: ${v(state)}`,
     `Zip: ${v(zip)}`,
+    `Address Confidence: ${toConfidence10(address_confidence)}/10`,
+    '',
+    'Availability',
+    `Preferred Time: ${valueWithConfidence(availability, availability_confidence)}`,
     '',
     'Service Details',
     `Emergency: ${isSafetyRisk ? 'Yes' : 'No'}`,
