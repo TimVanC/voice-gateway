@@ -22,6 +22,7 @@ const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = re
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { logCallIntake } = require('./utils/google-sheets-logger');
+const { sendCallSummaryEmail } = require('./utils/email-sender');
 
 // ============================================================================
 // CONFIGURATION
@@ -2413,6 +2414,17 @@ Keep it SHORT.`;
       callerNumber: callerNumber
     }).catch(err => {
       console.error('❌ Failed to log to Google Sheets:', err.message);
+    });
+
+    // Send post-call email summary (non-blocking)
+    const emailMeta = {
+      callId: streamSid || `CALL-${Date.now()}`,
+      callerNumber: callerNumber,
+      callDurationMs: callConnectedTime ? Date.now() - callConnectedTime : null,
+      timestamp: new Date().toISOString()
+    };
+    sendCallSummaryEmail(data, currentState, emailMeta).catch(err => {
+      console.error('❌ Failed to send call summary email:', err.message);
     });
     
     if (paceTimer) clearInterval(paceTimer);
