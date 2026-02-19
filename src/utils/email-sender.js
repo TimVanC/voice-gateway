@@ -33,15 +33,24 @@ function getTransporter() {
   }
 
   _transporter = nodemailer.createTransport({
-    host: EMAIL_HOST,
-    port: EMAIL_PORT,
+    host: process.env.EMAIL_HOST,
+    port: Number(process.env.EMAIL_PORT),
     secure: false,
-    auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
     authMethod: 'LOGIN',
-    tls: { rejectUnauthorized: false },
+    requireTLS: true,
+    tls: {
+      ciphers: 'SSLv3',
+      rejectUnauthorized: false,
+    },
     connectionTimeout: 10000,
     greetingTimeout: 10000,
     socketTimeout: 10000,
+    logger: true,
+    debug: true,
   });
 
   return _transporter;
@@ -171,6 +180,9 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
     const text = buildEmailBody(callData, metadata);
 
     console.log(`📧 Sending email to ${EMAIL_TO} via ${EMAIL_HOST}:${EMAIL_PORT}...`);
+
+    await transporter.verify();
+    console.log("✅ SMTP connection verified");
 
     const mailOptions = {
       from: EMAIL_FROM,
