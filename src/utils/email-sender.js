@@ -1,60 +1,21 @@
 /**
  * Post-Call Email Summary Sender
  *
- * Sends plain-text intake summaries via Outlook SMTP (nodemailer).
- * All SMTP credentials are read from environment variables.
+ * Sends plain-text intake summaries via SendGrid HTTP API.
+ * API credentials are read from environment variables.
  * Every public function catches its own errors and never throws.
  */
 
-const nodemailer = require('nodemailer');
+const sgMail = require('@sendgrid/mail');
 
 // ============================================================================
 // CONFIGURATION (from environment variables only)
 // ============================================================================
-const EMAIL_HOST = process.env.EMAIL_HOST;
-const EMAIL_PORT = parseInt(process.env.EMAIL_PORT, 10) || 587;
-const EMAIL_USER = process.env.EMAIL_USER;
-const EMAIL_PASS = process.env.EMAIL_PASS;
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_TO   = process.env.EMAIL_TO;
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 
 const NP = 'Not Provided';
-
-// ============================================================================
-// TRANSPORTER (lazy-initialized singleton)
-// ============================================================================
-let _transporter = null;
-
-function getTransporter() {
-  if (_transporter) return _transporter;
-
-  if (!EMAIL_HOST || !EMAIL_USER || !EMAIL_PASS) {
-    return null;
-  }
-
-  _transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: Number(process.env.EMAIL_PORT),
-    secure: false,
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
-    authMethod: 'LOGIN',
-    requireTLS: true,
-    tls: {
-      ciphers: 'SSLv3',
-      rejectUnauthorized: false,
-    },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 10000,
-    logger: true,
-    debug: true,
-  });
-
-  return _transporter;
-}
 
 // ============================================================================
 // HELPERS
@@ -156,10 +117,8 @@ function buildEmailBody(callData, metadata) {
 async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
   console.log("📧 sendCallSummaryEmail invoked");
   try {
-    const transporter = getTransporter();
-    if (!transporter) {
-      console.warn('⚠️  Email sending disabled (missing SMTP credentials)');
-      console.warn(`   EMAIL_HOST=${EMAIL_HOST ? 'set' : 'MISSING'}, EMAIL_USER=${EMAIL_USER ? 'set' : 'MISSING'}, EMAIL_PASS=${EMAIL_PASS ? 'set' : 'MISSING'}`);
+    if (!SENDGRID_API_KEY) {
+      console.warn('⚠️  Email sending disabled (missing SENDGRID_API_KEY)');
       return { success: false, skipped: true, reason: 'missing_credentials' };
     }
 
@@ -179,10 +138,8 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
     const subject = `New Call Intake – ${callerLabel} – ${formatDateTime(now)}`;
     const text = buildEmailBody(callData, metadata);
 
-    console.log(`📧 Sending email to ${EMAIL_TO} via ${EMAIL_HOST}:${EMAIL_PORT}...`);
-
-    await transporter.verify();
-    console.log("✅ SMTP connection verified");
+    sgMail.setApiKey(SENDGRID_API_KEY);
+    console.log(`📧 Sending email to ${EMAIL_TO} via SendGrid HTTP API...`);
 
     const mailOptions = {
       from: EMAIL_FROM,
@@ -192,8 +149,8 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
     };
 
     try {
-      const info = await transporter.sendMail(mailOptions);
-      console.log("✅ Call summary email sent successfully:", info.response);
+      const [response] = await sgMail.send(mailOptions);
+      console.log("✅ Call summary email sent successfully:", response.statusCode);
     } catch (error) {
       console.error("❌ Email send failed:", error);
     }
