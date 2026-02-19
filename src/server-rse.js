@@ -2376,7 +2376,7 @@ Keep it SHORT.`;
           
         case "stop":
           console.log("📞 Stream stopped");
-          cleanup();
+          cleanup().catch(err => console.error("❌ Cleanup error:", err));
           break;
       }
     } catch (err) {
@@ -2391,7 +2391,7 @@ Keep it SHORT.`;
     } else {
       console.log(`🔌 Twilio disconnected (code: ${code})`);
     }
-    cleanup();
+    cleanup().catch(err => console.error("❌ Cleanup error:", err));
   });
   
   twilioWs.on("error", (err) => {
@@ -2401,7 +2401,7 @@ Keep it SHORT.`;
   // ============================================================================
   // CLEANUP
   // ============================================================================
-  function cleanup() {
+  async function cleanup() {
     // Log collected data before cleanup
     const data = stateMachine.getData();
     const currentState = stateMachine.getState();
@@ -2416,16 +2416,19 @@ Keep it SHORT.`;
       console.error('❌ Failed to log to Google Sheets:', err.message);
     });
 
-    // Send post-call email summary (non-blocking)
-    console.log("📨 Triggering call summary email...");
-    sendCallSummaryEmail(data, currentState, {
-      callId: streamSid || `CALL-${Date.now()}`,
-      callerNumber: callerNumber,
-      callDurationMs: callConnectedTime ? Date.now() - callConnectedTime : null,
-      timestamp: new Date().toISOString()
-    }).catch(err => {
+    // Send post-call email summary (awaited so it completes before cleanup exits)
+    try {
+      console.log("📨 Triggering call summary email...");
+      await sendCallSummaryEmail(data, currentState, {
+        callId: streamSid || `CALL-${Date.now()}`,
+        callerNumber: callerNumber,
+        callDurationMs: callConnectedTime ? Date.now() - callConnectedTime : null,
+        timestamp: new Date().toISOString()
+      });
+      console.log("📨 Email function completed");
+    } catch (err) {
       console.error("❌ Email invocation error:", err);
-    });
+    }
     
     if (paceTimer) clearInterval(paceTimer);
     if (keepAliveTimer) clearInterval(keepAliveTimer);
