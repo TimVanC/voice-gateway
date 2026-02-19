@@ -140,15 +140,18 @@ function buildEmailBody(callData, metadata) {
  * Fire-and-forget: never throws, logs errors internally.
  */
 async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
+  console.log("📧 sendCallSummaryEmail invoked");
   try {
     const transporter = getTransporter();
     if (!transporter) {
       console.warn('⚠️  Email sending disabled (missing SMTP credentials)');
+      console.warn(`   EMAIL_HOST=${EMAIL_HOST ? 'set' : 'MISSING'}, EMAIL_USER=${EMAIL_USER ? 'set' : 'MISSING'}, EMAIL_PASS=${EMAIL_PASS ? 'set' : 'MISSING'}`);
       return { success: false, skipped: true, reason: 'missing_credentials' };
     }
 
     if (!EMAIL_FROM || !EMAIL_TO) {
       console.warn('⚠️  Email sending disabled (missing EMAIL_FROM or EMAIL_TO)');
+      console.warn(`   EMAIL_FROM=${EMAIL_FROM ? 'set' : 'MISSING'}, EMAIL_TO=${EMAIL_TO ? 'set' : 'MISSING'}`);
       return { success: false, skipped: true, reason: 'missing_from_or_to' };
     }
 
@@ -162,6 +165,8 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
     const subject = `New Call Intake – ${callerLabel} – ${formatDateTime(now)}`;
     const text = buildEmailBody(callData, metadata);
 
+    console.log(`📧 Sending email to ${EMAIL_TO} via ${EMAIL_HOST}:${EMAIL_PORT}...`);
+
     await transporter.sendMail({
       from: EMAIL_FROM,
       to: EMAIL_TO,
@@ -169,11 +174,11 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
       text,
     });
 
-    console.log(`📧 Call summary email sent to ${EMAIL_TO}`);
+    console.log("✅ Call summary email sent successfully");
     return { success: true };
-  } catch (err) {
-    console.error('❌ Failed to send call summary email:', err.message);
-    return { success: false, error: err.message };
+  } catch (error) {
+    console.error("❌ Email send failed:", error);
+    return { success: false, error: error.message };
   }
 }
 

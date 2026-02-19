@@ -2417,14 +2417,14 @@ Keep it SHORT.`;
     });
 
     // Send post-call email summary (non-blocking)
-    const emailMeta = {
+    console.log("📨 Triggering call summary email...");
+    sendCallSummaryEmail(data, currentState, {
       callId: streamSid || `CALL-${Date.now()}`,
       callerNumber: callerNumber,
       callDurationMs: callConnectedTime ? Date.now() - callConnectedTime : null,
       timestamp: new Date().toISOString()
-    };
-    sendCallSummaryEmail(data, currentState, emailMeta).catch(err => {
-      console.error('❌ Failed to send call summary email:', err.message);
+    }).catch(err => {
+      console.error("❌ Email invocation error:", err);
     });
     
     if (paceTimer) clearInterval(paceTimer);
