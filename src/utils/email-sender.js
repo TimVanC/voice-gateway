@@ -35,8 +35,13 @@ function getTransporter() {
   _transporter = nodemailer.createTransport({
     host: EMAIL_HOST,
     port: EMAIL_PORT,
-    secure: EMAIL_PORT === 465,
+    secure: false,
     auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+    authMethod: 'LOGIN',
+    tls: { rejectUnauthorized: false },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
   });
 
   return _transporter;
@@ -167,14 +172,20 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
 
     console.log(`📧 Sending email to ${EMAIL_TO} via ${EMAIL_HOST}:${EMAIL_PORT}...`);
 
-    await transporter.sendMail({
+    const mailOptions = {
       from: EMAIL_FROM,
       to: EMAIL_TO,
       subject,
       text,
-    });
+    };
 
-    console.log("✅ Call summary email sent successfully");
+    try {
+      const info = await transporter.sendMail(mailOptions);
+      console.log("✅ Call summary email sent successfully:", info.response);
+    } catch (error) {
+      console.error("❌ Email send failed:", error);
+    }
+
     return { success: true };
   } catch (error) {
     console.error("❌ Email send failed:", error);
