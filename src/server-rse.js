@@ -143,6 +143,7 @@ wss.on("connection", (twilioWs, req) => {
   let tts_active = false;  // TTS guardrail: true from response start until buffer emptied; no state change while true
   let totalAudioBytesSent = 0;  // Track total audio in current response
   let currentResponseId = null;  // Track current OpenAI response ID for cancellation
+  const cancelledResponseIds = new Set();  // Track cancelled response IDs to drop stale deltas
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
   let pendingUserInput = null;  // Queue for input that arrives while response is in progress
   
@@ -210,6 +211,73 @@ wss.on("connection", (twilioWs, req) => {
     speechEndedAt = null;
   }
 
+  function markResponseCancelled(responseId, reason) {
+    if (!responseId) {
+      console.warn(`⚠️ RESPONSE_CANCELLED_MISSING_ID reason=${reason}`);
+      return;
+    }
+    cancelledResponseIds.add(responseId);
+    console.log(`🚫 RESPONSE_CANCELLED_TRACKED response_id=${responseId} reason=${reason}`);
+  }
+
+  function clearAudioBuffer(reason, responseId = null, logAsError = false) {
+    const hadBytes = playBuffer.length;
+    const logLine = `🧹 AUDIO_BUFFER_CLEARED reason=${reason} response_id=${responseId || "unknown"} hadBytes=${hadBytes}`;
+    if (logAsError && hadBytes > 0) {
+      console.error(logLine);
+    } else {
+      console.log(logLine);
+    }
+    playBuffer = Buffer.alloc(0);
+  }
+
+  function stopTwilioPlaybackImmediate(reason, responseId = null) {
+    if (!streamSid) {
+      console.warn(`⚠️ TWILIO_PLAYBACK_STOP_SKIPPED reason=${reason} response_id=${responseId || "unknown"} streamSid=missing`);
+      return;
+    }
+    if (twilioWs?.readyState !== WebSocket.OPEN) {
+      console.warn(`⚠️ TWILIO_PLAYBACK_STOP_SKIPPED reason=${reason} response_id=${responseId || "unknown"} twilioState=${twilioWs?.readyState}`);
+      return;
+    }
+    try {
+      twilioWs.send(JSON.stringify({ event: "clear", streamSid }));
+      console.log(`⏹️ TWILIO_PLAYBACK_STOPPED reason=${reason} response_id=${responseId || "unknown"} streamSid=${streamSid}`);
+    } catch (err) {
+      console.error(`❌ TWILIO_PLAYBACK_STOP_FAILED reason=${reason} response_id=${responseId || "unknown"} error=${err.message}`);
+    }
+  }
+
+  function cancelResponseAudio(reason, responseId = currentResponseId, options = {}) {
+    const { sendCancelToOpenAI = true, stopTwilioPlayback = true } = options;
+
+    markResponseCancelled(responseId, reason);
+
+    if (sendCancelToOpenAI) {
+      if (openaiWs?.readyState === WebSocket.OPEN && responseId) {
+        try {
+          openaiWs.send(JSON.stringify({
+            type: "response.cancel",
+            response_id: responseId
+          }));
+          console.log(`🛑 OpenAI response.cancel sent response_id=${responseId} reason=${reason}`);
+        } catch (err) {
+          console.error(`❌ OpenAI response.cancel failed response_id=${responseId} reason=${reason} error=${err.message}`);
+        }
+      } else if (!responseId) {
+        console.warn(`⚠️ Skipping response.cancel because response_id missing (reason=${reason})`);
+      }
+    }
+
+    clearAudioBuffer(reason, responseId);
+    if (stopTwilioPlayback) {
+      stopTwilioPlaybackImmediate(reason, responseId);
+    }
+    responseInProgress = false;
+    tts_active = false;
+    audioStreamingStarted = false;
+  }
+
   // ============================================================================
   // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
   // ============================================================================
@@ -248,7 +316,7 @@ wss.on("connection", (twilioWs, req) => {
         // Twilio disconnected - log this so we know audio stopped
         if (playBuffer.length > 0) {
           console.error(`⚠️ Twilio WebSocket closed while ${(playBuffer.length/8000).toFixed(1)}s of audio still in buffer!`);
-          playBuffer = Buffer.alloc(0);  // Clear buffer since we can't send
+          clearAudioBuffer("twilio_ws_closed");
         }
         return;
       }
@@ -345,6 +413,7 @@ wss.on("connection", (twilioWs, req) => {
     
     openaiWs.on("open", () => {
       console.log("✅ Connected to OpenAI Realtime");
+      console.log(`🔌 OPENAI_STREAM_OPENED (new WebSocket connection)`);
       openaiConnectionAttempts = 0;  // Reset on success
       
       // Configure session with selected voice (set once, no changes mid-call)
@@ -485,11 +554,23 @@ wss.on("connection", (twilioWs, req) => {
         
       case "response.created":
         clearWatchdog();
-        currentResponseId = event.response?.id;
+        const nextResponseId = event.response?.id || null;
+        const staleBytes = playBuffer.length;
+        const previousResponseId = currentResponseId;
+        if (previousResponseId && previousResponseId !== nextResponseId) {
+          markResponseCancelled(previousResponseId, "superseded_by_new_response");
+        }
+        if (staleBytes > 0) {
+          console.error(`🚨 RESPONSE_CREATED_WITH_STALE_AUDIO response_id=${nextResponseId || "unknown"} staleBytes=${staleBytes}`);
+        }
+        clearAudioBuffer("response_created", nextResponseId, staleBytes > 0);
+        stopTwilioPlaybackImmediate("response_created", nextResponseId);
+        currentResponseId = nextResponseId;
+        if (currentResponseId) {
+          cancelledResponseIds.delete(currentResponseId);
+        }
         console.log(`🚀 Response started (id: ${currentResponseId})`);
-        // DON'T clear playBuffer here - let existing audio finish playing!
-        // Audio from new response will be appended, not replace
-        // Only clear on explicit cancellation or barge-in
+        console.log(`🆕 NEW_RESPONSE_STREAM_BEGAN response_id=${currentResponseId} staleBytesBeforeClear=${staleBytes}`);
         responseInProgress = true;
         tts_active = true;  // No state change until TTS completes (buffer emptied)
         audioStreamingStarted = false;
@@ -517,14 +598,30 @@ wss.on("connection", (twilioWs, req) => {
         
       case "response.audio.delta":
         if (event.delta) {
+          const audioData = Buffer.from(event.delta, "base64");
+          const deltaResponseId = event.response_id ?? event.response?.id ?? null;
+          console.log(`🔊 AUDIO_DELTA response_id=${deltaResponseId || "missing"} currentResponseId=${currentResponseId || "none"} bytes=${audioData.length}`);
+
+          if (!deltaResponseId) {
+            console.error(`⛔ AUDIO_DELTA_DROPPED reason=missing_response_id currentResponseId=${currentResponseId || "none"} bytes=${audioData.length}`);
+            break;
+          }
+          if (deltaResponseId !== currentResponseId) {
+            console.error(`⛔ AUDIO_DELTA_DROPPED reason=mismatched_response_id response_id=${deltaResponseId} currentResponseId=${currentResponseId || "none"} bytes=${audioData.length}`);
+            break;
+          }
+          if (cancelledResponseIds.has(deltaResponseId)) {
+            console.error(`⛔ AUDIO_DELTA_DROPPED reason=cancelled_response_id response_id=${deltaResponseId} currentResponseId=${currentResponseId || "none"} bytes=${audioData.length}`);
+            break;
+          }
+
           // Stop backchannel if it was playing
           if (backchannel.isPlaying()) {
             backchannel.stop();
-            playBuffer = Buffer.alloc(0); // Clear backchannel audio
+            clearAudioBuffer("backchannel_stop", deltaResponseId);
           }
           
           audioStreamingStarted = true;
-          const audioData = Buffer.from(event.delta, "base64");
           playBuffer = Buffer.concat([playBuffer, audioData]);
           totalAudioBytesSent += audioData.length;  // Track total
           lastAudioDeltaTime = Date.now();  // Update last audio delta time
@@ -590,11 +687,12 @@ wss.on("connection", (twilioWs, req) => {
               console.error(`   Got: "${actualTranscript.substring(0, 80)}..."`);
               console.error(`   Match ratio: ${(matchRatio * 100).toFixed(0)}%`);
               
-              // CRITICAL: Clear the bad audio
-              playBuffer = Buffer.alloc(0);
-              responseInProgress = false;
-              tts_active = false;
-              audioStreamingStarted = false;
+              // CRITICAL: Cancel and clear all audio for this response
+              const rejectedResponseId = currentResponseId;
+              cancelResponseAudio("hallucination_rejected", rejectedResponseId, {
+                sendCancelToOpenAI: true,
+                stopTwilioPlayback: true
+              });
               
               // Check if we've exceeded max retries
               if (hallucinationCount >= MAX_HALLUCINATION_RETRIES) {
@@ -642,15 +740,6 @@ wss.on("connection", (twilioWs, req) => {
               
               // Store the prompt to resend (before it gets cleared)
               const promptToResend = expectedTranscript;
-              
-              // Try to cancel any ongoing response (may fail if already done)
-              try {
-                if (openaiWs?.readyState === WebSocket.OPEN) {
-                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                }
-              } catch (cancelErr) {
-                console.log(`⚠️ Cancel attempt failed (expected): ${cancelErr.message}`);
-              }
               
               // Resend the correct prompt after a brief delay
               // But only if user isn't currently speaking (they might be answering what they thought they heard)
@@ -1093,46 +1182,18 @@ wss.on("connection", (twilioWs, req) => {
         // EMAIL included so "I have X@Y. Is that right?" plays fully before accepting input
         // CLOSE included so "Is there anything else?" plays fully
         const currentStateForBargeIn = stateMachine.getState();
-        const isProtectedPrompt = currentStateForBargeIn === STATES.GREETING ||
-                                   currentStateForBargeIn === STATES.SAFETY_CHECK ||
-                                   currentStateForBargeIn === STATES.INTENT ||
-                                   currentStateForBargeIn === STATES.NAME ||
-                                   currentStateForBargeIn === STATES.EMAIL ||
-                                   currentStateForBargeIn === STATES.CLOSE ||
-                                   currentStateForBargeIn === STATES.CONFIRMATION;
         // Never cancel or clear buffer when playing goodbye - let it finish then hangup
         if (currentStateForBargeIn === STATES.ENDED || _callCompleted) {
           console.log(`⏸️ User spoke during ENDED - letting goodbye finish`);
           break;
         }
         if (playBuffer.length > 0 || responseInProgress) {
-          if (isProtectedPrompt && playBuffer.length > 1600) {
-            // During greeting/safety/intent: DON'T clear buffer if substantial audio remains
-            // Let the prompt finish playing - user will hear it, then we process their input
-            console.log(`⏸️ User speaking during ${currentStateForBargeIn} - letting ${(playBuffer.length/8000).toFixed(1)}s of audio finish`);
-            // Don't clear buffer, don't cancel response - let audio finish
-            // Their input will be processed after
-          } else {
-            // Normal barge-in for other states or if buffer is nearly empty
-            console.log("🛑 Barge-in: stopping assistant audio");
-            playBuffer = Buffer.alloc(0);  // Clear audio buffer immediately
-            responseInProgress = false;
-            tts_active = false;
-            audioStreamingStarted = false;
-            
-            // CRITICAL: Also cancel OpenAI's response generation if it's in progress
-            if (openaiWs?.readyState === WebSocket.OPEN && currentResponseId) {
-              try {
-                openaiWs.send(JSON.stringify({
-                  type: "response.cancel",
-                  response_id: currentResponseId
-                }));
-                console.log(`🛑 Cancelled OpenAI response: ${currentResponseId}`);
-              } catch (err) {
-                // Ignore cancellation errors (response might already be done)
-              }
-            }
-          }
+          // Strict isolation: always hard-stop assistant playback on barge-in (except ENDED/goodbye)
+          console.log("🛑 Barge-in: stopping assistant audio");
+          cancelResponseAudio("barge_in", currentResponseId, {
+            sendCancelToOpenAI: true,
+            stopTwilioPlayback: true
+          });
         }
         
         // Start long-speech backchannel timer (4-6 seconds)
@@ -1203,14 +1264,20 @@ wss.on("connection", (twilioWs, req) => {
               if (openaiWs?.readyState === WebSocket.OPEN && !speechStartTime) {
                 if (stateMachine.getState() === STATES.ENDED || _callCompleted) return;
                 console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response (after short speech delay)`);
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                cancelResponseAudio("preemptive_cancel_short_speech", currentResponseId, {
+                  sendCancelToOpenAI: true,
+                  stopTwilioPlayback: true
+                });
                 waitingForTranscription = true;
               }
             }, 500); // Wait 500ms to see if user continues
           } else {
             // Normal length speech - cancel immediately
             console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response`);
-            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            cancelResponseAudio("preemptive_cancel", currentResponseId, {
+              sendCancelToOpenAI: true,
+              stopTwilioPlayback: true
+            });
             // Mark that we're waiting for transcription
             waitingForTranscription = true;
           }
@@ -1512,7 +1579,10 @@ Say the ENTIRE sentence above, word for word.`,
       // Cancel current response
       if (currentResponseId && openaiWs?.readyState === WebSocket.OPEN) {
         console.log(`🛑 Cancelling failed response`);
-        openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+        cancelResponseAudio("tts_failure", currentResponseId, {
+          sendCancelToOpenAI: true,
+          stopTwilioPlayback: true
+        });
       }
       
       // Check retry count; safety question: 1 retry (apology + full question), then transfer
@@ -1538,7 +1608,7 @@ Say the ENTIRE sentence above, word for word.`,
       totalAudioBytesSent = 0;
       lastAudioDeltaTime = null;
       audioDoneReceived = false;
-      playBuffer = Buffer.alloc(0);
+      clearAudioBuffer("tts_retry", currentResponseId);
       
       setTimeout(() => {
         let toSend = currentPromptText;
@@ -1708,10 +1778,10 @@ STRICT RULES:
       const stateNow = stateMachine.getState();
       if (stateNow !== STATES.ENDED && !_callCompleted) {
         console.log(`🛑 Cancelling OpenAI auto-response (no audio yet)`);
-        openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-        playBuffer = Buffer.alloc(0);  // Clear buffer since we're cancelling
-        responseInProgress = false;
-        tts_active = false;
+        cancelResponseAudio("cancel_no_audio_yet", currentResponseId, {
+          sendCancelToOpenAI: true,
+          stopTwilioPlayback: true
+        });
       }
     }
     
@@ -1791,10 +1861,16 @@ STRICT RULES:
     
     transferRequested = true;
     console.log("🔄 Transferring call to real person...");
+
+    cancelResponseAudio("transfer", currentResponseId, {
+      sendCancelToOpenAI: true,
+      stopTwilioPlayback: true
+    });
     
     // Close OpenAI connection
     if (openaiWs?.readyState === WebSocket.OPEN) {
       try {
+        console.log(`🔌 OPENAI_STREAM_FORCE_CLOSED reason=transfer`);
         openaiWs.close();
       } catch (e) {
         console.error("❌ Error closing OpenAI connection:", e);
@@ -2441,6 +2517,7 @@ Keep it SHORT.`;
     backchannel.cancel();
     
     if (openaiWs?.readyState === WebSocket.OPEN) {
+      console.log(`🔌 OPENAI_STREAM_FORCE_CLOSED reason=cleanup`);
       openaiWs.close();
     }
   }
