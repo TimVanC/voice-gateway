@@ -195,6 +195,7 @@ wss.on("connection", (twilioWs, req) => {
   let callConnectedTime = null;          // Track when call connected (for phantom speech protection)
   const CALL_SETTLING_MS = 2000;         // Ignore speech in first 2 seconds (line noise/artifacts)
   const GREETING_GUARD_MS = 5000;       // Don't process user input for 5s after greeting so user can hear intro
+  let rejectNextResponseDueToGreetingGuard = false;  // When we ignore early transcript, reject model's reply (no generator question)
   
   // ============================================================================
   // 3-SECOND WATCHDOG: No dead air. If no response within 3s after speech_end, send fallback.
@@ -557,6 +558,18 @@ wss.on("connection", (twilioWs, req) => {
         const nextResponseId = event.response?.id || null;
         const staleBytes = playBuffer.length;
         const previousResponseId = currentResponseId;
+        // Reject model response when we ignored an early transcript (greeting guard) so we don't play e.g. "What's wrong with your generator?"
+        if (rejectNextResponseDueToGreetingGuard && stateMachine.getState() === STATES.GREETING) {
+          rejectNextResponseDueToGreetingGuard = false;
+          if (nextResponseId) {
+            markResponseCancelled(nextResponseId, "greeting_guard_rejected");
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              cancelResponseAudio("greeting_guard_rejected", nextResponseId, { sendCancelToOpenAI: true, stopTwilioPlayback: true });
+            }
+          }
+          console.log(`⏭️ Rejected response (id: ${nextResponseId}) - was for ignored greeting-period transcript`);
+          break;
+        }
         if (previousResponseId && previousResponseId !== nextResponseId) {
           markResponseCancelled(previousResponseId, "superseded_by_new_response");
         }
@@ -1187,6 +1200,12 @@ wss.on("connection", (twilioWs, req) => {
           console.log(`⏸️ User spoke during ENDED - letting goodbye finish`);
           break;
         }
+        // During greeting playback, ignore barge-in so the full greeting plays (avoids false VAD cutting off intro)
+        const sinceGreetingForBargeIn = greetingSentTime ? Date.now() - greetingSentTime : Infinity;
+        if (currentStateForBargeIn === STATES.GREETING && sinceGreetingForBargeIn < GREETING_GUARD_MS) {
+          console.log(`⏸️ Ignoring barge-in during greeting playback (${(sinceGreetingForBargeIn/1000).toFixed(1)}s since greeting)`);
+          break;
+        }
         if (playBuffer.length > 0 || responseInProgress) {
           // Strict isolation: always hard-stop assistant playback on barge-in (except ENDED/goodbye)
           console.log("🛑 Barge-in: stopping assistant audio");
@@ -1296,6 +1315,7 @@ wss.on("connection", (twilioWs, req) => {
           const sinceGreeting = greetingSentTime ? Date.now() - greetingSentTime : Infinity;
           if (inGreeting && sinceGreeting < GREETING_GUARD_MS) {
             console.log(`⏭️ Ignoring early transcript during greeting guard (${(sinceGreeting/1000).toFixed(1)}s since greeting)`);
+            rejectNextResponseDueToGreetingGuard = true;  // Reject model's reply so we don't play e.g. "What's wrong with your generator?"
             break;
           }
           
