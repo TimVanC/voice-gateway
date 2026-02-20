@@ -1614,7 +1614,7 @@ function createCallStateMachine() {
         const currentQuestion = questions[detailsQuestionIndex];
         const isSystemTypeQuestion = (data.intent === INTENT_TYPES.HVAC_SERVICE && currentQuestion === DETAILS.hvac_service.system_type) ||
           (data.intent === INTENT_TYPES.HVAC_INSTALLATION && currentQuestion === DETAILS.hvac_installation.system_type);
-        const looksLikeAskingOptions = /\b(what\s+(type|types|kind|kinds|are\s+the\s+options|options\s+are\s+there)|which\s+(one|type|system)|list\s+(them|the\s+options)|tell\s+me\s+(the\s+)?(options|types)|i'?m\s+not\s+sure\s+what\s+types?)\b/i;
+        const looksLikeAskingOptions = /\b(what\s+(type|types|kind|kinds|are\s+the\s+options|options\s+are\s+there)|which\s+(one|type|system)|list\s+(them|the\s+options)|tell\s+me\s+(the\s+)?(options|types)|give\s+me\s+some\s+options|what\s+could\s+it\s+be|i'?m\s+not\s+sure\s+what\s+types?)\b/i;
         if (isSystemTypeQuestion && looksLikeAskingOptions.test(transcript)) {
           console.log(`📋 User asked for system type options - re-asking with list (not advancing)`);
           return {
@@ -1957,6 +1957,9 @@ function createCallStateMachine() {
         }
         // Immediate confirmation (Phase 2): we asked "I have {availability}. Is that right?"
         if (pendingClarification.field === 'availability' && pendingClarification.awaitingConfirmation) {
+          if (isConfusedOrAsking(lowerTranscript)) {
+            return { nextState: currentState, prompt: `I have ${pendingClarification.value}. Is that right?`, action: 'ask' };
+          }
           if (isConfirmation(lowerTranscript)) {
             data.availability = pendingClarification.value;
             data._availabilityComplete = true;
@@ -1969,9 +1972,13 @@ function createCallStateMachine() {
             }
             return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
           }
-          // Correction: replace, do not append
+          // Correction: replace, do not append. If no valid availability was given, keep asking.
           const corr = extractAvailability(transcript);
-          data.availability = (corr && corr.trim()) ? corr : pendingClarification.value;
+          const corrLower = (corr || '').toLowerCase();
+          if (!corr || !corr.trim() || (!looksLikeAvailability(corrLower) && !hasUrgencyAvailability(corrLower))) {
+            return { nextState: currentState, prompt: `I have ${pendingClarification.value}. Is that right?`, action: 'ask' };
+          }
+          data.availability = corr;
           data._availabilityComplete = true;
           data._availabilityLocked = true;
           clearPendingClarification();
@@ -2103,6 +2110,13 @@ function createCallStateMachine() {
         }
         if (isCorrection(lowerTranscript)) {
           confirmationAttempts++;
+          if (applyRecapCorrectionsFromTranscript(transcript)) {
+            return {
+              nextState: currentState,
+              prompt: getConfirmationPrompt(),
+              action: 'confirm'
+            };
+          }
           // Return a prompt asking what needs to be corrected
           return {
             nextState: currentState,
@@ -3245,6 +3259,37 @@ function createCallStateMachine() {
       .trim();
     
     return cleaned;
+  }
+
+  function applyRecapCorrectionsFromTranscript(text) {
+    if (!text || typeof text !== 'string') return false;
+    let updated = false;
+    const lower = text.toLowerCase();
+
+    // Handle explicit system-type corrections.
+    if (/\b(system|unit|equipment)\b/.test(lower) || /\bboiler|furnace|heat\s*pump|central\s*air|ac|mini\s*-?\s*split\b/.test(lower)) {
+      const normalizedSystemType = normalizeSystemType(text);
+      if (normalizedSystemType && normalizedSystemType.trim()) {
+        data.details.systemType = normalizedSystemType;
+        data.details.systemTypeUncertain = /\b(not\s+too?\s+sure|maybe|i\s+think|unsure|not\s+sure|don'?t\s+know|could\s+be)\b/i.test(text);
+        updated = true;
+      }
+    }
+
+    // Handle explicit availability corrections.
+    if (/\bavailability\b/.test(lower) || looksLikeAvailability(lower)) {
+      const correctedAvailability = extractAvailability(text);
+      const correctedLower = (correctedAvailability || '').toLowerCase();
+      if (correctedAvailability && (looksLikeAvailability(correctedLower) || hasUrgencyAvailability(correctedLower))) {
+        data.availability = correctedAvailability;
+        data._availabilityComplete = true;
+        data._availabilityLocked = true;
+        data.availability_confidence = Math.max(data.availability_confidence || 0, 90);
+        updated = true;
+      }
+    }
+
+    return updated;
   }
   
   function looksLikeAvailability(text) {
