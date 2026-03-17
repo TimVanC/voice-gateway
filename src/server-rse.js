@@ -141,7 +141,8 @@ wss.on("connection", (twilioWs, req) => {
   let responseInProgress = false;
   let audioStreamingStarted = false;
   let tts_active = false;  // TTS guardrail: true from response start until buffer emptied; no state change while true
-  let totalAudioBytesSent = 0;  // Track total audio in current response
+  let totalAudioBytesSent = 0;  // Track total audio generated in current response
+  let playedAudioBytesSent = 0;  // Track audio bytes actually forwarded to Twilio
   let currentResponseId = null;  // Track current OpenAI response ID for cancellation
   const cancelledResponseIds = new Set();  // Track cancelled response IDs to drop stale deltas
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
@@ -340,12 +341,15 @@ wss.on("connection", (twilioWs, req) => {
       }
       
       let frame;
+      let bytesConsumedFromBuffer = 0;
       if (playBuffer.length >= FRAME_SIZE) {
         // Send audio from buffer
         frame = playBuffer.slice(0, FRAME_SIZE);
         playBuffer = playBuffer.slice(FRAME_SIZE);
+        bytesConsumedFromBuffer = FRAME_SIZE;
       } else if (playBuffer.length > 0) {
         // Send partial frame padded with silence
+        bytesConsumedFromBuffer = playBuffer.length;
         frame = Buffer.concat([
           playBuffer,
           SILENCE_FRAME.slice(0, FRAME_SIZE - playBuffer.length)
@@ -367,6 +371,7 @@ wss.on("connection", (twilioWs, req) => {
         if (frame[0] !== 0xFF || frame.some(b => b !== 0xFF)) {
           lastAudioPlaybackTime = Date.now();
           audioFramesSent++;
+          playedAudioBytesSent += bytesConsumedFromBuffer;
           // Log every 2 seconds (100 frames) to show progress
           if (VERBOSE_DEBUG && audioFramesSent % 100 === 0) {
             console.log(`🔊 Audio progress: ${(audioFramesSent * 0.02).toFixed(1)}s sent, ${(playBuffer.length/8000).toFixed(1)}s remaining`);
@@ -609,6 +614,7 @@ wss.on("connection", (twilioWs, req) => {
         tts_active = true;  // No state change until TTS completes (buffer emptied)
         audioStreamingStarted = false;
         totalAudioBytesSent = 0;  // Reset for new response
+        playedAudioBytesSent = 0;  // Reset played-audio counter
         audioFramesSent = 0;  // Reset frame counter
         lastAudioDeltaTime = Date.now();  // Reset audio delta tracking
         audioDoneReceived = false;  // Reset audio done flag
@@ -801,7 +807,7 @@ wss.on("connection", (twilioWs, req) => {
               }, 300);  // Brief delay to ensure cleanup
             } else {
               // Transcript matches or is acceptable - this is what was actually spoken
-              console.log(`📜 AI said: "${event.transcript}"`);
+              console.log(`📜 AI generated transcript: "${event.transcript}"`);
               if (hallucinationCount > 0) {
                 console.log(`✅ Response matched expected - resetting hallucination counter`);
                 hallucinationCount = 0;
@@ -810,7 +816,7 @@ wss.on("connection", (twilioWs, req) => {
             }
           } else {
             // No expected transcript to compare - log as spoken
-            console.log(`📜 AI said: "${event.transcript}"`);
+            console.log(`📜 AI generated transcript: "${event.transcript}"`);
           }
         } else {
           console.log(`⚠️ No transcript in audio_transcript.done event`);
@@ -1123,6 +1129,11 @@ wss.on("connection", (twilioWs, req) => {
             console.error(`   Expected: "${expectedTranscript || 'unknown'}"`);
           }
           console.log(`✅ Response complete (state: ${currentState})`);
+          const generatedSeconds = totalAudioBytesSent / 8000;
+          const playedSeconds = playedAudioBytesSent / 8000;
+          if (generatedSeconds > 0 && playedSeconds + 0.15 < generatedSeconds) {
+            console.warn(`✂️ AI playback cut off: played ~${playedSeconds.toFixed(1)}s of ~${generatedSeconds.toFixed(1)}s generated audio (transcript may include unheard tail)`);
+          }
           assistantTurnCount++;  // Track for filler spacing
           
           // Reset retry count on successful completion
