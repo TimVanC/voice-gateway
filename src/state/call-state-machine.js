@@ -1201,6 +1201,14 @@ function createCallStateMachine() {
         return { nextState: currentState, prompt: CALLER_INFO.name, action: 'ask' };
         
       case STATES.PHONE:
+        if (isAcknowledgmentOnly(lowerTranscript)) {
+          console.log(`⏳ Ignoring acknowledgment-only utterance in PHONE: "${transcript}"`);
+          return {
+            nextState: currentState,
+            prompt: CALLER_INFO.phone,
+            action: 'ask'
+          };
+        }
         // Immediate confirmation (Phase 2): we asked "I have X. Is that right?"
         if (pendingClarification.field === 'phone' && pendingClarification.awaitingConfirmation) {
           if (isConfirmation(lowerTranscript)) {
@@ -1413,6 +1421,15 @@ function createCallStateMachine() {
         function normalizeEmailForPersist(e) {
           if (!e || typeof e !== 'string') return e || '';
           return e.replace(/\s+/g, '').toLowerCase().trim();
+        }
+
+        if (isAcknowledgmentOnly(lowerTranscript)) {
+          console.log(`⏳ Ignoring acknowledgment-only utterance in EMAIL: "${transcript}"`);
+          return {
+            nextState: currentState,
+            prompt: CALLER_INFO.email.primary,
+            action: 'ask'
+          };
         }
 
         // If caller includes a valid email inside a frustrated/clarifying sentence,
@@ -1641,6 +1658,15 @@ function createCallStateMachine() {
         };
         
       case STATES.DETAILS_BRANCH:
+        if (isAcknowledgmentOnly(lowerTranscript)) {
+          console.log(`⏳ Ignoring acknowledgment-only utterance in DETAILS_BRANCH: "${transcript}"`);
+          const currentDetailPrompt = getDetailsPrompt();
+          return {
+            nextState: currentState,
+            prompt: currentDetailPrompt || null,
+            action: currentDetailPrompt ? 'ask' : 'wait'
+          };
+        }
         // CRITICAL: Filter out pure filler words/phrases that aren't actual answers
         // Examples: "Um", "uh", "to be honest", "let me think", "well", etc.
         const fillerOnlyPattern = /^(um+|uh+|er+|hmm+|well|so|oh|okay|to be honest|let me think|let me see|i don't know|i'm not sure)[,.]?\s*$/i;
@@ -1727,6 +1753,14 @@ function createCallStateMachine() {
         };
         
       case STATES.ADDRESS:
+        if (isAcknowledgmentOnly(lowerTranscript)) {
+          console.log(`⏳ Ignoring acknowledgment-only utterance in ADDRESS: "${transcript}"`);
+          return {
+            nextState: currentState,
+            prompt: ADDRESS.ask,
+            action: 'ask'
+          };
+        }
         // If address already locked, skip to next state immediately
         if (data._addressLocked) {
           return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
@@ -2004,6 +2038,14 @@ function createCallStateMachine() {
         };
         
       case STATES.AVAILABILITY:
+        if (isAcknowledgmentOnly(lowerTranscript)) {
+          console.log(`⏳ Ignoring acknowledgment-only utterance in AVAILABILITY: "${transcript}"`);
+          return {
+            nextState: currentState,
+            prompt: AVAILABILITY.ask,
+            action: 'ask'
+          };
+        }
         // If already confirmed/locked, do not parse again (immutable)
         if (data._availabilityLocked) {
           return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
@@ -2885,6 +2927,24 @@ function createCallStateMachine() {
       'don\'t have one', 'no i don\'t'
     ];
     return declinePatterns.some(p => text.includes(p));
+  }
+
+  function isAcknowledgmentOnly(text) {
+    if (!text) return false;
+    const cleaned = String(text)
+      .toLowerCase()
+      .replace(/[^\w\s']/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned) return false;
+    // If content contains obvious field data, it's not a pure acknowledgment.
+    if (/[0-9@]/.test(cleaned)) return false;
+    const ackPatterns = [
+      /^(thanks|thank you|thankyou|thx)$/,
+      /^(okay thanks|ok thanks|alright thanks|all right thanks)$/,
+      /^(appreciate it|got it|sounds good|perfect|great|awesome)$/
+    ];
+    return ackPatterns.some((p) => p.test(cleaned));
   }
   
   function extractEmail(text) {
