@@ -161,9 +161,11 @@ wss.on("connection", (twilioWs, req) => {
   const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before transferring to human
   const MAX_HALLUCINATION_RETRIES = 3;  // Max hallucination retries before skipping to next state
   const GOODBYE_BUFFER_MS = 4000;
+  const EMERGENCY_DISCONNECT_MS = 1200; // Emergency redirect should hang up soon after message playback
   const CLOSING_FAILSAFE_MS = 15000;  // If closing state active longer than 15s, force hangup (goodbye ~8s audio + 4s buffer)
   let closingFailsafeTimer = null;
   let endingDisconnectTimer = null;
+  let endingDisconnectDelayMs = GOODBYE_BUFFER_MS; // Dynamic per ending prompt (normal goodbye vs emergency redirect)
   let goodbyeCompletedWaitingForBuffer = false;  // Set when goodbye response.done status=completed; disconnect after buffer empties + GOODBYE_BUFFER_MS
   let _callCompleted = false;  // Terminal state: closing ran once; no further TTS or logic, hangup only
   
@@ -380,9 +382,9 @@ wss.on("connection", (twilioWs, req) => {
           // Hangup only after final TTS finishes playing + fixed buffer (no cut-off mid-sentence)
           if (goodbyeCompletedWaitingForBuffer) {
             goodbyeCompletedWaitingForBuffer = false;
-            stateMachine.intakeLog('state_event', { event: 'goodbye_buffer_emptied', hangup_in_ms: GOODBYE_BUFFER_MS });
-            console.log(`📞 Goodbye buffer emptied - disconnecting in ${GOODBYE_BUFFER_MS}ms`);
-            scheduleEndingDisconnect('goodbye_buffer_emptied', GOODBYE_BUFFER_MS);
+            stateMachine.intakeLog('state_event', { event: 'goodbye_buffer_emptied', hangup_in_ms: endingDisconnectDelayMs });
+            console.log(`📞 Goodbye buffer emptied - disconnecting in ${endingDisconnectDelayMs}ms`);
+            scheduleEndingDisconnect('goodbye_buffer_emptied', endingDisconnectDelayMs);
           }
           // Process any pending input that was queued (not once call is completed)
           if (pendingUserInput && !_callCompleted) {
@@ -882,14 +884,10 @@ wss.on("connection", (twilioWs, req) => {
             goodbyeCompletedWaitingForBuffer = true;
             const bufferSeconds = playBuffer.length / 8000;
             if (bufferSeconds < 0.1) {
-              console.log(`📞 Goodbye TTS done, buffer empty - disconnecting in ${GOODBYE_BUFFER_MS}ms`);
-              setTimeout(() => {
-                if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
-                  twilioWs.close(1000, 'Call completed');
-                }
-              }, GOODBYE_BUFFER_MS);
+              console.log(`📞 Goodbye TTS done, buffer empty - disconnecting in ${endingDisconnectDelayMs}ms`);
+              scheduleEndingDisconnect('ended_incomplete_buffer_empty', endingDisconnectDelayMs);
             } else {
-              console.log(`📞 Goodbye TTS done - will disconnect after buffer empties (${bufferSeconds.toFixed(1)}s) + ${GOODBYE_BUFFER_MS}ms`);
+              console.log(`📞 Goodbye TTS done - will disconnect after buffer empties (${bufferSeconds.toFixed(1)}s) + ${endingDisconnectDelayMs}ms`);
             }
             return;
           }
@@ -1144,7 +1142,7 @@ wss.on("connection", (twilioWs, req) => {
             stateMachine.updateData('_closeStateReached', true);
             goodbyeCompletedWaitingForBuffer = true;
             stateMachine.intakeLog('state_event', { event: 'goodbye_tts_complete', buffer_seconds: (playBuffer.length / 8000).toFixed(1) });
-            console.log(`📞 Goodbye TTS complete - will disconnect after buffer empties + ${GOODBYE_BUFFER_MS}ms`);
+            console.log(`📞 Goodbye TTS complete - will disconnect after buffer empties + ${endingDisconnectDelayMs}ms`);
           }
         }
         responseInProgress = false;
@@ -2011,6 +2009,7 @@ STRICT RULES:
       stateMachine.intakeLog('state_event', { event: 'closing_started', state: 'ended' });
       stateMachine.updateData('_closeStateReached', true);
       const goodbyePrompt = result.prompt || CLOSE.goodbye;
+      endingDisconnectDelayMs = (goodbyePrompt === SAFETY.emergency_response) ? EMERGENCY_DISCONNECT_MS : GOODBYE_BUFFER_MS;
       sendStatePrompt(goodbyePrompt);
       _callCompleted = true;  // Set AFTER sending goodbye - sendStatePrompt checks this flag
       console.log(`🔒 _callCompleted = true (no further prompts allowed)`);
