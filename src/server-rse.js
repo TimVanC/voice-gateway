@@ -148,6 +148,7 @@ wss.on("connection", (twilioWs, req) => {
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
   let suppressAutoResponseWhileTranscribing = false;  // Drop OpenAI auto-response while waiting for transcript
   let pendingUserInput = null;  // Queue for input that arrives while response is in progress
+  let pendingUserInputMeta = { queuedAtMs: 0, reason: null };
   
   // TTS failure detection and recovery
   let currentPromptText = null;  // Track the prompt text being sent
@@ -219,11 +220,50 @@ wss.on("connection", (twilioWs, req) => {
 
   function markResponseCancelled(responseId, reason) {
     if (!responseId) {
-      console.warn(`⚠️ RESPONSE_CANCELLED_MISSING_ID reason=${reason}`);
-      return;
+      return false;
+    }
+    if (cancelledResponseIds.has(responseId)) {
+      return true;
     }
     cancelledResponseIds.add(responseId);
     console.log(`🚫 RESPONSE_CANCELLED_TRACKED response_id=${responseId} reason=${reason}`);
+    return true;
+  }
+
+  function mergePendingTranscript(existingTranscript, incomingTranscript) {
+    const existing = String(existingTranscript || "").trim();
+    const incoming = String(incomingTranscript || "").trim();
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+    if (existing === incoming) return existing;
+    if (existing.includes(incoming)) return existing;
+    if (incoming.includes(existing)) return incoming;
+    return (incoming.length > existing.length)
+      ? `${incoming} ${existing}`
+      : `${existing} ${incoming}`;
+  }
+
+  function queuePendingUserInput(transcript, reason) {
+    pendingUserInput = mergePendingTranscript(pendingUserInput, transcript);
+    pendingUserInputMeta = { queuedAtMs: Date.now(), reason: reason || "unspecified" };
+  }
+
+  function dequeuePendingUserInput() {
+    const input = pendingUserInput;
+    pendingUserInput = null;
+    pendingUserInputMeta = { queuedAtMs: 0, reason: null };
+    return input;
+  }
+
+  function clearPendingUserInput(reason) {
+    if (!pendingUserInput) return;
+    console.log(`🗑️ Clearing queued input (${reason}): "${pendingUserInput.substring(0, 40)}..."`);
+    pendingUserInput = null;
+    pendingUserInputMeta = { queuedAtMs: 0, reason: null };
+  }
+
+  function hasActiveAssistantOutput() {
+    return Boolean(currentResponseId) || responseInProgress || tts_active || playBuffer.length > 0;
   }
 
   function clearAudioBuffer(reason, responseId = null, logAsError = false) {
@@ -271,7 +311,7 @@ wss.on("connection", (twilioWs, req) => {
           console.error(`❌ OpenAI response.cancel failed response_id=${responseId} reason=${reason} error=${err.message}`);
         }
       } else if (!responseId) {
-        console.warn(`⚠️ Skipping response.cancel because response_id missing (reason=${reason})`);
+        console.log(`ℹ️ Skipping response.cancel (no active response_id, reason=${reason})`);
       }
     }
 
@@ -395,11 +435,10 @@ wss.on("connection", (twilioWs, req) => {
           // Process any pending input that was queued (not once call is completed)
           if (pendingUserInput && !_callCompleted) {
             console.log(`📤 Processing queued input after buffer emptied: "${pendingUserInput.substring(0, 50)}..."`);
-            const input = pendingUserInput;
-            pendingUserInput = null;
+            const input = dequeuePendingUserInput();
             setTimeout(() => processUserInput(input), 0);
           } else if (pendingUserInput && _callCompleted) {
-            pendingUserInput = null;
+            clearPendingUserInput("call_completed");
           }
         }
       } catch (err) {
@@ -545,6 +584,53 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   // HANDLE OPENAI EVENTS
   // ============================================================================
+  function hasExpectedDomainKeyword(expected, actual) {
+    const expectedLower = String(expected || "").toLowerCase();
+    const actualLower = String(actual || "").toLowerCase();
+    const keywordGroups = [
+      {
+        trigger: ["phone", "number", "reach"],
+        required: ["phone", "number", "reach", "call"]
+      },
+      {
+        trigger: ["email", "@", " at ", " dot "],
+        required: ["email", "@", " at ", " dot ", "gmail", "yahoo", "outlook"]
+      },
+      {
+        trigger: ["days", "times", "availability", "work best"],
+        required: ["day", "days", "time", "times", "availability", "work", "best"]
+      },
+      {
+        trigger: ["address", "street", "city", "zip"],
+        required: ["address", "street", "road", "avenue", "city", "zip"]
+      }
+    ];
+    for (const group of keywordGroups) {
+      const expectedHasTrigger = group.trigger.some((kw) => expectedLower.includes(kw));
+      if (!expectedHasTrigger) continue;
+      const actualHasKeyword = group.required.some((kw) => actualLower.includes(kw));
+      if (!actualHasKeyword) return false;
+    }
+    return true;
+  }
+
+  function transcriptMatchesExpected(expectedTranscriptText, actualTranscriptText) {
+    if (!expectedTranscriptText || !actualTranscriptText) return true;
+    const expected = expectedTranscriptText.toLowerCase();
+    const actual = actualTranscriptText.toLowerCase();
+    const expectedWords = expected
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-z0-9@]/g, ""))
+      .filter((w) => w.length > 3);
+    if (expectedWords.length === 0) return true;
+    const matchingWords = expectedWords.filter((w) => actual.includes(w));
+    const matchRatio = matchingWords.length / expectedWords.length;
+    const minMatches = expectedWords.length >= 6 ? 3 : 2;
+    const ratioOk = matchRatio >= (expectedWords.length >= 6 ? 0.5 : 0.4);
+    const keywordOk = hasExpectedDomainKeyword(expectedTranscriptText, actualTranscriptText);
+    return ratioOk && matchingWords.length >= minMatches && keywordOk;
+  }
+
   function handleOpenAIEvent(event) {
     lastActivityTime = Date.now();
     
@@ -572,9 +658,6 @@ wss.on("connection", (twilioWs, req) => {
         clearWatchdog();
         const nextResponseId = event.response?.id || null;
         if (suppressAutoResponseWhileTranscribing && !_callCompleted) {
-          if (nextResponseId) {
-            markResponseCancelled(nextResponseId, "waiting_for_transcription");
-          }
           cancelResponseAudio("waiting_for_transcription", nextResponseId, {
             sendCancelToOpenAI: true,
             stopTwilioPlayback: true
@@ -704,14 +787,7 @@ wss.on("connection", (twilioWs, req) => {
           // CRITICAL: Check for off-script hallucination
           // If we have an expected transcript, check if actual is wildly different
           if (expectedTranscript && actualTranscript) {
-            const expected = expectedTranscript.toLowerCase();
-            const actual = actualTranscript.toLowerCase();
-            // Check if the actual transcript contains key words from expected
-            const expectedWords = expected.split(/\s+/).filter(w => w.length > 3);
-            const matchingWords = expectedWords.filter(w => actual.includes(w));
-            const matchRatio = expectedWords.length > 0 ? matchingWords.length / expectedWords.length : 1;
-            
-            if (matchRatio < 0.3 && actualTranscript.length > 20) {
+            if (!transcriptMatchesExpected(expectedTranscript, actualTranscript) && actualTranscript.length > 20) {
               // Less than 30% match on key words - likely hallucination (fabricated line). Do NOT treat as spoken.
               console.log(`📜 AI said (rejected - not script): "${event.transcript}"`);
               // Track hallucination count for this prompt
@@ -725,7 +801,7 @@ wss.on("connection", (twilioWs, req) => {
               console.error(`🚨 HALLUCINATION DETECTED (#${hallucinationCount}/${MAX_HALLUCINATION_RETRIES}) - clearing buffer!`);
               console.error(`   Expected: "${expectedTranscript.substring(0, 80)}..."`);
               console.error(`   Got: "${actualTranscript.substring(0, 80)}..."`);
-              console.error(`   Match ratio: ${(matchRatio * 100).toFixed(0)}%`);
+              console.error(`   Reason: transcript did not match expected scripted prompt`);
               
               // CRITICAL: Cancel and clear all audio for this response
               const rejectedResponseId = currentResponseId;
@@ -1057,8 +1133,7 @@ wss.on("connection", (twilioWs, req) => {
               if (pendingUserInput && playBuffer.length <= 3200) {
                 // Only process if buffer is nearly empty
                 console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
-                const input = pendingUserInput;
-                pendingUserInput = null;
+                const input = dequeuePendingUserInput();
                 processUserInput(input);
               }
               
@@ -1193,11 +1268,10 @@ wss.on("connection", (twilioWs, req) => {
           console.log(`⏳ Deferring queued input until buffer drains (${(playBuffer.length / 8000).toFixed(1)}s remaining)`);
         } else if (pendingUserInput && status !== "cancelled" && !_callCompleted && currentState !== STATES.ENDED) {
           console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
-          const input = pendingUserInput;
-          pendingUserInput = null;
+          const input = dequeuePendingUserInput();
           processUserInput(input);
         } else if (pendingUserInput && _callCompleted) {
-          pendingUserInput = null;  // Discard; no further logic once completed
+          clearPendingUserInput("call_completed");  // Discard; no further logic once completed
         }
         break;
         
@@ -1219,7 +1293,7 @@ wss.on("connection", (twilioWs, req) => {
         resetGlobalSilenceMonitor();
         
         // Clear any pending input - we'll get a fresh transcript
-        pendingUserInput = null;
+        clearPendingUserInput("speech_started");
         
         // Clear silence recovery timer - user is responding!
         clearSilenceRecoveryTimer();
@@ -1324,6 +1398,11 @@ wss.on("connection", (twilioWs, req) => {
             setTimeout(() => {
               if (openaiWs?.readyState === WebSocket.OPEN && !speechStartTime) {
                 if (stateMachine.getState() === STATES.ENDED || _callCompleted) return;
+                if (!hasActiveAssistantOutput()) {
+                  console.log(`⏭️ Pre-emptive cancel skipped (no active assistant response)`);
+                  waitingForTranscription = true;
+                  return;
+                }
                 console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response (after short speech delay)`);
                 cancelResponseAudio("preemptive_cancel_short_speech", currentResponseId, {
                   sendCancelToOpenAI: true,
@@ -1334,6 +1413,11 @@ wss.on("connection", (twilioWs, req) => {
             }, 500); // Wait 500ms to see if user continues
           } else {
             // Normal length speech - cancel immediately
+            if (!hasActiveAssistantOutput()) {
+              console.log(`⏭️ Pre-emptive cancel skipped (no active assistant response)`);
+              waitingForTranscription = true;
+              break;
+            }
             console.log(`🛑 Pre-emptive cancel: stopping OpenAI auto-response`);
             cancelResponseAudio("preemptive_cancel", currentResponseId, {
               sendCancelToOpenAI: true,
@@ -1365,7 +1449,7 @@ wss.on("connection", (twilioWs, req) => {
           // SPEECH_END GATING: Do not evaluate transcript while user audio is still active (partial transcript)
           if (speechStartTime !== null) {
             console.log(`🔇 Transcript while user still speaking - queuing until speech_end: "${transcript.substring(0, 40)}..."`);
-            pendingUserInput = transcript;
+            queuePendingUserInput(transcript, "transcript_while_speaking");
             break;
           }
           
@@ -1373,14 +1457,22 @@ wss.on("connection", (twilioWs, req) => {
           
           if (tts_active) {
             console.log(`🔒 TTS active - queuing transcript until playback completes: "${transcript.substring(0, 40)}..."`);
-            pendingUserInput = transcript;
+            queuePendingUserInput(transcript, "tts_active");
             return;
           }
           // If a response is in progress (streaming or about to stream), queue input.
           // Processing now can advance state while the current prompt is still in flight.
           if (responseInProgress) {
             console.log(`🎵 Response in progress - queuing input`);
-            pendingUserInput = transcript;
+            queuePendingUserInput(transcript, "response_in_progress");
+            return;
+          }
+
+          // Merge any in-flight partial transcript fragments with this final transcript.
+          if (pendingUserInput) {
+            const mergedTranscript = mergePendingTranscript(pendingUserInput, transcript);
+            clearPendingUserInput("merged_with_final_transcript");
+            processUserInput(mergedTranscript);
             return;
           }
           
@@ -1792,7 +1884,7 @@ STRICT RULES:
     // TTS guardrail: no state change while TTS is playing (email confirmation atomic)
     if (tts_active) {
       console.log(`🔒 processUserInput deferred - TTS active, queuing`);
-      pendingUserInput = transcript;
+      queuePendingUserInput(transcript, "tts_active_process_input");
       return;
     }
     // Clear silence timer if still active
@@ -2038,7 +2130,7 @@ STRICT RULES:
       stateMachine.intakeLog('state_event', { event: 'closing_started', state: 'ended' });
       stateMachine.updateData('_closeStateReached', true);
       const goodbyePrompt = result.prompt || CLOSE.goodbye;
-      pendingUserInput = null; // Discard stale queued input once ending begins
+      clearPendingUserInput("terminal_end_call"); // Discard stale queued input once ending begins
       cancelResponseAudio("terminal_end_call", currentResponseId, {
         sendCancelToOpenAI: true,
         stopTwilioPlayback: true
@@ -2245,12 +2337,16 @@ Sound polite and helpful, not dismissive.`,
       console.log(`⏳ Skipping prompt - response in progress`);
       return;
     }
-    // CRITICAL: Clear any queued input when sending a new prompt.
-    // Queued input was from BEFORE this prompt — it is stale. Processing it after
-    // this prompt finishes would double-prompt the same field.
+    // Clear only truly stale queued input; preserve fresh speech fragments so
+    // user corrections are not dropped during barge-in/cancel loops.
     if (pendingUserInput) {
-      console.log(`🗑️ Clearing stale queued input on new prompt: "${pendingUserInput.substring(0, 40)}..."`);
-      pendingUserInput = null;
+      const ageMs = pendingUserInputMeta.queuedAtMs ? (Date.now() - pendingUserInputMeta.queuedAtMs) : 0;
+      const veryOld = ageMs > 15000;
+      if (veryOld) {
+        clearPendingUserInput("aged_out");
+      } else {
+        console.log(`🧠 Preserving queued input while sending prompt (age=${ageMs}ms, reason=${pendingUserInputMeta.reason || "unknown"})`);
+      }
     }
     const currentState = stateMachine.getState();
     console.log(`🗣️ State prompt: "${prompt}"`);
