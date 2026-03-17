@@ -182,6 +182,7 @@ wss.on("connection", (twilioWs, req) => {
   // CHATGPT-STYLE TURN-TAKING STATE
   // ============================================================================
   let speechStartTime = null;         // When caller started speaking
+  let lastSpeechDurationMs = 0;       // Most recent detected speech duration
   let longSpeechTimer = null;         // Timer for long-speech backchanneling
   let longSpeechBackchannelSent = false;  // Only one backchannel per turn
   let assistantTurnCount = 0;         // Track turns for filler spacing
@@ -264,6 +265,31 @@ wss.on("connection", (twilioWs, req) => {
 
   function hasActiveAssistantOutput() {
     return Boolean(currentResponseId) || responseInProgress || tts_active || playBuffer.length > 0;
+  }
+
+  function isLowSignalTranscript(text) {
+    const cleaned = String(text || '')
+      .toLowerCase()
+      .replace(/[^\w\s']/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned) return true;
+    const lowSignalPatterns = [
+      /^(thank you|thanks|thankyou|ok|okay|yeah|yep|yup|hi|hello|bye|goodbye)$/,
+      /^(uh|um|hmm|mm+|right|sure|alright|all right)$/
+    ];
+    if (lowSignalPatterns.some((p) => p.test(cleaned))) return true;
+    const wordCount = cleaned.split(' ').filter(Boolean).length;
+    return wordCount <= 2 && cleaned.length < 14;
+  }
+
+  function shouldIgnoreEarlyTranscript(transcript, currentState, sinceGreetingMs) {
+    if (![STATES.GREETING, STATES.INTENT].includes(currentState)) return false;
+    const hasIntentSignal = Boolean(classifyIntent(String(transcript || '').toLowerCase()));
+    if (hasIntentSignal) return false;
+    const likelyEchoWindow = sinceGreetingMs < (GREETING_GUARD_MS + 3000);
+    const veryShortDetectedSpeech = lastSpeechDurationMs > 0 && lastSpeechDurationMs < 1700;
+    return isLowSignalTranscript(transcript) && (likelyEchoWindow || veryShortDetectedSpeech);
   }
 
   function clearAudioBuffer(reason, responseId = null, logAsError = false) {
@@ -1351,6 +1377,7 @@ wss.on("connection", (twilioWs, req) => {
         
       case "input_audio_buffer.speech_stopped":
         const speechDuration = speechStartTime ? Date.now() - speechStartTime : 0;
+        lastSpeechDurationMs = speechDuration;
         console.log(`🔇 User stopped speaking (${speechDuration}ms)`);
         stateMachine.intakeLog('speech_end', { duration_ms: speechDuration });
         
@@ -1439,10 +1466,23 @@ wss.on("connection", (twilioWs, req) => {
           suppressAutoResponseWhileTranscribing = false;
           
           const inGreeting = stateMachine.getState() === STATES.GREETING;
+          const currentStateForTranscript = stateMachine.getState();
           const sinceGreeting = greetingSentTime ? Date.now() - greetingSentTime : Infinity;
           if (inGreeting && sinceGreeting < GREETING_GUARD_MS) {
             console.log(`⏭️ Ignoring early transcript during greeting guard (${(sinceGreeting/1000).toFixed(1)}s since greeting)`);
             rejectNextResponseDueToGreetingGuard = true;  // Reject model's reply so we don't play e.g. "What's wrong with your generator?"
+            break;
+          }
+          if (shouldIgnoreEarlyTranscript(transcript, currentStateForTranscript, sinceGreeting)) {
+            console.log(`⏭️ Ignoring low-signal early transcript in ${currentStateForTranscript}: "${transcript}"`);
+            if (currentStateForTranscript === STATES.INTENT) {
+              const reprompt = stateMachine.getNextPrompt();
+              if (reprompt) {
+                sendStatePrompt(reprompt);
+              }
+            } else if (currentStateForTranscript === STATES.GREETING) {
+              sendGreetingRetry();
+            }
             break;
           }
           
