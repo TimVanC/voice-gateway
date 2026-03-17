@@ -1348,9 +1348,10 @@ wss.on("connection", (twilioWs, req) => {
             pendingUserInput = transcript;
             return;
           }
-          // Legacy: if response in progress but tts_active not set, still queue when audio streaming
-          if (responseInProgress && audioStreamingStarted) {
-            console.log(`🎵 Audio streaming - queuing input`);
+          // If a response is in progress (streaming or about to stream), queue input.
+          // Processing now can advance state while the current prompt is still in flight.
+          if (responseInProgress) {
+            console.log(`🎵 Response in progress - queuing input`);
             pendingUserInput = transcript;
             return;
           }
@@ -2004,14 +2005,19 @@ STRICT RULES:
         console.log(`⏭️ Call already completed - ignoring end_call (idempotent)`);
         return;
       }
-      // Send the goodbye FIRST, then set _callCompleted to prevent any further prompts
+      // Terminal transition: stop in-flight audio/prompts and lock processing immediately.
       console.log(`👋 End of call - delivering goodbye (single run)`);
       stateMachine.intakeLog('state_event', { event: 'closing_started', state: 'ended' });
       stateMachine.updateData('_closeStateReached', true);
       const goodbyePrompt = result.prompt || CLOSE.goodbye;
+      pendingUserInput = null; // Discard stale queued input once ending begins
+      cancelResponseAudio("terminal_end_call", currentResponseId, {
+        sendCancelToOpenAI: true,
+        stopTwilioPlayback: true
+      });
+      _callCompleted = true; // Lock out follow-up processing before terminal prompt is sent
       endingDisconnectDelayMs = (goodbyePrompt === SAFETY.emergency_response) ? EMERGENCY_DISCONNECT_MS : GOODBYE_BUFFER_MS;
-      sendStatePrompt(goodbyePrompt);
-      _callCompleted = true;  // Set AFTER sending goodbye - sendStatePrompt checks this flag
+      sendStatePrompt(goodbyePrompt, { allowDuringCompleted: true });
       console.log(`🔒 _callCompleted = true (no further prompts allowed)`);
       if (closingFailsafeTimer) clearTimeout(closingFailsafeTimer);
       closingFailsafeTimer = setTimeout(() => {
@@ -2201,9 +2207,10 @@ Sound polite and helpful, not dismissive.`,
   // ============================================================================
   // SEND STATE PROMPT
   // ============================================================================
-  function sendStatePrompt(prompt) {
+  function sendStatePrompt(prompt, options = {}) {
+    const { allowDuringCompleted = false } = options;
     if (openaiWs?.readyState !== WebSocket.OPEN) return;
-    if (_callCompleted) return;
+    if (_callCompleted && !allowDuringCompleted) return;
     clearWatchdog();
     if (responseInProgress) {
       console.log(`⏳ Skipping prompt - response in progress`);
