@@ -145,6 +145,7 @@ wss.on("connection", (twilioWs, req) => {
   let currentResponseId = null;  // Track current OpenAI response ID for cancellation
   const cancelledResponseIds = new Set();  // Track cancelled response IDs to drop stale deltas
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
+  let suppressAutoResponseWhileTranscribing = false;  // Drop OpenAI auto-response while waiting for transcript
   let pendingUserInput = null;  // Queue for input that arrives while response is in progress
   
   // TTS failure detection and recovery
@@ -161,7 +162,7 @@ wss.on("connection", (twilioWs, req) => {
   const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before transferring to human
   const MAX_HALLUCINATION_RETRIES = 3;  // Max hallucination retries before skipping to next state
   const GOODBYE_BUFFER_MS = 4000;
-  const EMERGENCY_DISCONNECT_MS = 1200; // Emergency redirect should hang up soon after message playback
+  const EMERGENCY_DISCONNECT_MS = 0; // Emergency redirect: hang up immediately after playback drains
   const CLOSING_FAILSAFE_MS = 15000;  // If closing state active longer than 15s, force hangup (goodbye ~8s audio + 4s buffer)
   let closingFailsafeTimer = null;
   let endingDisconnectTimer = null;
@@ -565,6 +566,17 @@ wss.on("connection", (twilioWs, req) => {
       case "response.created":
         clearWatchdog();
         const nextResponseId = event.response?.id || null;
+        if (suppressAutoResponseWhileTranscribing && !_callCompleted) {
+          if (nextResponseId) {
+            markResponseCancelled(nextResponseId, "waiting_for_transcription");
+          }
+          cancelResponseAudio("waiting_for_transcription", nextResponseId, {
+            sendCancelToOpenAI: true,
+            stopTwilioPlayback: true
+          });
+          console.log(`⏭️ Suppressed auto-response while waiting for transcript (id: ${nextResponseId || "unknown"})`);
+          break;
+        }
         const staleBytes = playBuffer.length;
         const previousResponseId = currentResponseId;
         // Reject model response when we ignored an early transcript (greeting guard) so we don't play e.g. "What's wrong with your generator?"
@@ -1166,7 +1178,9 @@ wss.on("connection", (twilioWs, req) => {
         
         // Process any pending input that arrived while response was in progress
         // Do not re-process once call is completed (would re-enter closing and repeat goodbye)
-        if (pendingUserInput && status !== "cancelled" && !_callCompleted && currentState !== STATES.ENDED) {
+        if (pendingUserInput && playBuffer.length > 3200) {
+          console.log(`⏳ Deferring queued input until buffer drains (${(playBuffer.length / 8000).toFixed(1)}s remaining)`);
+        } else if (pendingUserInput && status !== "cancelled" && !_callCompleted && currentState !== STATES.ENDED) {
           console.log(`📤 Processing queued input: "${pendingUserInput.substring(0, 50)}..."`);
           const input = pendingUserInput;
           pendingUserInput = null;
@@ -1292,6 +1306,8 @@ wss.on("connection", (twilioWs, req) => {
           break;
         }
         if (openaiWs?.readyState === WebSocket.OPEN) {
+          waitingForTranscription = true;
+          suppressAutoResponseWhileTranscribing = true;
           if (speechDuration < 1000) {
             // Very short speech - wait a bit in case user continues
             setTimeout(() => {
@@ -1325,6 +1341,7 @@ wss.on("connection", (twilioWs, req) => {
           stateMachine.intakeLog('transcript', { transcript: transcript.substring(0, 100) });
           
           waitingForTranscription = false;
+          suppressAutoResponseWhileTranscribing = false;
           
           const inGreeting = stateMachine.getState() === STATES.GREETING;
           const sinceGreeting = greetingSentTime ? Date.now() - greetingSentTime : Infinity;
@@ -2211,6 +2228,7 @@ Sound polite and helpful, not dismissive.`,
     const { allowDuringCompleted = false } = options;
     if (openaiWs?.readyState !== WebSocket.OPEN) return;
     if (_callCompleted && !allowDuringCompleted) return;
+    suppressAutoResponseWhileTranscribing = false; // Explicit scripted prompt should not be auto-suppressed
     clearWatchdog();
     if (responseInProgress) {
       console.log(`⏳ Skipping prompt - response in progress`);
