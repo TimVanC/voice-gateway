@@ -49,6 +49,9 @@ const {
  * @returns {Object} State manager with methods to get/set state and data
  */
 function createCallStateMachine() {
+  // Bound parser input so regex-heavy field handlers cannot stall the event loop.
+  const MAX_PARSE_TRANSCRIPT_CHARS = 500;
+
   // Current state
   let currentState = STATES.GREETING;
   let previousState = null;  // Track previous state for backtracking
@@ -662,10 +665,25 @@ function createCallStateMachine() {
   /**
    * Process user input and determine next state
    */
+  function sanitizeTranscriptForParsing(transcript) {
+    const raw = String(transcript ?? '');
+    // Strip control chars and collapse whitespace for more predictable parsing cost.
+    const cleaned = raw
+      .replace(/[\u0000-\u001F\u007F]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleaned.length > MAX_PARSE_TRANSCRIPT_CHARS) {
+      console.warn(`⚠️ Transcript truncated for parser safety (${cleaned.length} -> ${MAX_PARSE_TRANSCRIPT_CHARS} chars)`);
+      return cleaned.slice(0, MAX_PARSE_TRANSCRIPT_CHARS);
+    }
+    return cleaned;
+  }
+
   function processInput(transcript, analysis = {}) {
-    const lowerTranscript = transcript.toLowerCase();
+    const safeTranscript = sanitizeTranscriptForParsing(transcript);
+    const lowerTranscript = safeTranscript.toLowerCase();
     // Track user transcript for context-aware acknowledgments (empathy detection)
-    _lastUserTranscript = transcript;
+    _lastUserTranscript = safeTranscript;
     
     // Snapshot lock state before processing — we'll log any new locks after
     const _locksBefore = {
@@ -674,7 +692,14 @@ function createCallStateMachine() {
     };
     
     // Wrap the actual logic so we can log field_locked events on return
-    const result = _processInputInner(transcript, lowerTranscript, analysis);
+    let result;
+    try {
+      result = _processInputInner(safeTranscript, lowerTranscript, analysis);
+    } catch (err) {
+      console.error(`❌ State machine parse error in state ${currentState}: ${err?.message || err}`);
+      const fallbackPrompt = getNextPrompt() || "I'm sorry, I didn't catch that. Could you repeat that?";
+      result = { nextState: currentState, prompt: fallbackPrompt, action: 'ask' };
+    }
     
     // Check for newly locked fields
     const fieldMap = { name: '_nameLocked', phone: '_phoneLocked', email: '_emailLocked', address: '_addressLocked', availability: '_availabilityLocked' };
