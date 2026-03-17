@@ -1385,6 +1385,38 @@ function createCallStateMachine() {
         };
         
       case STATES.EMAIL:
+        function normalizeEmailForPersist(e) {
+          if (!e || typeof e !== 'string') return e || '';
+          return e.replace(/\s+/g, '').toLowerCase().trim();
+        }
+
+        // If caller includes a valid email inside a frustrated/clarifying sentence,
+        // prioritize capturing it instead of treating the whole utterance as confusion.
+        const eagerEmail = extractEmail(transcript);
+        const eagerEmailValid = Boolean(
+          eagerEmail &&
+          eagerEmail.includes('@') &&
+          /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(eagerEmail)
+        );
+        if (eagerEmailValid && !(pendingClarification.field === 'email' && pendingClarification.awaitingConfirmation)) {
+          const eagerEmailConf = estimateEmailConfidence(transcript);
+          const eagerEmailConfidencePercent = confidenceToPercentage(eagerEmailConf);
+          const persistedEmail = normalizeEmailForPersist(eagerEmail);
+          console.log(`📋 Email (inline capture): ${persistedEmail} (confidence: ${eagerEmailConfidencePercent}%)`);
+          intakeLog('field_parse', { field: 'email', parsed_value: persistedEmail, confidence: eagerEmailConfidencePercent, source: 'inline_capture' });
+          if (eagerEmailConfidencePercent >= CONFIDENCE_THRESHOLD) {
+            data.email = persistedEmail;
+            data.email_confidence = eagerEmailConfidencePercent;
+            data._emailComplete = true;
+            data._emailLocked = true;
+            return { nextState: transitionTo(STATES.DETAILS_BRANCH), prompt: withAcknowledgment(getDetailsPrompt()), action: 'ask' };
+          }
+          data.email = persistedEmail;
+          data.email_confidence = eagerEmailConfidencePercent;
+          pendingClarification = { field: 'email', value: persistedEmail, confidence: eagerEmailConf, awaitingConfirmation: true };
+          return { nextState: currentState, prompt: `${CONFIRMATION.immediate_email} ${formatEmailForReadback(persistedEmail)}. Is that right?`, action: 'ask' };
+        }
+
         // CRITICAL: Check for confusion/clarification requests FIRST (before any other handling)
         // User might say "I'm sorry, what did you say?" or "can you repeat that?"
         if (isConfusedOrAsking(lowerTranscript)) {
@@ -1408,10 +1440,6 @@ function createCallStateMachine() {
         
         // EMAIL CONFIRMATION — binary yes/no only. No re-evaluation of confidence.
         if (pendingClarification.field === 'email' && pendingClarification.awaitingConfirmation) {
-          function normalizeEmailForPersist(e) {
-            if (!e || typeof e !== 'string') return e || '';
-            return e.replace(/\s+/g, '').toLowerCase().trim();
-          }
           if (isConfirmation(lowerTranscript)) {
             // YES → lock with confirmed value
             data.email = normalizeEmailForPersist(pendingClarification.value);
@@ -2835,19 +2863,24 @@ function createCallStateMachine() {
   }
   
   function extractEmail(text) {
+    // Normalize spelled letter sequences such as "t-i-m" -> "tim"
+    // and "v-a-n-c-a-u-w-e-n-b-e-r-g-e" -> "vancauwenberge".
+    let normalizedText = String(text || '')
+      .replace(/([a-zA-Z])(?:\s*-\s*[a-zA-Z]){1,}/g, (m) => m.replace(/[^a-zA-Z]/g, ''));
+
     // First, extract spelling instructions BEFORE processing the email
     const spellingInstructions = [];
     const twoMsPattern = /\b(with\s+)?(two|2)\s+m'?s?\b/i;
     const doubleMPattern = /\b(double|two)\s+m\b/i;
     
-    if (twoMsPattern.test(text) || doubleMPattern.test(text)) {
+    if (twoMsPattern.test(normalizedText) || doubleMPattern.test(normalizedText)) {
       spellingInstructions.push({ letter: 'm', count: 2 });
     }
     
     // Extract other spelling patterns
     const letterCountPattern = /\b(with\s+)?(two|2|double)\s+([a-z])'?s?\b/gi;
     let match;
-    while ((match = letterCountPattern.exec(text)) !== null) {
+    while ((match = letterCountPattern.exec(normalizedText)) !== null) {
       const letter = match[3].toLowerCase();
       if (!spellingInstructions.some(inst => inst.letter === letter)) {
         spellingInstructions.push({ letter, count: 2 });
@@ -2857,7 +2890,7 @@ function createCallStateMachine() {
     // Remove common prefixes and extract email portion
     // Step 1: Strip leading response words (no, yeah, sure, etc.)
     // Step 2: Strip email preamble phrases (it's, that would be, etc.)
-    let email = text
+    let email = normalizedText
       .replace(/^(no|nope|nah|yeah|yes|sure|okay|ok|um|uh)\s*,?\s*/gi, '')
       .replace(/^(so\s+the\s+|that\s+would\s+be|that's|it's|it\s+is|my\s+email\s+is|email\s+is|you\s+can\s+reach\s+me\s+at|reach\s+me\s+at|the\s+email\s+is)\s*/gi, '')
       .trim();
