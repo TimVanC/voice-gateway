@@ -2863,139 +2863,103 @@ function createCallStateMachine() {
   }
   
   function extractEmail(text) {
-    // Normalize spelled letter sequences such as "t-i-m" -> "tim"
-    // and "v-a-n-c-a-u-w-e-n-b-e-r-g-e" -> "vancauwenberge".
+    // Keep this parser linear-time to avoid hangs on long spelled utterances.
     let normalizedText = String(text || '')
       .replace(/([a-zA-Z])(?:\s*-\s*[a-zA-Z]){1,}/g, (m) => m.replace(/[^a-zA-Z]/g, ''));
 
-    // First, extract spelling instructions BEFORE processing the email
+    // Extract simple "double letter" hints from natural speech.
     const spellingInstructions = [];
-    const twoMsPattern = /\b(with\s+)?(two|2)\s+m'?s?\b/i;
-    const doubleMPattern = /\b(double|two)\s+m\b/i;
-    
-    if (twoMsPattern.test(normalizedText) || doubleMPattern.test(normalizedText)) {
-      spellingInstructions.push({ letter: 'm', count: 2 });
-    }
-    
-    // Extract other spelling patterns
-    const letterCountPattern = /\b(with\s+)?(two|2|double)\s+([a-z])'?s?\b/gi;
+    const letterCountPattern = /\b(?:with\s+)?(?:two|2|double)\s+([a-z])'?s?\b/gi;
     let match;
     while ((match = letterCountPattern.exec(normalizedText)) !== null) {
-      const letter = match[3].toLowerCase();
-      if (!spellingInstructions.some(inst => inst.letter === letter)) {
+      const letter = (match[1] || '').toLowerCase();
+      if (letter && !spellingInstructions.some(inst => inst.letter === letter)) {
         spellingInstructions.push({ letter, count: 2 });
       }
     }
-    
-    // Remove common prefixes and extract email portion
-    // Step 1: Strip leading response words (no, yeah, sure, etc.)
-    // Step 2: Strip email preamble phrases (it's, that would be, etc.)
-    let email = normalizedText
+
+    // Strip common preambles/fillers.
+    let working = normalizedText
       .replace(/^(no|nope|nah|yeah|yes|sure|okay|ok|um|uh)\s*,?\s*/gi, '')
       .replace(/^(so\s+the\s+|that\s+would\s+be|that's|it's|it\s+is|my\s+email\s+is|email\s+is|you\s+can\s+reach\s+me\s+at|reach\s+me\s+at|the\s+email\s+is)\s*/gi, '')
+      .replace(/\b(?:with\s+)?(?:two|2|double)\s+[a-z]'?s?\b/gi, ' ')
       .trim();
-    
-    // Remove spelling instructions and trailing clarifications
-    email = email
-      .replace(/\b(with\s+)?(two|2|double)\s+[a-z]'?s?\b/gi, '')
-      .replace(/\band\s+that'?s\s+[^.]*$/i, '')  // Remove "and that's Tim with two M's" type endings
-      .replace(/\b(and\s+)?(that'?s|it'?s)\s+[^.]*$/i, '')  // Remove trailing "and that's..." phrases
-      .trim();
-    
-    // Extract just the email part (look for name pattern + "at" + domain)
-    // Pattern: "TimVanC at gmail.com", "tim.vc at gmail.com", or "timvanc at gmail dot com"
-    // Allow dots in local part so "tim.vc at gmail.com" is preserved
-    const emailMatch = email.match(/([a-z0-9._]+(?:\s*[a-z0-9._]+)*?)\s+(?:at|@)\s+([a-z0-9\s]+(?:\s+dot\s+[a-z]+)+)/i);
-    if (emailMatch) {
-      // Clean up the name part - remove spaces but keep dots (tim.vc -> tim.vc)
-      let namePart = emailMatch[1].replace(/\s+/g, '').toLowerCase();
-      let domainPart = emailMatch[2];
-      
-      // Fix common ASR errors: "si" -> "c", "see" -> "c", "sea" -> "c" at the end
-      // This handles "timvansi" -> "timvanc" when user says "Tim Van C"
-      if (namePart.endsWith('si') && namePart.length > 2) {
-        namePart = namePart.slice(0, -2) + 'c';
-      } else if (namePart.endsWith('see') && namePart.length > 3) {
-        namePart = namePart.slice(0, -3) + 'c';
-      } else if (namePart.endsWith('sea') && namePart.length > 3) {
-        namePart = namePart.slice(0, -3) + 'c';
-      }
-      
-      email = `${namePart}@${domainPart}`;
-    } else {
-      // Try simpler pattern if first didn't match
-      // Allow dots in local part so "tim.vc at gmail.com" -> tim.vc@gmail.com (not vc@gmail.com)
-      const simpleMatch = email.match(/([a-z0-9._\s]+)\s+(?:at|@)\s+([a-z0-9.]+)/i);
-      if (simpleMatch) {
-        let namePart = simpleMatch[1].replace(/\s+/g, '').toLowerCase();
-        let domainPart = simpleMatch[2];
-        
-        // Fix common ASR errors
-        if (namePart.endsWith('si') && namePart.length > 2) {
-          namePart = namePart.slice(0, -2) + 'c';
-        } else if (namePart.endsWith('see') && namePart.length > 3) {
-          namePart = namePart.slice(0, -3) + 'c';
-        } else if (namePart.endsWith('sea') && namePart.length > 3) {
-          namePart = namePart.slice(0, -3) + 'c';
-        }
-        
-        email = `${namePart}@${domainPart}`;
-      }
-    }
-    
-    // Convert spoken "at" and "dot" to symbols
-    email = email
-      .replace(/\s+at\s+/gi, '@')
-      .replace(/\s+dot\s+/gi, '.')
+
+    // Normalize spoken separators and punctuation.
+    working = working
+      .toLowerCase()
+      .replace(/\bat\b/g, '@')
+      .replace(/\bdot\b/g, '.')
+      .replace(/\bunderscore\b/g, '_')
+      .replace(/\bdash\b/g, '-')
       .replace(/\s*@\s*/g, '@')
       .replace(/\s*\.\s*/g, '.')
-      .replace(/\s+/g, '')  // Remove all spaces
-      .toLowerCase()
+      .replace(/[^a-z0-9@._\-\s]/g, ' ')
+      .replace(/\s+/g, ' ')
       .trim();
-    
-    // Trim trailing punctuation (periods, commas, etc.)
-    email = email.replace(/[.,;:!?]+$/, '');
-    
-    // Clean up common artifacts - remove prefixes that might be stuck
-    // Remove "wouldbe", "would", "that", "so", "the" if they appear at the start
-    // Also remove "wouldbe" if it appears anywhere (from "would be" being concatenated)
-    email = email.replace(/^(wouldbe|would|that|so|the|yeah)/, '');
-    email = email.replace(/wouldbe/g, '');  // Remove "wouldbe" anywhere in the email
-    
-    // Apply spelling instructions
-    if (spellingInstructions.length > 0) {
-      const atIndex = email.indexOf('@');
-      if (atIndex > 0) {
-        let localPart = email.substring(0, atIndex);
-        const domain = email.substring(atIndex);
-        
-        for (const instruction of spellingInstructions) {
-          const { letter, count } = instruction;
-          const letterIndex = localPart.indexOf(letter);
-          if (letterIndex >= 0) {
-            const charAt = localPart[letterIndex];
-            const nextChar = localPart[letterIndex + 1];
-            // If not already doubled, double it
-            if (nextChar !== charAt) {
-              localPart = localPart.substring(0, letterIndex + 1) + 
-                         charAt.repeat(count - 1) + 
-                         localPart.substring(letterIndex + 1);
-            }
-          }
-        }
-        
-        email = localPart + domain;
+
+    // First pass: direct email token in normalized text.
+    const directMatch = working.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/);
+    let email = directMatch ? directMatch[0] : null;
+
+    // Fallback: compose from split "@"/"." tokens.
+    if (!email) {
+      const tokens = working.split(/\s+/).filter(Boolean);
+      const atIdx = tokens.findIndex(t => t.includes('@') || t === '@');
+      if (atIdx > 0 && atIdx < tokens.length - 1) {
+        const left = tokens.slice(Math.max(0, atIdx - 4), atIdx + 1).join('').replace(/@+$/, '');
+        const right = tokens.slice(atIdx + 1, Math.min(tokens.length, atIdx + 6)).join('');
+        const candidate = `${left}@${right}`.replace(/\.{2,}/g, '.');
+        const cMatch = candidate.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/);
+        email = cMatch ? cMatch[0] : null;
       }
     }
-    
-    // Final cleanup - remove any non-email characters
-    email = email.replace(/[^a-z0-9@._-]/g, '').toLowerCase();
-    
-    // Validate it looks like an email
-    if (!email.includes('@') || !email.includes('.')) {
-      return null; // Invalid email format
+
+    if (!email) return null;
+
+    // Small ASR cleanup for local-part endings.
+    const atIndex = email.indexOf('@');
+    if (atIndex > 0) {
+      let localPart = email.slice(0, atIndex);
+      const domain = email.slice(atIndex);
+      if (localPart.endsWith('si') && localPart.length > 2) localPart = `${localPart.slice(0, -2)}c`;
+      else if (localPart.endsWith('see') && localPart.length > 3) localPart = `${localPart.slice(0, -3)}c`;
+      else if (localPart.endsWith('sea') && localPart.length > 3) localPart = `${localPart.slice(0, -3)}c`;
+      email = `${localPart}${domain}`;
     }
-    
+
+    // Apply "double letter" hints to local part.
+    if (spellingInstructions.length > 0) {
+      const atIndex2 = email.indexOf('@');
+      if (atIndex2 > 0) {
+        let localPart = email.slice(0, atIndex2);
+        const domain = email.slice(atIndex2);
+        for (const instruction of spellingInstructions) {
+          const { letter, count } = instruction;
+          const idx = localPart.indexOf(letter);
+          if (idx >= 0 && localPart[idx + 1] !== localPart[idx]) {
+            localPart = `${localPart.slice(0, idx + 1)}${localPart[idx].repeat(count - 1)}${localPart.slice(idx + 1)}`;
+          }
+        }
+        email = `${localPart}${domain}`;
+      }
+    }
+
+    email = email
+      .replace(/^[^a-z0-9]+/, '')
+      .replace(/[^a-z0-9@._\-]+/g, '')
+      .replace(/[.,;:!?]+$/, '')
+      .replace(/\.{2,}/g, '.')
+      .toLowerCase()
+      .trim();
+
+    // Trim conversational tail labels accidentally appended after common TLDs,
+    // e.g. "tim@domain.com.that" -> "tim@domain.com".
+    email = email.replace(/(\.(com|net|org|edu|gov|mil|io|co|us|biz|info))(?:\.[a-z0-9\-]+)+$/i, '$1');
+
+    if (!/^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/i.test(email)) {
+      return null;
+    }
     return email;
   }
   
