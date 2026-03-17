@@ -1463,7 +1463,6 @@ wss.on("connection", (twilioWs, req) => {
           stateMachine.intakeLog('transcript', { transcript: transcript.substring(0, 100) });
           
           waitingForTranscription = false;
-          suppressAutoResponseWhileTranscribing = false;
           
           const inGreeting = stateMachine.getState() === STATES.GREETING;
           const currentStateForTranscript = stateMachine.getState();
@@ -1916,6 +1915,10 @@ STRICT RULES:
   
   function processUserInput(transcript) {
     if (_callCompleted) return;  // Terminal: no further TTS or logic once closing ran
+    // Clear suppression only when we begin explicit transcript handling.
+    // This closes the race where an unsolicited auto-response can start
+    // between transcription completion and state-machine processing.
+    suppressAutoResponseWhileTranscribing = false;
     // ENDED state: goodbye is playing or queued. No further processing.
     if (stateMachine.getState() === STATES.ENDED) {
       console.log(`⏭️ In ENDED state - ignoring input`);
