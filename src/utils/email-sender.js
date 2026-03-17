@@ -93,6 +93,10 @@ function buildEmailBody(callData, metadata) {
   const now = metadata.timestamp ? new Date(metadata.timestamp) : new Date();
   const name = [v(firstName), v(lastName)].filter(p => p !== NP).join(' ') || NP;
 
+  const emergencyDisposition = isSafetyRisk
+    ? 'Emergency redirect triggered: caller was instructed to hang up and call 911 immediately.'
+    : 'No emergency redirect triggered.';
+
   const lines = [
     'RSE Energy – Call Intake Summary',
     '',
@@ -113,6 +117,7 @@ function buildEmailBody(callData, metadata) {
     '',
     'Service Details',
     `Emergency: ${isSafetyRisk ? 'Yes' : 'No'}`,
+    `Emergency Disposition: ${emergencyDisposition}`,
     `Service Type: ${v(intent)}`,
     `Equipment Type: ${v(details.systemType)}`,
     `Maintenance Plan: ${v(details.coverageType)}`,
@@ -162,7 +167,8 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
       || 'Unknown';
 
     const now = metadata.timestamp ? new Date(metadata.timestamp) : new Date();
-    const subject = `New Call Intake – ${callerLabel} – ${formatDateTime(now)}`;
+    const emergencyPrefix = callData?.isSafetyRisk ? '[EMERGENCY REDIRECT] ' : '';
+    const subject = `${emergencyPrefix}New Call Intake – ${callerLabel} – ${formatDateTime(now)}`;
     const text = buildEmailBody(callData, metadata);
 
     sgMail.setApiKey(SENDGRID_API_KEY);

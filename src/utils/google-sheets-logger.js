@@ -540,6 +540,11 @@ function generateCallSummary(callData, callStatus) {
     }
   }
   
+  // Emergency redirect calls get explicit summary text for intake reporting.
+  if (callStatus === 'emergency_redirect' || callData.isSafetyRisk === true) {
+    return 'Potential safety emergency detected; caller was instructed to hang up and call 911 immediately.';
+  }
+
   // Add safety status if relevant
   if (callData.isSafetyRisk === false && normalizedIntent === 'hvac_service') {
     summary += ' No safety issues reported.';
@@ -887,8 +892,7 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
 /**
  * Check if call should be logged based on state and data
  * 
- * Log ALL calls except:
- * - Emergency redirects (safety risk)
+ * Log ALL calls, including emergency redirects.
  * 
  * Even incomplete calls, crashes, and early hangups should be logged
  * with appropriate status designation.
@@ -898,12 +902,9 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
  * @returns {boolean} True if call should be logged
  */
 function shouldLogCall(currentState, callData) {
-  // Don't log emergency redirects (these are handled differently)
-  if (callData.isSafetyRisk === true) {
-    return false;
-  }
-  
-  // Log everything else - complete, incomplete, crashes, hangups
+  void currentState;
+  void callData;
+  // Log everything - complete, incomplete, emergency redirects, crashes, hangups
   return true;
 }
 
@@ -1148,7 +1149,7 @@ async function callIdExists(sheets, spreadsheetId, sheetName, callId) {
  * - Incomplete calls (early exit, crash, hangup)
  * - Calls with missing data
  * 
- * Does NOT log:
+ * Also logs:
  * - Emergency redirects (safety risk)
  * 
  * @param {Object} callData - Call data from state machine

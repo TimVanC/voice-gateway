@@ -163,6 +163,7 @@ wss.on("connection", (twilioWs, req) => {
   const GOODBYE_BUFFER_MS = 4000;
   const CLOSING_FAILSAFE_MS = 15000;  // If closing state active longer than 15s, force hangup (goodbye ~8s audio + 4s buffer)
   let closingFailsafeTimer = null;
+  let endingDisconnectTimer = null;
   let goodbyeCompletedWaitingForBuffer = false;  // Set when goodbye response.done status=completed; disconnect after buffer empties + GOODBYE_BUFFER_MS
   let _callCompleted = false;  // Terminal state: closing ran once; no further TTS or logic, hangup only
   
@@ -279,6 +280,19 @@ wss.on("connection", (twilioWs, req) => {
     audioStreamingStarted = false;
   }
 
+  function scheduleEndingDisconnect(reason, delayMs = GOODBYE_BUFFER_MS) {
+    if (endingDisconnectTimer) return; // idempotent
+    endingDisconnectTimer = setTimeout(() => {
+      endingDisconnectTimer = null;
+      if (closingFailsafeTimer) { clearTimeout(closingFailsafeTimer); closingFailsafeTimer = null; }
+      console.log(`📞 Disconnecting call (${reason})`);
+      stateMachine.intakeLog('state_event', { event: 'hangup_executed', reason });
+      if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
+        twilioWs.close(1000, 'Call completed');
+      }
+    }, delayMs);
+  }
+
   // ============================================================================
   // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
   // ============================================================================
@@ -368,14 +382,7 @@ wss.on("connection", (twilioWs, req) => {
             goodbyeCompletedWaitingForBuffer = false;
             stateMachine.intakeLog('state_event', { event: 'goodbye_buffer_emptied', hangup_in_ms: GOODBYE_BUFFER_MS });
             console.log(`📞 Goodbye buffer emptied - disconnecting in ${GOODBYE_BUFFER_MS}ms`);
-            setTimeout(() => {
-              if (closingFailsafeTimer) { clearTimeout(closingFailsafeTimer); closingFailsafeTimer = null; }
-              console.log(`📞 Disconnecting call after goodbye`);
-              stateMachine.intakeLog('state_event', { event: 'hangup_executed', state: 'completed' });
-              if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
-                twilioWs.close(1000, 'Call completed');
-              }
-            }, GOODBYE_BUFFER_MS);
+            scheduleEndingDisconnect('goodbye_buffer_emptied', GOODBYE_BUFFER_MS);
           }
           // Process any pending input that was queued (not once call is completed)
           if (pendingUserInput && !_callCompleted) {
@@ -827,6 +834,16 @@ wss.on("connection", (twilioWs, req) => {
         
         if (status === "cancelled") {
           console.log(`⚠️ Response CANCELLED`);
+          if (currentState === STATES.ENDED) {
+            // Emergency/ending must always terminate call even if model response was cancelled.
+            _callCompleted = true;
+            responseInProgress = false;
+            tts_active = false;
+            audioStreamingStarted = false;
+            stateMachine.updateData('_closeStateReached', true);
+            stateMachine.intakeLog('state_event', { event: 'ended_response_cancelled' });
+            scheduleEndingDisconnect('ended_cancelled_response', 1000);
+          }
           // Don't send any new prompts - we cancelled for a reason
           // Either waiting for transcription, or user barged in
           // Reset tracking
