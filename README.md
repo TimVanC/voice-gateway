@@ -44,6 +44,7 @@ PUBLIC_BASE_URL=https://your-ngrok-url.ngrok-free.app
 TWILIO_ACCOUNT_SID=your_account_sid
 TWILIO_AUTH_TOKEN=your_auth_token
 TWILIO_NUMBER=+1234567890
+TRANSFER_PHONE_NUMBER=+19738852528
 
 # OpenAI
 OPENAI_API_KEY=sk-proj-...
