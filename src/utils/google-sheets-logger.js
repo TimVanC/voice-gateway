@@ -520,6 +520,7 @@ function generateCallSummary(callData, callStatus) {
       'hvac_installation': 'HVAC installation request',
       'generator_existing': 'Existing generator service request',
       'generator_new': 'New generator installation request',
+      'energy_efficiency_program': 'Energy Efficiency Program interest',
       'membership': 'Membership inquiry',
       'existing_project': 'Existing project inquiry'
     };
@@ -579,8 +580,8 @@ function generateCallSummary(callData, callStatus) {
 
 /**
  * Normalize intent to canonical values only
- * Returns: hvac_service, hvac_installation, generator_existing, generator_new, 
- *          membership, existing_project, out_of_scope
+ * Returns: hvac_service, hvac_installation, generator_existing, generator_new,
+ *          energy_efficiency_program, membership, existing_project, out_of_scope
  */
 function normalizeIntent(intent, callData = {}) {
   if (!intent) return '';
@@ -618,6 +619,10 @@ function normalizeIntent(intent, callData = {}) {
   if (normalized === 'membership') {
     return 'membership';
   }
+  if (normalized === 'energy_efficiency_program' || normalized === 'energy efficiency program' ||
+      normalized === 'energy_efficiency' || normalized === 'energy efficiency') {
+    return 'energy_efficiency_program';
+  }
   if (normalized === 'existing_project' || normalized === 'existing project') {
     return 'existing_project';
   }
@@ -629,7 +634,7 @@ function normalizeIntent(intent, callData = {}) {
   // Fallback: return as-is if it matches a canonical value
   const canonicalValues = [
     'hvac_service', 'hvac_installation', 'generator_existing', 'generator_new',
-    'membership', 'existing_project', 'out_of_scope'
+    'energy_efficiency_program', 'membership', 'existing_project', 'out_of_scope'
   ];
   if (canonicalValues.includes(normalized)) {
     return normalized;

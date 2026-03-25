@@ -58,7 +58,7 @@ function createCallStateMachine() {
   
   // Collected caller data - REQUIRED FIELDS
   const data = {
-    intent: null,           // hvac_service, generator, membership, existing_project, other
+    intent: null,           // hvac_service, generator, energy_efficiency_program, membership, existing_project, other
     isSafetyRisk: false,    // If emergency detected
     firstName: null,        // Required
     lastName: null,         // Required
@@ -103,6 +103,7 @@ function createCallStateMachine() {
       // Membership
       coverageType: null,     // monthly or yearly
       systemCount: null,
+      energyProgramInterestType: null, // residential/commercial/other interest context
       
       // Existing project
       site: null,
@@ -341,6 +342,11 @@ function createCallStateMachine() {
           DETAILS.membership.frequency,
           DETAILS.membership.systems
         ];
+      
+      case INTENT_TYPES.ENERGY_EFFICIENCY:
+        return [
+          DETAILS.energy_efficiency.interest_type
+        ];
         
       case INTENT_TYPES.EXISTING_PROJECT:
         return [
@@ -569,6 +575,10 @@ function createCallStateMachine() {
         
       case INTENT_TYPES.MEMBERSHIP:
         summary = 'Interested in maintenance membership.';
+        break;
+      
+      case INTENT_TYPES.ENERGY_EFFICIENCY:
+        summary = 'Interested in the Energy Efficiency Program.';
         break;
         
       case INTENT_TYPES.EXISTING_PROJECT:
@@ -2278,9 +2288,10 @@ function createCallStateMachine() {
   function needsSafetyCheck() {
     // Only service calls need safety check, NOT installations
     // Installations are for new equipment, not emergencies
-    // Skip safety for: HVAC_INSTALLATION, MEMBERSHIP, EXISTING_PROJECT, OTHER
+    // Skip safety for: HVAC_INSTALLATION, ENERGY_EFFICIENCY, MEMBERSHIP, EXISTING_PROJECT, OTHER
     // and for new generator installations
     if (data.intent === INTENT_TYPES.HVAC_INSTALLATION) return false;
+    if (data.intent === INTENT_TYPES.ENERGY_EFFICIENCY) return false;
     if (data.intent === INTENT_TYPES.MEMBERSHIP) return false;
     if (data.intent === INTENT_TYPES.EXISTING_PROJECT) return false;
     if (data.intent === INTENT_TYPES.OTHER) return false;
@@ -3533,6 +3544,11 @@ function createCallStateMachine() {
         data.details.coverageType = text;
       } else if (currentQuestion === DETAILS.membership.systems) {
         data.details.systemCount = text;
+      }
+    } else if (data.intent === INTENT_TYPES.ENERGY_EFFICIENCY) {
+      if (currentQuestion === DETAILS.energy_efficiency.interest_type) {
+        data.details.energyProgramInterestType = text;
+        data.details.issueDescription = `Energy Efficiency Program interest (${text})`;
       }
     } else if (data.intent === INTENT_TYPES.EXISTING_PROJECT) {
       if (currentQuestion === DETAILS.existing_project.site) {

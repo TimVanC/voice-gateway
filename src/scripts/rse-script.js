@@ -5,7 +5,7 @@
  * INTAKE ONLY - No scheduling, booking, or calendar logic.
  * AI collects info and situation details. Human reviews later.
  * 
- * STRICT SERVICE CONSTRAINTS - Only HVAC, Generators, Memberships, Projects
+ * STRICT SERVICE CONSTRAINTS - HVAC, Generators, Energy Efficiency Program, Memberships, Projects
  */
 
 // ============================================================================
@@ -22,12 +22,12 @@ const GREETING = {
 // INTENT CLASSIFICATION PROMPTS
 // ============================================================================
 const INTENT_PROMPTS = {
-  service_or_problem: "Is this for HVAC service, heating, air conditioning, or a generator?",
+  service_or_problem: "Is this for HVAC service, a generator, or our Energy Efficiency Program?",
   estimate_or_new: "Is this for a new HVAC installation or an upgrade?",
   membership: "Are you calling about our Home Comfort Plans or maintenance memberships?",
   existing_project: "Is this about a current job in progress with RSE?",
-  unclear: "Is this about HVAC, generators, or a maintenance plan?",
-  out_of_scope: "We don't handle that service, but I can help with HVAC, generators, or maintenance if that helps."
+  unclear: "Is this about HVAC, generators, our Energy Efficiency Program, or a maintenance plan?",
+  out_of_scope: "We don't handle that service, but I can help with HVAC, generators, our Energy Efficiency Program, or maintenance if that helps."
 };
 
 // ============================================================================
@@ -78,6 +78,9 @@ const DETAILS = {
     frequency: "Are you looking for monthly or yearly coverage?",
     systems: "How many systems or properties do you want covered?",
     inclusions: "A team member can confirm all the details. Let me get your info so they can follow up."
+  },
+  energy_efficiency: {
+    interest_type: "Great, we can note your interest in the Energy Efficiency Program. Is this for a home or a commercial property?"
   },
   existing_project: {
     site: "Which site is this for?",
@@ -157,10 +160,10 @@ const CLOSE = {
 // OUT OF SCOPE RESPONSES
 // ============================================================================
 const OUT_OF_SCOPE = {
-  solar: "We don't handle solar services, but I can help with HVAC, generators, or maintenance if that helps.",
-  electrical: "We specialize in HVAC and generators. For electrical work, you'd need an electrician.",
-  plumbing: "We specialize in HVAC and generators. For plumbing, you'd need a plumber.",
-  general: "We don't offer that service. RSE handles HVAC, generators, and maintenance memberships. Can I help with any of those?"
+  solar: "We don't handle solar services, but I can help with HVAC, generators, our Energy Efficiency Program, or maintenance if that helps.",
+  electrical: "We specialize in HVAC, generators, and our Energy Efficiency Program. For electrical work, you'd need an electrician.",
+  plumbing: "We specialize in HVAC, generators, and our Energy Efficiency Program. For plumbing, you'd need a plumber.",
+  general: "We don't offer that service. RSE handles HVAC, generators, the Energy Efficiency Program, and maintenance memberships. Can I help with any of those?"
 };
 
 // ============================================================================
@@ -203,6 +206,7 @@ const INTENT_TYPES = {
   HVAC_SERVICE: 'hvac_service',
   HVAC_INSTALLATION: 'hvac_installation_or_upgrade',
   GENERATOR: 'generator',
+  ENERGY_EFFICIENCY: 'energy_efficiency_program',
   MEMBERSHIP: 'membership',
   EXISTING_PROJECT: 'existing_project',
   OUT_OF_SCOPE: 'other_out_of_scope'
@@ -275,6 +279,14 @@ const ALLOWED_SERVICES = {
     'monthly plan',
     'yearly plan'
   ],
+  energy_efficiency: [
+    'energy efficiency program',
+    'energy efficiency',
+    'efficiency program',
+    'efficiency upgrade program',
+    'save energy program',
+    'energy savings program'
+  ],
   project: [
     'existing project',
     'current project',
@@ -311,7 +323,7 @@ const DISALLOWED_SERVICES = [
 // SYSTEM PROMPT FOR OPENAI REALTIME
 // INTAKE-ONLY - STRICT SERVICE CONSTRAINTS
 // ============================================================================
-const SYSTEM_PROMPT = `You are Ava, an intake receptionist for RSE Energy Group, an HVAC and generator company.
+const SYSTEM_PROMPT = `You are Ava, an intake receptionist for RSE Energy Group, an HVAC and generator company with an Energy Efficiency Program.
 
 === HARD SERVICE CONSTRAINTS - CRITICAL ===
 
@@ -330,7 +342,13 @@ ALLOWED SERVICES ONLY (never mention anything else):
    - Generator installation and sales
    - Only mention Cummins if caller brings it up first
 
-3. MEMBERSHIPS (exact pricing - do not invent other plans):
+3. ENERGY EFFICIENCY PROGRAM:
+   - Interest-only intake
+   - If caller is interested, note interest and collect standard contact information
+   - Do not sell, quote, or promise eligibility on the call
+   - A human team member follows up
+
+4. MEMBERSHIPS (exact pricing - do not invent other plans):
    
    Generator Service Plan:
    - $275/year
@@ -356,7 +374,7 @@ ALLOWED SERVICES ONLY (never mention anything else):
    - Take name, phone, email, address, availability and pass to team
    - If caller asks about inclusions, say: "A team member can confirm all the details."
 
-4. EXISTING PROJECTS:
+5. EXISTING PROJECTS:
    - Ongoing jobs already in progress with RSE
 
 === ABSOLUTELY DISALLOWED - NEVER MENTION ===
@@ -370,16 +388,17 @@ ALLOWED SERVICES ONLY (never mention anything else):
 - Roofing, insulation, windows
 
 If caller asks about solar or any disallowed service:
-Say exactly: "We don't handle solar services, but I can help with HVAC, generators, or maintenance if that helps."
+Say exactly: "We don't handle solar services, but I can help with HVAC, generators, our Energy Efficiency Program, or maintenance if that helps."
 
 If caller asks about electrical or plumbing:
-Say exactly: "We specialize in HVAC and generators. For [electrical/plumbing], you'd need a [electrician/plumber]."
+Say exactly: "We specialize in HVAC, generators, and our Energy Efficiency Program. For [electrical/plumbing], you'd need a [electrician/plumber]."
 
 === INTENT CLASSIFICATION ===
 Classify calls into ONLY these categories:
 - hvac_service: Service calls, repairs, maintenance, no heat, no cooling
 - hvac_installation_or_upgrade: New installations, replacements, upgrades
 - generator: Generator service, installation, or sales
+- energy_efficiency_program: Caller is interested in the Energy Efficiency Program
 - membership: Home Comfort Plans, maintenance memberships
 - existing_project: Following up on current RSE work
 - other_out_of_scope: Solar, electrical, plumbing, or anything not listed above
@@ -505,7 +524,7 @@ Then ask: "Is all of that correct?"
 If smoke, gas smell, sparks, or total shutdown mentioned:
 Say: "Please hang up and call 911 or your utility provider right away."
 
-Remember: RSE = HVAC + Generators ONLY. Never solar. Never invent services.`;
+Remember: RSE = HVAC + Generators + Energy Efficiency Program. Never solar. Never invent services.`;
 
 // ============================================================================
 // EXPORTS

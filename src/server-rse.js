@@ -161,8 +161,10 @@ wss.on("connection", (twilioWs, req) => {
   let hallucinationCount = 0;  // Track consecutive hallucinations for same prompt
   let lastHallucinationPrompt = null;  // Track which prompt is hallucinating
   const TTS_FAILURE_TIMEOUT_MS = 8000;  // 8 seconds - if no audio for this long, consider it failed
-  const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before transferring to human
+  const MAX_RETRIES_PER_PROMPT = 2;  // Max retries before offering transfer for communication failures
   const MAX_HALLUCINATION_RETRIES = 3;  // Max hallucination retries before skipping to next state
+  const TRANSFER_OFFER_PROMPT = "I'm sorry, it sounds like we're having a communication issue. I can transfer you to a live agent if you'd like. Would you like me to transfer you now?";
+  let transferOfferPending = false;
   const GOODBYE_BUFFER_MS = 4000;
   const EMERGENCY_DISCONNECT_MS = 0; // Emergency redirect: hang up immediately after playback drains
   const CLOSING_FAILSAFE_MS = 15000;  // If closing state active longer than 15s, force hangup (goodbye ~8s audio + 4s buffer)
@@ -1022,8 +1024,8 @@ wss.on("connection", (twilioWs, req) => {
             const maxRetries = (promptKey === SAFETY.check) ? 1 : MAX_RETRIES_PER_PROMPT;
             
             if (retryCount >= maxRetries) {
-              console.error(`🚨 NO AUDIO GENERATED ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
-              transferToRealPerson();
+              console.error(`🚨 NO AUDIO GENERATED ${retryCount + 1} TIMES - OFFERING LIVE AGENT TRANSFER`);
+              offerTransferForCommunicationIssue('no_audio_retries_exceeded');
               responseInProgress = false;
               tts_active = false;
               currentPromptText = null;
@@ -1182,8 +1184,8 @@ wss.on("connection", (twilioWs, req) => {
             const maxRetries = (promptKey === SAFETY.check) ? 1 : MAX_RETRIES_PER_PROMPT;
             
             if (retryCount >= maxRetries) {
-              console.error(`🚨 INCOMPLETE RESPONSE ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
-              transferToRealPerson();
+              console.error(`🚨 INCOMPLETE RESPONSE ${retryCount + 1} TIMES - OFFERING LIVE AGENT TRANSFER`);
+              offerTransferForCommunicationIssue('incomplete_response_retries_exceeded');
               responseInProgress = false;
               tts_active = false;
               audioStreamingStarted = false;
@@ -1780,7 +1782,7 @@ Say the ENTIRE sentence above, word for word.`,
         });
       }
       
-      // Check retry count; safety question: 1 retry (apology + full question), then transfer
+      // Check retry count; safety question: 1 retry (apology + full question), then offer transfer
       let promptKey = currentPromptText || 'unknown';
       if (currentPromptText === SAFETY.check || (typeof currentPromptText === 'string' && currentPromptText.startsWith(CONFIRMATION.safety_retry))) {
         promptKey = SAFETY.check;
@@ -1789,8 +1791,8 @@ Say the ENTIRE sentence above, word for word.`,
       const maxRetries = (promptKey === SAFETY.check) ? 1 : MAX_RETRIES_PER_PROMPT;
       
       if (retryCount >= maxRetries) {
-        console.error(`🚨 TTS FAILED ${retryCount + 1} TIMES - TRANSFERRING TO REAL PERSON`);
-        transferToRealPerson();
+        console.error(`🚨 TTS FAILED ${retryCount + 1} TIMES - OFFERING LIVE AGENT TRANSFER`);
+        offerTransferForCommunicationIssue('tts_failure_retries_exceeded');
         return;
       }
       
@@ -2107,12 +2109,51 @@ STRICT RULES:
     }
   }
   
+  function isYesResponse(text) {
+    return /\b(yes|yeah|yep|please do|do it|sure|okay|ok|go ahead|that works|transfer me)\b/i.test(text);
+  }
+  
+  function isNoResponse(text) {
+    return /\b(no|nope|nah|not now|don't|do not|keep going|continue|that's okay|thats okay)\b/i.test(text);
+  }
+  
+  function offerTransferForCommunicationIssue(reason) {
+    if (transferRequested || _callCompleted) return;
+    if (transferOfferPending) {
+      console.log(`⚠️ Transfer offer already pending (reason=${reason})`);
+      return;
+    }
+    transferOfferPending = true;
+    console.warn(`⚠️ Offering live-agent transfer due to communication issue: ${reason}`);
+    sendStatePrompt(TRANSFER_OFFER_PROMPT);
+  }
+  
   function doProcessUserInput(transcript) {
     const currentState = stateMachine.getState();
     const lowerTranscript = transcript.toLowerCase().trim();
     const currentData = stateMachine.getData();
     
     console.log(`🔄 Processing input in state ${currentState}: "${transcript.substring(0, 50)}..."`);
+    
+    // Transfer offers for communication failures are opt-in only.
+    if (transferOfferPending) {
+      if (isYesResponse(lowerTranscript)) {
+        console.log("✅ Caller accepted live-agent transfer offer");
+        transferOfferPending = false;
+        transferToRealPerson();
+        return;
+      }
+      if (isNoResponse(lowerTranscript)) {
+        console.log("↩️ Caller declined live-agent transfer offer, continuing intake");
+        transferOfferPending = false;
+        const promptToResume = stateMachine.getNextPrompt();
+        if (promptToResume) sendStatePrompt(promptToResume);
+        return;
+      }
+      console.log("❓ Transfer offer pending but response was unclear - re-asking");
+      sendStatePrompt(TRANSFER_OFFER_PROMPT);
+      return;
+    }
     
     // CRITICAL: Check for real person request FIRST - stop AI flow immediately
     if (detectRealPersonRequest(transcript)) {
@@ -2317,8 +2358,10 @@ Sound polite and helpful, not dismissive.`,
       return INTENT_TYPES.OUT_OF_SCOPE;
     }
     
-    // Energy audit only allowed if HVAC-related
-    if (/\b(energy audit)\b/.test(text) && !/\b(hvac|heating|cooling)\b/.test(text)) {
+    // Energy audit only allowed if HVAC-related or when clearly referring to the Energy Efficiency Program.
+    if (/\b(energy audit)\b/.test(text) &&
+        !/\b(hvac|heating|cooling)\b/.test(text) &&
+        !/\b(energy efficiency|efficiency program|energy savings program|save energy program)\b/.test(text)) {
       console.log('⚠️ Detected disallowed service: ENERGY AUDIT');
       return INTENT_TYPES.OUT_OF_SCOPE;
     }
@@ -2326,6 +2369,11 @@ Sound polite and helpful, not dismissive.`,
     // ============================================================
     // ALLOWED SERVICES - Order matters! Check installation FIRST
     // ============================================================
+    
+    // Energy Efficiency Program interest
+    if (/\b(energy efficiency|efficiency program|energy savings program|save energy program)\b/.test(text)) {
+      return INTENT_TYPES.ENERGY_EFFICIENCY;
+    }
     
     // Generator keywords - check for NEW vs SERVICE
     if (hasGeneratorLikeToken || /\b(generac|cummins|backup power|standby|whole house power)\b/.test(text)) {
@@ -2467,11 +2515,12 @@ STRICT RULES:
 - Say ONLY the text above, nothing else
 - DO NOT add commentary or continue beyond this prompt
 - DO NOT mention technicians, appointments, or scheduling
+- DO NOT offer transfer or mention live agents unless the caller explicitly asked
 - DO NOT say "I'll have someone reach out" or "confirm an appointment"
 - After saying the text, STOP. The call is complete.
 - No additional sentences, no follow-ups.
 
-FORBIDDEN: technician, tech, schedule, appointment, next week, confirm
+FORBIDDEN: technician, tech, schedule, appointment, next week, confirm, transfer, live agent, real person
 
 DO NOT DEVIATE FROM THE SCRIPT.`;
       maxTokens = 300;
@@ -2537,7 +2586,7 @@ You are a script-reading robot. Read the script. Stop.`;
     // STRICT COLLECTION ORDER - the AI must follow this exactly
     const collectionOrder = `
 STRICT INTAKE ORDER - YOU MUST FOLLOW THIS:
-1. Understand what they need (HVAC service, installation, generator, membership, existing project)
+1. Understand what they need (HVAC service, installation, generator, energy efficiency program, membership, existing project)
 2. If it's a service issue: Ask about safety first (smoke, gas smell, sparks?)
 3. Ask for first AND last name
 4. Ask for phone number
@@ -2571,11 +2620,12 @@ You are an intake receptionist. Figure out what they need.
 ALLOWED SERVICES ONLY:
 - HVAC (heating, AC, service, maintenance, installation, upgrades)
 - Generators (service, maintenance, installation)
+- Energy Efficiency Program (interest intake only)
 - Memberships (Home Comfort Plans)
 - Existing projects
 
 If they mention something else (solar, electrical, plumbing), say:
-"We specialize in HVAC and generators. I can help with that if you need."
+"We specialize in HVAC, generators, and the Energy Efficiency Program. I can help with that if you need."
 
 Respond with:
 1. Brief acknowledgement (one short sentence)
