@@ -2273,6 +2273,25 @@ Sound polite and helpful, not dismissive.`,
   // INTENT CLASSIFICATION
   // ============================================================================
   function classifyIntent(text) {
+    // Normalize ASR artifacts so accented pronunciations still classify correctly.
+    // Example: "geneartor"/"genarator"/"generater" should map to generator intent.
+    const words = String(text || '')
+      .toLowerCase()
+      .split(/\s+/)
+      .map(w => w.replace(/[^a-z]/g, ''))
+      .filter(Boolean);
+
+    const hasGeneratorLikeToken = words.some(w =>
+      w === 'generator' ||
+      w === 'generators' ||
+      w.startsWith('generat') || // generater, generaters, generateor
+      w.startsWith('genarat') || // genarator, genarators
+      w.startsWith('geneart') || // geneartor, geneartors
+      w.startsWith('genrator') || // dropped vowel variants
+      w.startsWith('jennerator') || // common phonetic ASR variant
+      w.startsWith('generators') // defensive typo variant
+    );
+
     // ============================================================
     // DISALLOWED SERVICES - Check first and reject
     // ============================================================
@@ -2282,7 +2301,7 @@ Sound polite and helpful, not dismissive.`,
     }
     
     if (/\b(electrical|electrician|wiring|outlet|circuit|breaker|panel upgrade)\b/.test(text) && 
-        !/\b(generator|hvac|furnace|ac|air condition)\b/.test(text)) {
+        !(hasGeneratorLikeToken || /\b(hvac|furnace|ac|air condition)\b/.test(text))) {
       console.log('⚠️ Detected disallowed service: ELECTRICAL');
       return INTENT_TYPES.OUT_OF_SCOPE;
     }
@@ -2309,7 +2328,7 @@ Sound polite and helpful, not dismissive.`,
     // ============================================================
     
     // Generator keywords - check for NEW vs SERVICE
-    if (/\b(generator|generac|cummins|backup power|standby|whole house power)\b/.test(text)) {
+    if (hasGeneratorLikeToken || /\b(generac|cummins|backup power|standby|whole house power)\b/.test(text)) {
       // Check if it's for a NEW generator (installation, not service)
       const isNewGenerator = /\b(new|install|installation|buy|purchase|looking for|interested in|want to get|quote|estimate|price|cost)\b/.test(text);
       if (isNewGenerator) {
