@@ -12,7 +12,7 @@ const sgMail = require('@sendgrid/mail');
 // CONFIGURATION (from environment variables only)
 // ============================================================================
 const EMAIL_FROM = process.env.EMAIL_FROM;
-const EMAIL_TO   = process.env.EMAIL_TO;
+const EMAIL_TO_RAW = process.env.EMAIL_TO;
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 
 const NP = 'Not Provided';
@@ -26,6 +26,15 @@ function v(value) {
     return NP;
   }
   return String(value).trim();
+}
+
+function parseRecipientList(rawValue) {
+  if (!rawValue) return [];
+  const parts = String(rawValue)
+    .split(/[,\n;]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return [...new Set(parts)];
 }
 
 function formatDateTime(date) {
@@ -149,14 +158,16 @@ function buildEmailBody(callData, metadata) {
 async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
   console.log("📧 sendCallSummaryEmail invoked");
   try {
+    const emailRecipients = parseRecipientList(EMAIL_TO_RAW);
+
     if (!SENDGRID_API_KEY) {
       console.warn('⚠️  Email sending disabled (missing SENDGRID_API_KEY)');
       return { success: false, skipped: true, reason: 'missing_credentials' };
     }
 
-    if (!EMAIL_FROM || !EMAIL_TO) {
+    if (!EMAIL_FROM || emailRecipients.length === 0) {
       console.warn('⚠️  Email sending disabled (missing EMAIL_FROM or EMAIL_TO)');
-      console.warn(`   EMAIL_FROM=${EMAIL_FROM ? 'set' : 'MISSING'}, EMAIL_TO=${EMAIL_TO ? 'set' : 'MISSING'}`);
+      console.warn(`   EMAIL_FROM=${EMAIL_FROM ? 'set' : 'MISSING'}, EMAIL_TO=${emailRecipients.length > 0 ? 'set' : 'MISSING'}`);
       return { success: false, skipped: true, reason: 'missing_from_or_to' };
     }
 
@@ -172,11 +183,11 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
     const text = buildEmailBody(callData, metadata);
 
     sgMail.setApiKey(SENDGRID_API_KEY);
-    console.log(`📧 Sending email to ${EMAIL_TO} via SendGrid HTTP API...`);
+    console.log(`📧 Sending email to ${emailRecipients.join(', ')} via SendGrid HTTP API...`);
 
     const mailOptions = {
       from: EMAIL_FROM,
-      to: EMAIL_TO,
+      to: emailRecipients.length === 1 ? emailRecipients[0] : emailRecipients,
       subject,
       text,
     };
