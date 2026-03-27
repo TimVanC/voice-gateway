@@ -14,6 +14,7 @@ const sgMail = require('@sendgrid/mail');
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_TO_RAW = process.env.EMAIL_TO;
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+const MAX_EMAIL_RECIPIENTS = 4;
 
 const NP = 'Not Provided';
 
@@ -34,7 +35,12 @@ function parseRecipientList(rawValue) {
     .split(/[,\n;]+/)
     .map((p) => p.trim())
     .filter(Boolean);
-  return [...new Set(parts)];
+  const unique = [...new Set(parts)];
+  if (unique.length > MAX_EMAIL_RECIPIENTS) {
+    console.warn(`⚠️  EMAIL_TO has ${unique.length} recipients; only first ${MAX_EMAIL_RECIPIENTS} will be used.`);
+    return unique.slice(0, MAX_EMAIL_RECIPIENTS);
+  }
+  return unique;
 }
 
 function formatDateTime(date) {
