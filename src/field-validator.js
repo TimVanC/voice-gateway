@@ -1,6 +1,31 @@
 // field-validator.js - Confidence checking and verification for call intake fields
 
-const CONFIDENCE_THRESHOLD = 0.40;  // Lowered for demo - less aggressive validation
+const DEFAULT_CONFIDENCE_THRESHOLD = 0.40;
+const FIELD_CONFIDENCE_THRESHOLDS = {
+  email: 0.60,
+  phone: 0.55,
+  first_name: 0.50,
+  last_name: 0.50,
+  issue_description: 0.35
+};
+
+function getFieldThreshold(fieldName) {
+  return FIELD_CONFIDENCE_THRESHOLDS[fieldName] ?? DEFAULT_CONFIDENCE_THRESHOLD;
+}
+
+function formatEmailForSpeech(email) {
+  return String(email || '')
+    .toLowerCase()
+    .trim()
+    .replace(/@/g, ' at ')
+    .replace(/\./g, ' dot ');
+}
+
+function formatPhoneForSpeech(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (!digits) return String(phone || '');
+  return digits.split('').join(' ');
+}
 
 // Validation helpers
 function isValidEmail(email) {
@@ -45,21 +70,34 @@ function hasUnlikelyNameCharacters(name) {
 
 // Verification prompt templates - FIRST ask to repeat, THEN ask to spell
 const VERIFY_PROMPTS = {
-  first_name: (transcript, attemptCount) => {
-    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat your first name?`;
-    return `Thanks. Could you spell your first name for me, slowly?`;
+  first_name: (transcript, attemptCount, reason) => {
+    if (reason !== 'poor_audio') {
+      return `Just to confirm, your first name is ${transcript}?`;
+    }
+    if (attemptCount === 0) return `Sorry, the audio was unclear. Could you repeat your first name slowly?`;
+    return `Thanks. Please repeat your first name one more time, slowly.`;
   },
-  last_name: (transcript, attemptCount) => {
-    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat your last name?`;
-    return `Thanks. Could you spell your last name for me, slowly?`;
+  last_name: (transcript, attemptCount, reason) => {
+    if (reason !== 'poor_audio') {
+      return `Just to confirm, your last name is ${transcript}?`;
+    }
+    if (attemptCount === 0) return `Sorry, the audio was unclear. Could you repeat your last name slowly?`;
+    return `Thanks. Please repeat your last name one more time, slowly.`;
   },
-  email: (transcript, attemptCount) => {
-    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat your email?`;
-    return `Thanks. Could you spell that email for me, slowly?`;
+  email: (transcript, attemptCount, reason) => {
+    if (reason === 'poor_audio') {
+      if (attemptCount === 0) return `Sorry, the audio was unclear. Could you repeat your email slowly, like tim at example dot com?`;
+      return `Let's try once more slowly. Please say your email one part at a time.`;
+    }
+    const spoken = formatEmailForSpeech(transcript);
+    return `Just to confirm, that's ${spoken}?`;
   },
-  phone: (transcript, attemptCount) => {
-    if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat your phone number?`;
-    return `Thanks. Could you say your phone number slowly, one digit at a time?`;
+  phone: (transcript, attemptCount, reason) => {
+    if (reason === 'poor_audio') {
+      if (attemptCount === 0) return `Sorry, the audio was unclear. Could you repeat your phone number slowly, one digit at a time?`;
+      return `Let's try once more slowly. Please say your phone number digit by digit.`;
+    }
+    return `Just to confirm, that's ${formatPhoneForSpeech(transcript)}?`;
   },
   street: (transcript, attemptCount) => {
     if (attemptCount === 0) return `Sorry, I didn't catch that. Could you repeat that address?`;
@@ -109,7 +147,7 @@ class FieldValidator {
    * @param {number} confidence - Confidence score (0-1)
    * @returns {Object} - { needsVerify: boolean, prompt: string|null, shouldHalt: boolean }
    */
-  captureField(fieldName, transcript, confidence) {
+  captureField(fieldName, transcript, confidence, options = {}) {
     // Check if already verified AND has valid data (skip re-verification)
     if (this.fields[fieldName]?.verified && this.fields[fieldName]?.final_value) {
       console.log(`⏭️  Field '${fieldName}' already verified with value, skipping`);
@@ -135,7 +173,8 @@ class FieldValidator {
     }
 
     // Confidence check
-    const lowConfidence = confidence <= CONFIDENCE_THRESHOLD;
+    const threshold = getFieldThreshold(fieldName);
+    const lowConfidence = confidence < threshold;
     const needsVerify = lowConfidence || needsFormatFix;
 
     if (needsVerify) {
@@ -150,7 +189,8 @@ class FieldValidator {
       };
 
       // Log verification event
-      const reason = formatReason || 'low_confidence';
+      const poorAudio = Boolean(options.qualityPoor) || confidence < DEFAULT_CONFIDENCE_THRESHOLD;
+      const reason = formatReason || (poorAudio ? 'poor_audio' : 'low_confidence');
       
       // Track attempts for this field
       if (!this.verificationAttempts[fieldName]) {
@@ -159,7 +199,7 @@ class FieldValidator {
       const attemptCount = this.verificationAttempts[fieldName];
       
       const prompt = VERIFY_PROMPTS[fieldName] 
-        ? VERIFY_PROMPTS[fieldName](transcript, attemptCount)
+        ? VERIFY_PROMPTS[fieldName](transcript, attemptCount, reason)
         : `Could you please confirm: "${transcript}"?`;
       
       // Increment attempt count for next time
@@ -178,7 +218,8 @@ class FieldValidator {
         fieldName,
         originalTranscript: transcript,
         confidence,
-        reason
+        reason,
+        threshold
       };
 
       return { needsVerify: true, prompt, shouldHalt: true };
@@ -291,7 +332,7 @@ class FieldValidator {
       if (!isValidEmail(normalizedValue)) {
         // Check attempt count - give up after 3 attempts (reduced from 5)
         const attempts = this.verificationAttempts[fieldName] || 0;
-        if (attempts >= 3) {
+        if (attempts >= 2) {
           console.log(`⚠️  Too many verification attempts (${attempts}), accepting raw value and continuing`);
           // Accept the original spoken value (best we have)
           this.saveField(fieldName, originalTranscript, verifiedValue, 0.5, true);
@@ -299,6 +340,7 @@ class FieldValidator {
           return { success: true, normalizedValue: verifiedValue, prompt: null };
         }
         
+        this.verificationAttempts[fieldName] = attempts + 1;
         return {
           success: false,
           normalizedValue: null,
@@ -315,13 +357,14 @@ class FieldValidator {
       if (!isValidPhone(normalizedValue)) {
         // Check attempt count - give up after 5 attempts
         const attempts = this.verificationAttempts[fieldName] || 0;
-        if (attempts >= 5) {
+        if (attempts >= 2) {
           console.log(`⚠️  Too many verification attempts (${attempts}), accepting as-is`);
           this.saveField(fieldName, originalTranscript, verifiedValue, 0.5, true);
           this.awaitingVerification = null;
           return { success: true, normalizedValue: verifiedValue, prompt: null };
         }
         
+        this.verificationAttempts[fieldName] = attempts + 1;
         return {
           success: false,
           normalizedValue: null,
@@ -449,7 +492,9 @@ module.exports = {
   isValidPhone,
   normalizePhone,
   normalizeEmail,
-  CONFIDENCE_THRESHOLD,
+  CONFIDENCE_THRESHOLD: DEFAULT_CONFIDENCE_THRESHOLD,
+  FIELD_CONFIDENCE_THRESHOLDS,
+  getFieldThreshold,
   PERSONAL_INFO_FIELDS,
   PROBLEM_CONTEXT_FIELDS
 };

@@ -5,11 +5,19 @@ const { WebSocketServer } = require("ws");
 const WebSocket = require("ws");
 const bodyParser = require("body-parser");
 const twilio = require("twilio");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const ffmpeg = require("fluent-ffmpeg");
+const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
+const { Readable } = require("stream");
 const { pcm16ToMuLaw, muLawToPcm16, pcm16leBufferToInt16, int16ToPcm16leBuffer } = require("./g711");
 const { downsampleTo8k, upsample8kTo24k } = require("./resample");
-const { FieldValidator } = require("./field-validator");
+const { FieldValidator, getFieldThreshold } = require("./field-validator");
 const { estimateConfidence, inferFieldContext } = require("./confidence-estimator");
 const { BASE_URL, isProd } = require("./config/baseUrl");
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -100,6 +108,11 @@ wss.on("connection", async (twilioWs, req) => {
   
   // Field validation and verification
   const fieldValidator = new FieldValidator();
+  let currentIntakeState = "greeting";
+  let allowCurrentResponseAudio = null;
+  let sessionOutputFormat = "g711_ulaw";
+  let pendingMulawAudioChunks = [];
+  let pendingEncodedAudioChunks = [];
   
   // Playback state for pacing
   let playBuffer = Buffer.alloc(0);
@@ -115,6 +128,199 @@ wss.on("connection", async (twilioWs, req) => {
   let audioFrameCount = 0;
   let speechFrameCount = 0;  // Track how long user has been speaking
   let silentFramesSinceLastSpeech = 0;  // Track total silence after last speech
+
+  function sendConversationText(role, text) {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN || !text) return;
+    const contentType = role === "user" ? "input_text" : "text";
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role,
+        content: [{ type: contentType, text }]
+      }
+    }));
+  }
+
+  function getFieldLabel(fieldName) {
+    const labels = {
+      first_name: "first name",
+      last_name: "last name",
+      name: "name",
+      phone: "phone number",
+      email: "email",
+      street: "street address",
+      city: "city",
+      state: "state",
+      zip: "zip code",
+      issue_description: "issue description"
+    };
+    return labels[fieldName] || fieldName || "field";
+  }
+
+  function formatEmailForSpeech(email) {
+    return String(email || "")
+      .toLowerCase()
+      .replace(/@/g, " at ")
+      .replace(/\./g, " dot ");
+  }
+
+  function formatPhoneForSpeech(phone) {
+    const digits = String(phone || "").replace(/\D/g, "");
+    return digits ? digits.split("").join(" ") : String(phone || "");
+  }
+
+  function buildVerificationAcknowledgment(fieldName, value) {
+    const safeValue = String(value || "").trim();
+    switch (fieldName) {
+      case "email":
+        return `Got it, I have your email as ${formatEmailForSpeech(safeValue)}.`;
+      case "phone":
+        return `Got it, I have your phone number as ${formatPhoneForSpeech(safeValue)}.`;
+      case "first_name":
+        return `Got it, I have your first name as ${safeValue}.`;
+      case "last_name":
+        return `Got it, I have your last name as ${safeValue}.`;
+      default:
+        return `Got it, I have your ${getFieldLabel(fieldName)} as ${safeValue}.`;
+    }
+  }
+
+  function inferIntakeStateFromAssistantText(text) {
+    const lowered = String(text || "").toLowerCase();
+    if (!lowered) return currentIntakeState;
+    if (/thanks for calling|how can i help/.test(lowered)) return "greeting";
+    if (/here'?s what i have|does that sound right|is that right/.test(lowered)) return "recap";
+    if (/have a great day|goodbye/.test(lowered)) return "closing";
+    if (/full name|first and last name|your name/.test(lowered)) return "collecting_name";
+    if (/issue today|what seems to be the issue|problem today|what's going on/.test(lowered)) return "collecting_issue";
+    if (/availability|what time works|best time|time window/.test(lowered)) return "collecting_availability";
+    return currentIntakeState;
+  }
+
+  function isShortDeclarativeResponse(text) {
+    const candidate = String(text || "").trim();
+    if (!candidate) return false;
+    if (candidate.includes("?")) return false;
+    const words = candidate.split(/\s+/).filter(Boolean);
+    return words.length >= 2 && words.length <= 28 && candidate.length <= 180 && /[a-z]/i.test(candidate);
+  }
+
+  function isDomainRelevantOutput(text) {
+    const candidate = String(text || "").trim();
+    if (!candidate) return false;
+    const lowered = candidate.toLowerCase();
+    const strictStates = new Set(["greeting", "recap", "closing"]);
+    const declarativeAllowStates = new Set(["collecting_name", "collecting_issue", "collecting_availability"]);
+    const closing = /\b(thanks for calling|thank you for calling|have a great day|goodbye|anything else)\b/;
+    const contact = /\b(name|phone|number|email|address|contact|reach|spell|digit)\b|@/;
+    const issue = /\b(issue|problem|service|repair|hvac|heating|cooling|system|gas|smoke|urgent|danger)\b/;
+    const scheduling = /\b(schedule|scheduling|appointment|dispatcher|visit|availability|time window)\b/;
+    const capturedValues = fieldValidator
+      .getAllFields()
+      .map((field) => String(field.final_value || "").toLowerCase().trim())
+      .filter((value) => value.length >= 3);
+    const mentionsCapturedValue = capturedValues.some((value) => lowered.includes(value));
+    const keywordMatch = closing.test(lowered) || contact.test(lowered) || issue.test(lowered) || scheduling.test(lowered) || mentionsCapturedValue;
+    if (keywordMatch) return true;
+    if (!strictStates.has(currentIntakeState) && declarativeAllowStates.has(currentIntakeState) && isShortDeclarativeResponse(candidate)) {
+      return true;
+    }
+    return false;
+  }
+
+  function startModelResponse(modalities = ["audio", "text"], instructions) {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    activeResponseInProgress = true;
+    allowCurrentResponseAudio = null;
+    pendingMulawAudioChunks = [];
+    pendingEncodedAudioChunks = [];
+    const response = { modalities };
+    if (instructions) response.instructions = instructions;
+    openaiWs.send(JSON.stringify({ type: "response.create", response }));
+  }
+
+  function triggerNextQuestionAfterVerification(fieldName, normalizedValue) {
+    const assistantAck = buildVerificationAcknowledgment(fieldName, normalizedValue);
+    sendConversationText("user", normalizedValue);
+    sendConversationText("assistant", assistantAck);
+    currentIntakeState = inferIntakeStateFromAssistantText(assistantAck);
+    startModelResponse(
+      ["audio", "text"],
+      `The caller's ${getFieldLabel(fieldName)} is verified as "${normalizedValue}" and already acknowledged as: "${assistantAck}".
+Ask only the next intake question. Do not ask for this ${getFieldLabel(fieldName)} again.`
+    );
+  }
+
+  async function detectMp3SampleRate(mp3Buffer) {
+    const tempFilePath = path.join(os.tmpdir(), `voice-gateway-rt-${Date.now()}-${Math.random().toString(16).slice(2)}.mp3`);
+    try {
+      await fs.writeFile(tempFilePath, mp3Buffer);
+      const metadata = await new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(tempFilePath, (err, data) => {
+          if (err) return reject(err);
+          resolve(data);
+        });
+      });
+      const audioStream = (metadata.streams || []).find((stream) => stream.codec_type === "audio");
+      const parsedRate = Number(audioStream?.sample_rate);
+      return Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : 22050;
+    } finally {
+      await fs.unlink(tempFilePath).catch(() => {});
+    }
+  }
+
+  async function decodeCompressedToPcm16(audioBuffer) {
+    const compressedStream = Readable.from(audioBuffer);
+    return new Promise((resolve, reject) => {
+      const pcmChunks = [];
+      ffmpeg(compressedStream)
+        .audioCodec("pcm_s16le")
+        .audioChannels(1)
+        .format("s16le")
+        .on("error", (err) => reject(err))
+        .on("end", () => resolve(Buffer.concat(pcmChunks)))
+        .pipe()
+        .on("data", (chunk) => pcmChunks.push(chunk))
+        .on("error", (err) => reject(err));
+    });
+  }
+
+  async function normalizeAudioChunkToMulaw(chunkBuffer) {
+    if (sessionOutputFormat === "g711_ulaw") {
+      return chunkBuffer;
+    }
+    if (sessionOutputFormat === "pcm16") {
+      const pcmInt16 = pcm16leBufferToInt16(chunkBuffer);
+      const downsampled = downsampleTo8k(pcmInt16, realtimeOutputRate || 24000);
+      return pcm16ToMuLaw(downsampled);
+    }
+    // Defensive fallback: detect sample rate for compressed payloads and downsample.
+    const detectedRate = await detectMp3SampleRate(chunkBuffer);
+    const pcm16 = await decodeCompressedToPcm16(chunkBuffer);
+    const pcmInt16 = pcm16leBufferToInt16(pcm16);
+    const downsampled = downsampleTo8k(pcmInt16, detectedRate);
+    return pcm16ToMuLaw(downsampled);
+  }
+
+  async function flushPendingAudioIfAllowed() {
+    if (allowCurrentResponseAudio !== true) return;
+    if (pendingEncodedAudioChunks.length > 0) {
+      const encodedBuffer = Buffer.concat(pendingEncodedAudioChunks);
+      try {
+        const mulawBuffer = await normalizeAudioChunkToMulaw(encodedBuffer);
+        pendingMulawAudioChunks.push(mulawBuffer);
+      } catch (err) {
+        console.error("❌ Failed to normalize encoded model audio:", err.message);
+      } finally {
+        pendingEncodedAudioChunks = [];
+      }
+    }
+    if (pendingMulawAudioChunks.length > 0) {
+      playBuffer = Buffer.concat([playBuffer, ...pendingMulawAudioChunks]);
+      pendingMulawAudioChunks = [];
+    }
+  }
   
   // Connect to OpenAI Realtime API
   try {
@@ -222,20 +428,21 @@ Then immediately confirm: "That's [Address]. Correct?"
       return Math.sqrt(sum / samples.length);
     }
     
-    // Handle audio deltas - OpenAI sends μ-law directly, just pace it!
-    function handleRealtimeDelta(b64Mulaw) {
-      const mulawBuf = Buffer.from(b64Mulaw, 'base64');  // Already μ-law at 8kHz!
+    // Handle audio deltas. Buffer until text relevance decision is made.
+    function handleRealtimeDelta(base64Audio) {
+      const audioBuf = Buffer.from(base64Audio, "base64");
       
       // Log first 10 deltas
       if (deltaCount < 10) {
         deltaCount++;
-        console.log(`🔊 Delta ${deltaCount}: ${mulawBuf.length} bytes μ-law (8kHz)`);
+        console.log(`🔊 Delta ${deltaCount}: ${audioBuf.length} bytes format=${sessionOutputFormat}`);
       }
-      
-      // Queue for Twilio pacing (160 bytes per 20 ms)
-      playBuffer = Buffer.concat([playBuffer, mulawBuf]);
-      
-      // Pacing is always running, no need to start it here
+
+      if (sessionOutputFormat === "g711_ulaw") {
+        pendingMulawAudioChunks.push(audioBuf);
+      } else {
+        pendingEncodedAudioChunks.push(audioBuf);
+      }
     }
     
     function pumpFrames() {
@@ -294,6 +501,12 @@ Then immediately confirm: "That's [Address]. Correct?"
         const event = JSON.parse(data.toString());
         
         switch (event.type) {
+          case "response.created":
+            allowCurrentResponseAudio = null;
+            pendingMulawAudioChunks = [];
+            pendingEncodedAudioChunks = [];
+            break;
+
           case "session.created":
             console.log("🎯 OpenAI session created:", event.session.id);
             break;
@@ -302,35 +515,28 @@ Then immediately confirm: "That's [Address]. Correct?"
             // Extract the actual sample rate from session confirmation
             const inRate = event.session?.input_audio_format?.sample_rate_hz;
             const outRate = event.session?.output_audio_format?.sample_rate_hz;
+            const outFormat = typeof event.session?.output_audio_format === "string"
+              ? event.session.output_audio_format
+              : event.session?.output_audio_format?.format || sessionOutputFormat;
             console.log("✅ Session updated with manual VAD - formats:", 
-              `input=${inRate}Hz`, `output=${outRate}Hz`);
+              `input=${inRate}Hz`, `output=${outRate}Hz`, `format=${outFormat}`);
             
             if (outRate) realtimeOutputRate = outRate;
+            if (outFormat) sessionOutputFormat = outFormat;
             sessionReady = true;
             
             // Send greeting manually with manual trigger
             setTimeout(() => {
               if (openaiWs.readyState === WebSocket.OPEN) {
                 const greeting = "Thanks for calling RSE Energy. This is Zelda. How can I help today?";
+                lastAIResponse = greeting;
+                currentIntakeState = inferIntakeStateFromAssistantText(greeting);
                 
                 // Add greeting to conversation history
-                openaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "assistant",
-                    content: [{ type: "text", text: greeting }]
-                  }
-                }));
+                sendConversationText("assistant", greeting);
                 
                 // Trigger audio generation
-                openaiWs.send(JSON.stringify({
-                  type: "response.create",
-                  response: {
-                    modalities: ["audio"],
-                    instructions: `Say exactly: "${greeting}"`
-                  }
-                }));
+                startModelResponse(["audio"], `Say exactly: "${greeting}"`);
                 console.log("👋 Sent initial greeting");
               }
             }, 250);
@@ -341,7 +547,6 @@ Then immediately confirm: "That's [Address]. Correct?"
             break;
             
           case "response.audio.delta":
-            // FIX 2 & 4: Stream audio with proper pacing
             if (event.delta) {
               const deltaSize = Buffer.from(event.delta, 'base64').length;
               console.log(`🔊 Received audio delta: ${deltaSize} bytes (base64 decoded)`);
@@ -351,6 +556,17 @@ Then immediately confirm: "That's [Address]. Correct?"
             
           case "response.audio.done":
             console.log("✅ Audio response complete");
+            if (allowCurrentResponseAudio === true) {
+              flushPendingAudioIfAllowed().catch((err) => {
+                console.error("❌ Failed to flush pending audio:", err.message);
+              });
+            } else if (allowCurrentResponseAudio === false) {
+              pendingMulawAudioChunks = [];
+              pendingEncodedAudioChunks = [];
+              if (twilioWs.readyState === WebSocket.OPEN) {
+                twilioWs.send(JSON.stringify({ event: "clear", streamSid }));
+              }
+            }
             // Send mark to Twilio
             if (twilioWs.readyState === WebSocket.OPEN) {
               twilioWs.send(JSON.stringify({
@@ -372,6 +588,18 @@ Then immediately confirm: "That's [Address]. Correct?"
             if (event.text) {
               console.log("\n📝 AI said:", event.text);
               lastAIResponse = event.text;  // Track for context inference
+              currentIntakeState = inferIntakeStateFromAssistantText(event.text);
+              if (isDomainRelevantOutput(event.text)) {
+                allowCurrentResponseAudio = true;
+                flushPendingAudioIfAllowed().catch((err) => {
+                  console.error("❌ Failed to flush domain-approved audio:", err.message);
+                });
+              } else {
+                allowCurrentResponseAudio = false;
+                pendingMulawAudioChunks = [];
+                pendingEncodedAudioChunks = [];
+                console.warn(`🚫 Discarded off-domain model output: "${event.text}"`);
+              }
             }
             break;
             
@@ -401,46 +629,26 @@ Then immediately confirm: "That's [Address]. Correct?"
             if (awaitingVerification) {
               console.log(`📝 Processing as verification response`);
               
+              const verificationContext = fieldValidator.getCurrentVerification();
               const verification = fieldValidator.handleVerificationResponse(transcript);
               
               if (verification.success) {
                 console.log(`✅ Verified: ${verification.normalizedValue}`);
                 awaitingVerification = false;
                 
-                // Inject verified value into conversation and trigger response
+                // Inject verified user value + assistant acknowledgment, then ask next question.
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [{ type: "input_text", text: verification.normalizedValue }]
-                    }
-                  }));
-                  openaiWs.send(JSON.stringify({ 
-                    type: "response.create",
-                    response: { modalities: ["audio", "text"] }
-                  }));
+                  triggerNextQuestionAfterVerification(
+                    verificationContext?.fieldName,
+                    verification.normalizedValue
+                  );
                 }
               } else if (verification.prompt) {
                 console.log(`🔄 Re-verification needed`);
                 // Speak verification prompt using OpenAI TTS
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "assistant",
-                      content: [{ type: "text", text: verification.prompt }]
-                    }
-                  }));
-                  openaiWs.send(JSON.stringify({
-                    type: "response.create",
-                    response: {
-                      modalities: ["audio"],
-                      instructions: `Say exactly: "${verification.prompt}"`
-                    }
-                  }));
+                  sendConversationText("assistant", verification.prompt);
+                  startModelResponse(["audio"], `Say exactly: "${verification.prompt}"`);
                 }
                 if (verification.shouldRetry) {
                   fieldValidator.clearVerification();
@@ -461,42 +669,37 @@ Then immediately confirm: "That's [Address]. Correct?"
               ? ` [${confidenceResult.indicators.join(', ')}]` 
               : '';
             console.log(`📊 Confidence: ${estimatedConfidence.toFixed(2)}${indicatorStr} | Context: ${fieldContext}`);
+            const qualitySignalsPoor = confidenceResult.indicators.includes('transcription_artifact') ||
+              confidenceResult.indicators.includes('gibberish_pattern') ||
+              confidenceResult.indicators.includes('multiple_question_marks') ||
+              confidenceResult.indicators.includes('repeated_words');
+            const fieldThreshold = getFieldThreshold(fieldContext);
             
-            // CRITICAL: Validate BEFORE OpenAI processes it
-            if (fieldContext !== 'general' && estimatedConfidence < 0.60 && transcript.trim().length > 0) {
+            // CRITICAL: Validate BEFORE OpenAI processes it using field-specific thresholds.
+            if (fieldContext !== 'general' && transcript.trim().length > 0 && estimatedConfidence < fieldThreshold) {
               console.log(`⚠️  LOW CONFIDENCE - Intercepting before OpenAI processes`);
               
               // Store pending transcription
               pendingTranscription = { transcript, fieldContext, confidence: estimatedConfidence };
               
               // Get appropriate verification prompt
-              const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence, {
+                qualityPoor: qualitySignalsPoor || estimatedConfidence < 0.40,
+                indicators: confidenceResult.indicators
+              });
               
               if (captureResult.needsVerify && captureResult.prompt) {
                 awaitingVerification = true;
                 
                 // Add verification prompt to conversation history immediately
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "assistant",
-                      content: [{ type: "text", text: captureResult.prompt }]
-                    }
-                  }));
+                  sendConversationText("assistant", captureResult.prompt);
                 }
                 
                 // Speak the verification prompt WITHOUT letting OpenAI respond to original transcript
                 setTimeout(() => {
                   if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                    openaiWs.send(JSON.stringify({
-                      type: "response.create",
-                      response: {
-                        modalities: ["audio"],
-                        instructions: `Say exactly: "${captureResult.prompt}"`
-                      }
-                    }));
+                    startModelResponse(["audio"], `Say exactly: "${captureResult.prompt}"`);
                   }
                 }, 200);
               }
@@ -507,7 +710,10 @@ Then immediately confirm: "That's [Address]. Correct?"
             
             // High confidence - validate the field data
             if (fieldContext !== 'general' && transcript.trim().length > 0) {
-              const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence);
+              const captureResult = fieldValidator.captureField(fieldContext, transcript, estimatedConfidence, {
+                qualityPoor: qualitySignalsPoor || estimatedConfidence < 0.40,
+                indicators: confidenceResult.indicators
+              });
               
               // Even with high confidence, check if format validation failed
               if (captureResult.needsVerify && captureResult.prompt && !captureResult.alreadyVerified) {
@@ -516,26 +722,13 @@ Then immediately confirm: "That's [Address]. Correct?"
                 
                 // Add verification prompt to conversation history immediately
                 if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "assistant",
-                      content: [{ type: "text", text: captureResult.prompt }]
-                    }
-                  }));
+                  sendConversationText("assistant", captureResult.prompt);
                 }
                 
                 // Speak the verification prompt
                 setTimeout(() => {
                   if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                    openaiWs.send(JSON.stringify({
-                      type: "response.create",
-                      response: {
-                        modalities: ["audio"],
-                        instructions: `Say exactly: "${captureResult.prompt}"`
-                      }
-                    }));
+                    startModelResponse(["audio"], `Say exactly: "${captureResult.prompt}"`);
                   }
                 }, 200);
                 
@@ -552,19 +745,8 @@ Then immediately confirm: "That's [Address]. Correct?"
                 break;
               }
               
-              activeResponseInProgress = true;
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: transcript }]
-                }
-              }));
-              openaiWs.send(JSON.stringify({ 
-                type: "response.create",
-                response: { modalities: ["audio", "text"] }
-              }));
+              sendConversationText("user", transcript);
+              startModelResponse(["audio", "text"]);
             }
             
             pendingTranscription = null;
@@ -573,6 +755,8 @@ Then immediately confirm: "That's [Address]. Correct?"
           case "response.done":
             // Response complete - mark as no longer active
             activeResponseInProgress = false;
+            pendingMulawAudioChunks = [];
+            pendingEncodedAudioChunks = [];
             console.log("✅ Response complete - ready for next input");
             break;
             
