@@ -19,6 +19,14 @@ const MAX_EMAIL_RECIPIENTS = 4;
 const NP = 'Not Provided';
 
 // ============================================================================
+// DEDUPLICATION STATE
+// ============================================================================
+// In-memory guard so a given Call SID can only trigger one summary email per
+// process. Cleanup paths can fire more than once for the same call (timeouts,
+// socket close races, etc.), which previously caused duplicate sends.
+const processedCallSids = new Set();
+
+// ============================================================================
 // HELPERS
 // ============================================================================
 
@@ -204,6 +212,19 @@ function buildEmailBody(callData, metadata) {
 async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
   console.log("📧 sendCallSummaryEmail invoked");
   try {
+    // Deduplication: ensure a given Call SID only ever sends one summary email
+    // per process. Must run before ANY SendGrid / gating logic.
+    const callSid = metadata.callId || metadata.callSid || null;
+    if (callSid) {
+      if (processedCallSids.has(callSid)) {
+        console.log(`📭 Duplicate email prevented for Call SID: ${callSid}`);
+        return { success: false, skipped: true, reason: 'duplicate_call_sid', callSid };
+      }
+      processedCallSids.add(callSid);
+    } else {
+      console.warn('⚠️  sendCallSummaryEmail called without a Call SID; dedupe guard cannot apply');
+    }
+
     const emailRecipients = parseRecipientList(EMAIL_TO_RAW);
 
     // Gating: skip the email when the call was handed off to a human agent.
