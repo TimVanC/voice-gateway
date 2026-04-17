@@ -355,6 +355,38 @@ function cleanCallSummary(summary) {
 // ============================================================================
 
 /**
+ * Format a timestamp in Eastern Time (America/New_York) for sheet rows.
+ *
+ * Handles EST vs EDT automatically via the IANA timezone. Only used for what
+ * is written to the Google Sheet - internal storage/ISO timestamps elsewhere
+ * in the system are unchanged.
+ *
+ * @param {string|number|Date} [existingTimestamp] - Optional source timestamp.
+ *   If omitted or invalid, uses the current time.
+ * @returns {string} Localized timestamp, e.g. "04/17/2026, 02:35:07 PM"
+ */
+function formatEasternTimestamp(existingTimestamp) {
+  let date;
+  if (existingTimestamp) {
+    const parsed = new Date(existingTimestamp);
+    date = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  } else {
+    date = new Date();
+  }
+
+  return date.toLocaleString('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  });
+}
+
+/**
  * Initialize Google Sheets API client
  * Supports both file-based (GOOGLE_APPLICATION_CREDENTIALS) and inline JSON (GOOGLE_SHEETS_CREDENTIALS)
  */
@@ -840,7 +872,9 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
   } = callData;
   
   const callId = metadata.callId || `CALL-${Date.now()}`;
-  const timestamp = metadata.timestamp || new Date().toISOString();
+  // Sheet rows display wall-clock Eastern Time (handles EST/EDT automatically).
+  // Storage elsewhere (email metadata, ISO logs) still uses the raw timestamp.
+  const timestamp = formatEasternTimestamp(metadata.timestamp);
   const callStatus = determineCallStatus(currentState, callData);
   
   // Normalize intent to canonical value (only if intent was collected)
