@@ -2779,7 +2779,8 @@ Keep it SHORT.`;
         callId: streamSid || `CALL-${Date.now()}`,
         callerNumber: callerNumber,
         callDurationMs: callConnectedTime ? Date.now() - callConnectedTime : null,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        wasTransferred: transferRequested
       });
       console.log("📨 Email function completed");
     } catch (err) {

@@ -91,6 +91,46 @@ function resolveNotes(details) {
 }
 
 // ============================================================================
+// GATING: decide whether an email should be sent at all
+// ============================================================================
+
+/**
+ * Returns true when the call collected at least one piece of real,
+ * actionable intake data. Used to suppress empty/useless summary emails.
+ *
+ * Meaningful data is defined as ANY of:
+ *   - phone number present AND phone_confidence > 0
+ *   - name (first or last) present AND name_confidence > 0
+ *   - service type (intent) present
+ *   - notes or summary text longer than 10 characters
+ */
+function hasMeaningfulData(callData = {}) {
+  const {
+    firstName, lastName, phone, intent,
+    name_confidence, phone_confidence,
+    details = {},
+  } = callData;
+
+  const phoneText = v(phone);
+  const phoneConf = Number(phone_confidence) || 0;
+  if (phoneText !== NP && phoneConf > 0) return true;
+
+  const nameText = [v(firstName), v(lastName)].filter(p => p !== NP).join(' ');
+  const nameConf = Number(name_confidence) || 0;
+  if (nameText && nameConf > 0) return true;
+
+  if (v(intent) !== NP) return true;
+
+  const notesText = resolveNotes(details);
+  if (notesText !== NP && notesText.trim().length > 10) return true;
+
+  const summaryText = v(callData.summary);
+  if (summaryText !== NP && summaryText.length > 10) return true;
+
+  return false;
+}
+
+// ============================================================================
 // EMAIL BODY BUILDER
 // ============================================================================
 
@@ -166,6 +206,22 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
   try {
     const emailRecipients = parseRecipientList(EMAIL_TO_RAW);
 
+    // Gating: skip the email when the call was handed off to a human agent.
+    // Transferred calls are already being handled live, so a summary email
+    // with a half-filled intake form is noise.
+    const wasTransferred = Boolean(metadata.wasTransferred);
+    if (wasTransferred) {
+      console.log('📭 Skipping summary email: call was transferred to a human agent');
+      return { success: false, skipped: true, reason: 'transferred_to_agent' };
+    }
+
+    // Gating: skip the email when no meaningful intake data was captured.
+    // Prevents empty summary emails from hitting the daily send limit.
+    if (!hasMeaningfulData(callData)) {
+      console.log('📭 Skipping summary email: no meaningful intake data collected');
+      return { success: false, skipped: true, reason: 'no_meaningful_data' };
+    }
+
     if (!SENDGRID_API_KEY) {
       console.warn('⚠️  Email sending disabled (missing SENDGRID_API_KEY)');
       return { success: false, skipped: true, reason: 'missing_credentials' };
@@ -212,4 +268,4 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
   }
 }
 
-module.exports = { sendCallSummaryEmail };
+module.exports = { sendCallSummaryEmail, hasMeaningfulData };
