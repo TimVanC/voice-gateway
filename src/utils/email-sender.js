@@ -138,6 +138,13 @@ function hasMeaningfulData(callData = {}) {
   return false;
 }
 
+function determineCallStatus(callData = {}, metadata = {}) {
+  const wasTransferred = Boolean(metadata.wasTransferred);
+  if (wasTransferred) return 'transferred';
+  if (hasMeaningfulData(callData)) return 'complete';
+  return 'incomplete';
+}
+
 // ============================================================================
 // EMAIL BODY BUILDER
 // ============================================================================
@@ -159,6 +166,8 @@ function buildEmailBody(callData, metadata) {
   const emergencyDisposition = isSafetyRisk
     ? 'Emergency redirect triggered: caller was instructed to hang up and call 911 immediately.'
     : 'No emergency redirect triggered.';
+  const wasTransferred = Boolean(metadata.wasTransferred);
+  const callStatus = metadata.callStatus || determineCallStatus(callData, metadata);
 
   const lines = [
     'RSE Energy – Call Intake Summary',
@@ -191,6 +200,8 @@ function buildEmailBody(callData, metadata) {
     `Call SID: ${v(metadata.callId)}`,
     `Call Duration: ${formatDuration(metadata.callDurationMs)}`,
     `Date/Time: ${formatDateTime(now)}`,
+    `Transferred to Agent: ${wasTransferred ? 'Yes' : 'No'}`,
+    `Call Status: ${v(callStatus)}`,
   ];
 
   return lines.join('\n');
@@ -227,18 +238,10 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
 
     const emailRecipients = parseRecipientList(EMAIL_TO_RAW);
 
-    // Gating: skip the email when the call was handed off to a human agent.
-    // Transferred calls are already being handled live, so a summary email
-    // with a half-filled intake form is noise.
-    const wasTransferred = Boolean(metadata.wasTransferred);
-    if (wasTransferred) {
-      console.log('📭 Skipping summary email: call was transferred to a human agent');
-      return { success: false, skipped: true, reason: 'transferred_to_agent' };
-    }
-
     // Gating: skip the email when no meaningful intake data was captured.
     // Prevents empty summary emails from hitting the daily send limit.
-    if (!hasMeaningfulData(callData)) {
+    const meaningfulDataCollected = hasMeaningfulData(callData);
+    if (!meaningfulDataCollected) {
       console.log('📭 Skipping summary email: no meaningful intake data collected');
       return { success: false, skipped: true, reason: 'no_meaningful_data' };
     }
@@ -263,7 +266,8 @@ async function sendCallSummaryEmail(callData, currentState, metadata = {}) {
     const now = metadata.timestamp ? new Date(metadata.timestamp) : new Date();
     const emergencyPrefix = callData?.isSafetyRisk ? '[EMERGENCY REDIRECT] ' : '';
     const subject = `${emergencyPrefix}New Call Intake – ${callerLabel} – ${formatDateTime(now)}`;
-    const text = buildEmailBody(callData, metadata);
+    const callStatus = determineCallStatus(callData, metadata);
+    const text = buildEmailBody(callData, { ...metadata, callStatus });
 
     sgMail.setApiKey(SENDGRID_API_KEY);
     console.log(`📧 Sending email to ${emailRecipients.join(', ')} via SendGrid HTTP API...`);

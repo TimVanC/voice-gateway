@@ -17,6 +17,7 @@
 const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
+const { hasMeaningfulData } = require('./email-sender');
 require('dotenv').config();
 
 // ============================================================================
@@ -816,27 +817,11 @@ function normalizeSystemType(systemType) {
  * - completed: CLOSE state reached OR confirmation prompt was delivered (regardless of who hangs up)
  * - incomplete_hangup: caller disconnected before confirmation was delivered
  */
-function determineCallStatus(currentState, callData) {
-  const { STATES, INTENT_TYPES } = require('../scripts/rse-script');
-  
-  // Emergency redirects
-  if (callData.isSafetyRisk === true) {
-    return 'emergency_redirect';
-  }
-  
-  // Out of scope only (caller never pivoted to allowed service)
-  if (callData.intent === INTENT_TYPES.OUT_OF_SCOPE || callData.intent === 'other_out_of_scope') {
-    return 'out_of_scope_only';
-  }
-  
-  // Complete - reached CLOSE state or confirmation was delivered
-  // If confirmation prompt was delivered, the call is complete even if user hangs up
-  if (currentState === STATES.CLOSE || currentState === STATES.ENDED || callData._confirmationDelivered || callData._closeStateReached) {
-    return 'completed';
-  }
-  
-  // All other cases are incomplete hangups (didn't reach confirmation)
-  return 'incomplete_hangup';
+function determineCallStatus(currentState, callData, metadata = {}) {
+  void currentState;
+  if (Boolean(metadata.wasTransferred)) return 'transferred';
+  if (hasMeaningfulData(callData)) return 'complete';
+  return 'incomplete';
 }
 
 /**
@@ -875,7 +860,7 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
   // Sheet rows display wall-clock Eastern Time (handles EST/EDT automatically).
   // Storage elsewhere (email metadata, ISO logs) still uses the raw timestamp.
   const timestamp = formatEasternTimestamp(metadata.timestamp);
-  const callStatus = determineCallStatus(currentState, callData);
+  const callStatus = determineCallStatus(currentState, callData, metadata);
   
   // Normalize intent to canonical value (only if intent was collected)
   const normalizedIntent = intent ? normalizeIntent(intent, callData) : '';
@@ -1206,7 +1191,7 @@ async function logCallIntake(callData, currentState, metadata = {}) {
   
   if (!SPREADSHEET_ID || (!GOOGLE_APPLICATION_CREDENTIALS && !GOOGLE_SHEETS_CREDENTIALS_JSON)) {
     console.warn('⚠️  Google Sheets logging disabled (missing credentials)');
-    console.warn(`   Call would have been logged with status: ${determineCallStatus(currentState, callData)}`);
+    console.warn(`   Call would have been logged with status: ${determineCallStatus(currentState, callData, metadata)}`);
     console.warn(`   To enable logging, set GOOGLE_SHEETS_SPREADSHEET_ID and either:`);
     console.warn(`     - GOOGLE_APPLICATION_CREDENTIALS (file path), or`);
     console.warn(`     - GOOGLE_SHEETS_CREDENTIALS (JSON string)`);

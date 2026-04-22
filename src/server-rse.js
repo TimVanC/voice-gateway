@@ -2767,7 +2767,8 @@ Keep it SHORT.`;
     // Log to Google Sheets (non-blocking) - only if confirmation succeeded
     logCallIntake(data, currentState, {
       callId: streamSid || `CALL-${Date.now()}`,
-      callerNumber: callerNumber
+      callerNumber: callerNumber,
+      wasTransferred: transferRequested
     }).catch(err => {
       console.error('❌ Failed to log to Google Sheets:', err.message);
     });
