@@ -14,7 +14,7 @@ const sgMail = require('@sendgrid/mail');
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_TO_RAW = process.env.EMAIL_TO;
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
-const MAX_EMAIL_RECIPIENTS = 4;
+const MAX_EMAIL_RECIPIENTS = 5;
 
 const NP = 'Not Provided';
 
