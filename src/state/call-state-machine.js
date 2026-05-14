@@ -734,6 +734,15 @@ function createCallStateMachine() {
   }
   
   function _processInputInner(transcript, lowerTranscript, analysis) {
+    // End-of-call signals: caller wants to cancel or hang up
+    // Fires in any state so the caller is never stuck
+    const CANCEL_PATTERNS = /\b(cancel the call|end the call|hang up|i want to hang up|never mind|forget it|stop the call)\b/i;
+    if (CANCEL_PATTERNS.test(transcript)) {
+      console.log(`📋 User indicating end of call: "${transcript.substring(0, 50)}"`);
+      transitionTo(STATES.ENDED);
+      return { nextState: STATES.ENDED, action: 'end_call' };
+    }
+
     // CRITICAL: Detect user frustration - acknowledge but do NOT re-send full confirmation/recap (would cut off TTS)
     if (isUserFrustrated(transcript)) {
       console.log(`⚠️ User frustration detected: "${transcript.substring(0, 50)}..."`);

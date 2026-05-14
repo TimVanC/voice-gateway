@@ -2039,7 +2039,7 @@ STRICT RULES:
   // ============================================================================
   // DETECT REAL PERSON REQUEST
   // ============================================================================
-  function detectRealPersonRequest(transcript) {
+  function detectRealPersonRequest(transcript, state) {
     const lowerTranscript = transcript.toLowerCase();
     const realPersonPatterns = [
       /\b(real person|human|speak to someone|talk to someone|talk to a person|speak to a person)\b/,
@@ -2047,8 +2047,20 @@ STRICT RULES:
       /\b(transfer|connect me|put me through|can i speak)\b/,
       /\b(not a robot|not ai|not automated|actual person)\b/
     ];
-    
-    return realPersonPatterns.some(pattern => pattern.test(lowerTranscript));
+
+    if (realPersonPatterns.some(pattern => pattern.test(lowerTranscript))) return true;
+
+    // Staff name and "reach someone" patterns — ONLY active in greeting/intent state
+    // to avoid triggering when a caller gives their own name during intake
+    const isEarlyState = !state || state === 'greeting' || state === 'intent';
+    if (isEarlyState) {
+      const RSE_STAFF_NAMES = /\b(ronald|ron|zelda|raymond|andrew|shamyah|kai)\b/i;
+      const REACH_PATTERNS = /\b(get a hold of|reach|trying to reach|speak to|talk to|looking for|get through to)\b/i;
+      if (RSE_STAFF_NAMES.test(lowerTranscript)) return true;
+      if (REACH_PATTERNS.test(lowerTranscript)) return true;
+    }
+
+    return false;
   }
   
   // ============================================================================
@@ -2156,7 +2168,7 @@ STRICT RULES:
     }
     
     // CRITICAL: Check for real person request FIRST - stop AI flow immediately
-    if (detectRealPersonRequest(transcript)) {
+    if (detectRealPersonRequest(transcript, currentState)) {
       console.log("🚨 Real person requested - stopping AI flow and transferring immediately");
       transferToRealPerson();
       return; // Stop processing - don't continue AI flow
