@@ -2,7 +2,11 @@
  * Google Sheets Call Intake Logger - V1
  *
  * V1 Requirements:
- * - Append-only (never overwrite), human-readable call_summary
+ * - Newest-call-first insertion: each new call is written to row 2 (just below
+ *   the header) by first inserting a blank row at row 2 and shifting all
+ *   existing data rows down. The header row (row 1) is never touched and
+ *   existing data is never overwritten.
+ * - Human-readable call_summary
  *
  * GUARDRAILS (system-wide):
  * - Disable all parsing during recap (CONFIRMATION state).
@@ -1245,22 +1249,42 @@ async function logCallIntake(callData, currentState, metadata = {}) {
       row.push('');
     }
     
-    // Append row to sheet (append-only, never overwrite)
-    const response = await sheets.spreadsheets.values.append({
+    // Newest-call-first: insert a blank row at row 2 (shifts existing data
+    // rows down, header in row 1 stays put), then write the new call into
+    // that freshly inserted row 2. Existing data is never overwritten.
+    const sheetId = await getSheetId(sheets, SPREADSHEET_ID, SHEET_NAME);
+    
+    await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A:A`,
+      requestBody: {
+        requests: [{
+          insertDimension: {
+            range: {
+              sheetId,
+              dimension: 'ROWS',
+              startIndex: 1, // 0-based; row index 1 == sheet row 2
+              endIndex: 2
+            },
+            inheritFromBefore: false // do not inherit header formatting
+          }
+        }]
+      }
+    });
+    
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A2`,
       valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
       requestBody: {
         values: [row]
       }
     });
     
-    console.log(`✅ Call intake logged to Google Sheets (row ${response.data.updates.updatedRows}, call_id: ${callId})`);
+    console.log(`✅ Call intake logged to Google Sheets (inserted at row 2, call_id: ${callId})`);
     
     return {
       success: true,
-      rowNumber: response.data.updates.updatedRows,
+      rowNumber: 2,
       callId,
       spreadsheetId: SPREADSHEET_ID,
       sheetName: SHEET_NAME
