@@ -29,7 +29,7 @@ const { sendCallSummaryEmail } = require('./utils/email-sender');
 // ============================================================================
 const PORT = process.env.PORT || 8080;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime";
 const VERBOSE_DEBUG = process.env.VERBOSE_DEBUG === 'true';  // Gate noisy logs (audio progress, keep-alive, heartbeat)
 
 // Twilio configuration for transfers
@@ -491,8 +491,7 @@ wss.on("connection", (twilioWs, req) => {
     
     openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "realtime=v1"
+        "Authorization": `Bearer ${OPENAI_API_KEY}`
       }
     });
     
@@ -517,11 +516,16 @@ wss.on("connection", (twilioWs, req) => {
       const sessionConfig = {
         type: "session.update",
         session: {
+          type: "realtime",
           modalities: ["text", "audio"],
           instructions: SYSTEM_PROMPT,
-          voice: voice,  // Set exactly once
+          voice: voice,
           input_audio_format: "g711_ulaw",
-          output_audio_format: "g711_ulaw",
+          audio: {
+            output: {
+              format: "g711_ulaw"
+            }
+          },
           input_audio_transcription: {
             model: "whisper-1"
           },
@@ -531,7 +535,6 @@ wss.on("connection", (twilioWs, req) => {
             prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
             silence_duration_ms: VAD_CONFIG.silence_duration_ms
           },
-          temperature: 0.6,  // Minimum allowed by OpenAI Realtime API (0.6-1.2 range)
           max_response_output_tokens: 1000
         }
       };
@@ -749,7 +752,7 @@ wss.on("connection", (twilioWs, req) => {
         }, TTS_FAILURE_TIMEOUT_MS);
         break;
         
-      case "response.audio.delta":
+      case "response.output_audio.delta":
         if (event.delta) {
           const audioData = Buffer.from(event.delta, "base64");
           const deltaResponseId = event.response_id ?? event.response?.id ?? null;
@@ -811,7 +814,7 @@ wss.on("connection", (twilioWs, req) => {
         clearAudioCompletionTimeout();
         break;
         
-      case "response.audio_transcript.done":
+      case "response.output_audio_transcript.done":
         if (event.transcript) {
           actualTranscript = event.transcript;  // Store transcript for completeness checking
           // CRITICAL: Check for off-script hallucination
@@ -1545,10 +1548,10 @@ wss.on("connection", (twilioWs, req) => {
       default:
         // Ignore frequent/spammy events
         const ignoredEvents = [
-          'response.text.delta', 'response.audio_transcript.delta',
+          'response.output_text.delta', 'response.output_audio_transcript.delta',
           'response.output_item.added', 'response.output_item.done', 
           'response.content_part.added', 'response.content_part.done', 
-          'input_audio_buffer.committed', 'conversation.item.created',
+          'input_audio_buffer.committed', 'conversation.item.added', 'conversation.item.done',
           'conversation.item.input_audio_transcription.delta'
         ];
         if (!ignoredEvents.includes(event.type)) {
