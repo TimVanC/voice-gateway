@@ -101,7 +101,9 @@ app.post("/twilio/transfer", (req, res) => {
   const response = new twilio.twiml.VoiceResponse();
   response.say("Transferring you to a real person now.");
   if (TRANSFER_PHONE_NUMBER) {
-    response.dial(TRANSFER_PHONE_NUMBER);
+    const callerNum = req.query.callerNumber || req.body.callerNumber;
+    const dialOptions = callerNum ? { callerId: callerNum } : {};
+    response.dial(dialOptions, TRANSFER_PHONE_NUMBER);
   } else {
     response.say("I'm sorry, the transfer service is not configured. Please call back during business hours.");
   }
@@ -2097,7 +2099,7 @@ STRICT RULES:
           throw new Error("BASE_URL not configured and cannot be determined from request");
         }
         
-        const transferUrl = `${baseUrl}/twilio/transfer`;
+        const transferUrl = `${baseUrl}/twilio/transfer?callerNumber=${encodeURIComponent(callerNumber || '')}`;
         
         console.log(`📞 Transferring call ${callSid} to ${TRANSFER_PHONE_NUMBER} via ${transferUrl}`);
         await twilioClient.calls(callSid).update({
