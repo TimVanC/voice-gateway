@@ -484,7 +484,46 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   let openaiConnectionAttempts = 0;
   const MAX_OPENAI_RETRIES = 3;
-  
+
+  // Hoisted outside connectToOpenAI so it is accessible from handleOpenAIEvent (voice fallback)
+  function configureSession(voice) {
+    if (voiceInitialized) {
+      console.log("⚠️ Voice already initialized, skipping reconfiguration");
+      return;
+    }
+
+    console.log(`🎙️ Using OpenAI Realtime voice: ${voice}${voice === OPENAI_VOICE_FALLBACK ? ' (fallback)' : ''}`);
+
+    const sessionConfig = {
+      type: "session.update",
+      session: {
+        type: "realtime",
+        instructions: SYSTEM_PROMPT,
+        input_audio_format: "g711_ulaw",
+        audio: {
+          output: {
+            voice: voice,
+            format: "g711_ulaw"
+          },
+          input: {
+            transcription: {
+              model: "whisper-1"
+            }
+          }
+        },
+        turn_detection: {
+          type: "server_vad",
+          threshold: VAD_CONFIG.threshold,
+          prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
+          silence_duration_ms: VAD_CONFIG.silence_duration_ms
+        },
+        max_response_output_tokens: 1000
+      }
+    };
+
+    openaiWs.send(JSON.stringify(sessionConfig));
+  }
+
   function connectToOpenAI() {
     openaiConnectionAttempts++;
     console.log(`🔌 Connecting to OpenAI Realtime (attempt ${openaiConnectionAttempts}/${MAX_OPENAI_RETRIES})...`);
@@ -503,43 +542,6 @@ wss.on("connection", (twilioWs, req) => {
       // Configure session with selected voice (set once, no changes mid-call)
       configureSession(callVoice);
     });
-    
-    // Configure the Realtime session with the specified voice
-    function configureSession(voice) {
-      if (voiceInitialized) {
-        console.log("⚠️ Voice already initialized, skipping reconfiguration");
-        return;
-      }
-      
-      console.log(`🎙️ Using OpenAI Realtime voice: ${voice}${voice === OPENAI_VOICE_FALLBACK ? ' (fallback)' : ''}`);
-      
-      const sessionConfig = {
-        type: "session.update",
-        session: {
-          type: "realtime",
-          instructions: SYSTEM_PROMPT,
-          voice: voice,
-          input_audio_format: "g711_ulaw",
-          audio: {
-            output: {
-              format: "g711_ulaw"
-            }
-          },
-          input_audio_transcription: {
-            model: "whisper-1"
-          },
-          turn_detection: {
-            type: "server_vad",
-            threshold: VAD_CONFIG.threshold,
-            prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
-            silence_duration_ms: VAD_CONFIG.silence_duration_ms
-          },
-          max_response_output_tokens: 1000
-        }
-      };
-      
-      openaiWs.send(JSON.stringify(sessionConfig));
-    }
     
     openaiWs.on("message", (data) => {
       try {
