@@ -33,6 +33,46 @@ const GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIAL
 const GOOGLE_SHEETS_CREDENTIALS_JSON = process.env.GOOGLE_SHEETS_CREDENTIALS; // Inline JSON (fallback)
 
 // ============================================================================
+// IN-PROCESS DEDUPLICATION CACHE
+// ============================================================================
+// Twilio (and load-balanced telephony layers in general) occasionally fire
+// the call-completed webhook more than once for the same call. The two
+// requests can race past the sheet-side `callIdExists` check because neither
+// has written yet when the other reads, producing duplicate rows.
+//
+// We dedupe in-process by call_id with a short TTL. The slot is reserved
+// BEFORE the async write begins so concurrent webhooks see it immediately;
+// on write failure we release it so a legitimate retry can succeed.
+const RECENT_WRITE_TTL_MS = 60_000;
+const recentWrites = new Map(); // call_id -> recordedAtMs
+
+function pruneRecentWrites(now = Date.now()) {
+  for (const [id, ts] of recentWrites) {
+    if (now - ts > RECENT_WRITE_TTL_MS) {
+      recentWrites.delete(id);
+    }
+  }
+}
+
+function wasRecentlyWritten(callId, now = Date.now()) {
+  const ts = recentWrites.get(callId);
+  if (ts === undefined) return false;
+  if (now - ts > RECENT_WRITE_TTL_MS) {
+    recentWrites.delete(callId);
+    return false;
+  }
+  return true;
+}
+
+function markRecentlyWritten(callId, now = Date.now()) {
+  recentWrites.set(callId, now);
+}
+
+function clearRecentlyWritten(callId) {
+  recentWrites.delete(callId);
+}
+
+// ============================================================================
 // V1 SCHEMA DEFINITION (Required columns only)
 // ============================================================================
 // Expected column order (for reference)
@@ -1202,22 +1242,42 @@ async function logCallIntake(callData, currentState, metadata = {}) {
     return { success: false, error: 'Google Sheets credentials not configured', skipped: true };
   }
   
+  // Resolve call_id up front so we can dedupe before any Sheets API calls.
+  const callId = metadata.callId || `CALL-${Date.now()}`;
+  
+  // In-process dedupe: if this call_id was just written (within
+  // RECENT_WRITE_TTL_MS), the second webhook fire is ignored. This catches
+  // the duplicate-webhook race that the sheet-side check can miss when both
+  // requests read before either has written.
+  pruneRecentWrites();
+  if (wasRecentlyWritten(callId)) {
+    console.log(`⏭️  Call ${callId} already written within ${RECENT_WRITE_TTL_MS / 1000}s - skipping duplicate webhook`);
+    return {
+      success: true,
+      skipped: true,
+      reason: 'duplicate_within_ttl',
+      callId
+    };
+  }
+  // Reserve the slot now so a concurrent webhook fire short-circuits above
+  // before it issues any Sheets API calls. Released on failure below.
+  markRecentlyWritten(callId);
+  
   try {
     let sheets;
     try {
       sheets = getSheetsClient();
     } catch (error) {
       console.error(`❌ Failed to initialize Google Sheets client: ${error.message}`);
+      clearRecentlyWritten(callId);
       return { success: false, error: error.message };
     }
     
     // Ensure sheet exists with headers (and handle schema evolution)
     await ensureSheetSetup(sheets, SPREADSHEET_ID, SHEET_NAME);
     
-    // Generate call_id
-    const callId = metadata.callId || `CALL-${Date.now()}`;
-    
-    // Idempotency check: Prevent duplicate rows for the same call_id
+    // Backstop idempotency check against the sheet itself: covers process
+    // restarts where the in-memory cache was lost but the row already exists.
     const alreadyExists = await callIdExists(sheets, SPREADSHEET_ID, SHEET_NAME, callId);
     if (alreadyExists) {
       console.log(`⏭️  Call ${callId} already logged - skipping duplicate`);
@@ -1293,6 +1353,10 @@ async function logCallIntake(callData, currentState, metadata = {}) {
   } catch (error) {
     console.error('❌ Error logging to Google Sheets:', error.message);
     console.error('Stack:', error.stack);
+    // Release the dedup slot so a legitimate retry isn't blocked by a
+    // transient failure. A real duplicate webhook would have already lost
+    // the race at the in-memory check above.
+    clearRecentlyWritten(callId);
     
     return {
       success: false,
