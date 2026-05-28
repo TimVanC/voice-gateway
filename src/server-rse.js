@@ -517,7 +517,6 @@ wss.on("connection", (twilioWs, req) => {
         type: "session.update",
         session: {
           type: "realtime",
-          modalities: ["text", "audio"],
           instructions: SYSTEM_PROMPT,
           voice: voice,
           input_audio_format: "g711_ulaw",
