@@ -499,13 +499,13 @@ wss.on("connection", (twilioWs, req) => {
       session: {
         type: "realtime",
         instructions: SYSTEM_PROMPT,
-        input_audio_format: "g711_ulaw",
         audio: {
           output: {
             voice: voice,
             format: "g711_ulaw"
           },
           input: {
+            format: "g711_ulaw",
             transcription: {
               model: "whisper-1"
             }
