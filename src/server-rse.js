@@ -514,9 +514,9 @@ wss.on("connection", (twilioWs, req) => {
             },
             turn_detection: {
               type: "server_vad",
-              threshold: VAD_CONFIG.threshold,
+              threshold: 0.7,
               prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
-              silence_duration_ms: VAD_CONFIG.silence_duration_ms,
+              silence_duration_ms: 1500,
               create_response: true,
               interrupt_response: true
             }
