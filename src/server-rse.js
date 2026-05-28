@@ -159,7 +159,7 @@ wss.on("connection", (twilioWs, req) => {
   let audioCompletionTimeout = null;  // Timeout to detect if audio stops mid-sentence
   let expectedTranscript = null;  // Expected transcript for current prompt
   let actualTranscript = null;  // Store actual transcript received from OpenAI
-  let audioDoneReceived = false;  // Track if response.audio.done was received
+  let audioDoneReceived = false;  // Track if response.output_audio.done was received
   let hallucinationCount = 0;  // Track consecutive hallucinations for same prompt
   let lastHallucinationPrompt = null;  // Track which prompt is hallucinating
   const TTS_FAILURE_TIMEOUT_MS = 8000;  // 8 seconds - if no audio for this long, consider it failed
@@ -494,30 +494,39 @@ wss.on("connection", (twilioWs, req) => {
 
     console.log(`🎙️ Using OpenAI Realtime voice: ${voice}${voice === OPENAI_VOICE_FALLBACK ? ' (fallback)' : ''}`);
 
+    // GA Realtime API session schema (post May 12, 2026 sunset of beta):
+    // - session.type: "realtime"
+    // - audio.input/output.format are objects with a `type` like "audio/pcmu"
+    // - turn_detection nested under audio.input
+    // - output_modalities replaces top-level modalities; max_output_tokens replaces max_response_output_tokens
     const sessionConfig = {
       type: "session.update",
       session: {
         type: "realtime",
+        model: "gpt-realtime",
+        output_modalities: ["audio"],
         instructions: SYSTEM_PROMPT,
         audio: {
-          output: {
-            voice: voice,
-            format: "g711_ulaw"
-          },
           input: {
-            format: "g711_ulaw",
+            format: { type: "audio/pcmu" },
             transcription: {
               model: "whisper-1"
+            },
+            turn_detection: {
+              type: "server_vad",
+              threshold: VAD_CONFIG.threshold,
+              prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
+              silence_duration_ms: VAD_CONFIG.silence_duration_ms,
+              create_response: true,
+              interrupt_response: true
             }
+          },
+          output: {
+            format: { type: "audio/pcmu" },
+            voice: voice
           }
         },
-        turn_detection: {
-          type: "server_vad",
-          threshold: VAD_CONFIG.threshold,
-          prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
-          silence_duration_ms: VAD_CONFIG.silence_duration_ms
-        },
-        max_response_output_tokens: 1000
+        max_output_tokens: 1000
       }
     };
 
@@ -798,7 +807,7 @@ wss.on("connection", (twilioWs, req) => {
         }
         break;
         
-      case "response.audio.done":
+      case "response.output_audio.done":
         audioDoneReceived = true;
         const audioSeconds = (playBuffer.length / 8000).toFixed(1);
         console.log(`🔊 Audio complete (buffer: ${playBuffer.length} bytes = ~${audioSeconds}s to play)`);
@@ -1213,7 +1222,7 @@ wss.on("connection", (twilioWs, req) => {
             actualTranscript = null;
             // CRITICAL: Do NOT clear playBuffer. Unplayed audio is still queued; clearing
             // drops it. User would hear only the retry (e.g. "today?") and miss the rest.
-            // Let buffer play out; retry audio will be appended via response.audio.delta.
+            // Let buffer play out; retry audio will be appended via response.output_audio.delta.
             
             setTimeout(() => {
               let toSend = currentPromptText;
@@ -1621,7 +1630,7 @@ wss.on("connection", (twilioWs, req) => {
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
-          modalities: ["audio", "text"],
+          output_modalities: ["audio"],
           instructions: `IMPORTANT: Your previous response may have been cut off. 
 The caller may not have heard you clearly.
 
@@ -1848,7 +1857,7 @@ Say the ENTIRE sentence above, word for word.`,
     openaiWs.send(JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio", "text"],
+        output_modalities: ["audio"],
         instructions: `Greet the caller. Say exactly: "${GREETING.primary}"
 
 Speak at a normal conversational pace - not slow or formal. Use contractions. Sound natural and friendly, like a real person answering the phone.`,
@@ -1872,7 +1881,7 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     openaiWs.send(JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio", "text"],
+        output_modalities: ["audio"],
         instructions: `CRITICAL - REPEAT CUT-OFF GREETING ONLY:
 
 The previous greeting was cut off. You must REPEAT the full greeting from the start.
@@ -2317,7 +2326,7 @@ STRICT RULES:
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
-          modalities: ["audio", "text"],
+          output_modalities: ["audio"],
           instructions: `Say exactly: "${response}"
 
 Then ask: "Is there anything else I can help with?"
@@ -2577,10 +2586,9 @@ You are a script-reading robot. Read the script. Stop.`;
     openaiWs.send(JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio", "text"],
+        output_modalities: ["audio"],
         instructions: instructions,
-        max_output_tokens: maxTokens,
-        temperature: 0.6  // Minimum allowed by OpenAI Realtime API
+        max_output_tokens: maxTokens
       }
     }));
   }
@@ -2681,7 +2689,7 @@ Keep it SHORT.`;
     openaiWs.send(JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio", "text"],
+        output_modalities: ["audio"],
         instructions: instruction,
         max_output_tokens: 300
       }

@@ -197,7 +197,7 @@ function createMicroResponsePayload(phrase) {
   return {
     type: "response.create",
     response: {
-      modalities: ["audio", "text"],
+      output_modalities: ["audio"],
       instructions: `Say exactly this, naturally and briefly: "${phrase}"`,
       max_output_tokens: 50
     }
