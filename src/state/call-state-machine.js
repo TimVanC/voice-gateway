@@ -862,7 +862,19 @@ function createCallStateMachine() {
           };
         }
         
-        // No intent detected yet - ask for clarification
+        // Track failed intent attempts
+        data._intentFailCount = (data._intentFailCount || 0) + 1;
+
+        if (data._intentFailCount >= 2) {
+          console.log(`⚠️ Intent failed ${data._intentFailCount} times - transferring to team member`);
+          data._intentFailCount = 0;
+          return {
+            nextState: transitionTo(STATES.CLOSE),
+            prompt: "I'm sorry for the inconvenience. Let me connect you with a team member who can better assist you.",
+            action: 'transfer_after_prompt'
+          };
+        }
+
         return {
           nextState: currentState,
           prompt: INTENT_PROMPTS.unclear,

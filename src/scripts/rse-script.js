@@ -14,7 +14,7 @@
 const GREETING = {
   // SHORTENED: OpenAI Realtime has issues with long utterances (>8 seconds)
   // Original was 173 chars, new is ~85 chars (~5 seconds of speech)
-  primary: "Hi, thanks for calling RSE Energy. This is Ava, an AI assistant. How can I help you?",
+  primary: "Hi, thanks for calling RSE Energy. This is Ava, an AI assistant. I can help collect your information or connect you with a team member at any time. How can I help you?",
   silence_fallback: "Hi there, what can I help you with today?"
 };
 

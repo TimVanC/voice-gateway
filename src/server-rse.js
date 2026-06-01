@@ -2271,6 +2271,14 @@ STRICT RULES:
     } else if (result.action === 'redirect_out_of_scope') {
       // Handle out-of-scope request with polite redirect
       sendOutOfScopeResponse(transcript);
+    } else if (result.action === 'transfer_after_prompt') {
+      // Say the apology message then transfer
+      if (result.prompt) {
+        sendStatePrompt(result.prompt);
+      }
+      setTimeout(() => {
+        transferToRealPerson();
+      }, 4000);
     } else if (result.action === 'classify_intent') {
       // Only for intent classification (greeting -> intent transition)
       // Use natural response but keep it brief and on-topic
@@ -2307,33 +2315,21 @@ STRICT RULES:
   // ============================================================================
   function sendOutOfScopeResponse(transcript) {
     if (_callCompleted) return;
+    console.log(`🚫 Out-of-scope request - transferring to team member`);
     if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
-      const lowerTranscript = transcript.toLowerCase();
-      
-      // Determine specific response based on what was asked
-      let response = OUT_OF_SCOPE.general;
-      if (lowerTranscript.includes('solar')) {
-        response = OUT_OF_SCOPE.solar;
-      } else if (lowerTranscript.includes('electric') || lowerTranscript.includes('wiring')) {
-        response = OUT_OF_SCOPE.electrical;
-      } else if (lowerTranscript.includes('plumb') || lowerTranscript.includes('water heater')) {
-        response = OUT_OF_SCOPE.plumbing;
-      }
-      
-      console.log(`🚫 Out-of-scope response: "${response}"`);
       responseInProgress = true;
-      
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
           output_modalities: ["audio"],
-          instructions: `Say exactly: "${response}"
-
-Then ask: "Is there anything else I can help with?"
-Sound polite and helpful, not dismissive.`,
-          max_output_tokens: 200
+          instructions: `Say exactly: "I'm sorry, I'm not able to help with that directly. Let me connect you with a team member who can assist you."`,
+          max_output_tokens: 80
         }
       }));
+      // Transfer after brief delay to let the message play
+      setTimeout(() => {
+        transferToRealPerson();
+      }, 3500);
     }
   }
   
