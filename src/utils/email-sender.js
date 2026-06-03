@@ -127,7 +127,8 @@ function hasMeaningfulData(callData = {}) {
   const nameConf = Number(name_confidence) || 0;
   if (nameText && nameConf > 0) return true;
 
-  if (v(intent) !== NP) return true;
+  const hasCallerData = (v(firstName) !== NP) || (v(lastName) !== NP) || (phoneText !== NP);
+  if (v(intent) !== NP && hasCallerData) return true;
 
   const notesText = resolveNotes(details);
   if (notesText !== NP && notesText.trim().length > 10) return true;

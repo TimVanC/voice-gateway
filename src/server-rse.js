@@ -2060,7 +2060,8 @@ STRICT RULES:
       /\b(real person|human|speak to someone|talk to someone|talk to a person|speak to a person)\b/,
       /\b(agent|representative|operator|live person|live agent)\b/,
       /\b(transfer|connect me|put me through|can i speak)\b/,
-      /\b(not a robot|not ai|not automated|actual person)\b/
+      /\b(not a robot|not ai|not automated|actual person)\b/,
+      /\b(team member|a team member|speak to a team member|talk to a team member)\b/,
     ];
 
     if (realPersonPatterns.some(pattern => pattern.test(lowerTranscript))) return true;
