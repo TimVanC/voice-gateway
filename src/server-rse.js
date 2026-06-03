@@ -318,7 +318,9 @@ wss.on("connection", (twilioWs, req) => {
     }
     try {
       twilioWs.send(JSON.stringify({ event: "clear", streamSid }));
-      console.log(`⏹️ TWILIO_PLAYBACK_STOPPED reason=${reason} response_id=${responseId || "unknown"} streamSid=${streamSid}`);
+      if (reason !== "response_created") {
+        console.log(`⏹️ TWILIO_PLAYBACK_STOPPED reason=${reason} response_id=${responseId || "unknown"} streamSid=${streamSid}`);
+      }
     } catch (err) {
       console.error(`❌ TWILIO_PLAYBACK_STOP_FAILED reason=${reason} response_id=${responseId || "unknown"} error=${err.message}`);
     }
@@ -531,6 +533,7 @@ wss.on("connection", (twilioWs, req) => {
     };
 
     openaiWs.send(JSON.stringify(sessionConfig));
+    console.log(`⚙️ Session VAD configured: threshold=0.7, silence=1500ms`);
   }
 
   function connectToOpenAI() {
@@ -1250,7 +1253,7 @@ wss.on("connection", (twilioWs, req) => {
           const generatedSeconds = totalAudioBytesSent / 8000;
           const playedSeconds = playedAudioBytesSent / 8000;
           if (generatedSeconds > 0 && playedSeconds + 0.15 < generatedSeconds) {
-            console.warn(`✂️ AI playback cut off: played ~${playedSeconds.toFixed(1)}s of ~${generatedSeconds.toFixed(1)}s generated audio (transcript may include unheard tail)`);
+            console.log(`🎤 Caller barged in: played ~${playedSeconds.toFixed(1)}s of ~${generatedSeconds.toFixed(1)}s before interruption`);
           }
           assistantTurnCount++;  // Track for filler spacing
           
@@ -2711,7 +2714,7 @@ Keep it SHORT.`;
           callConnectedTime = Date.now();  // Track call start for phantom speech protection
           console.log(`📞 Stream started: ${streamSid}`);
           console.log(`📞 Call SID: ${callSid}`);
-          console.log(`📞 Stream config:`, JSON.stringify(msg.start, null, 2));
+          console.log(`📞 Stream config received - caller: ${msg.start.customParameters?.callerNumber || 'unknown'}`);
           
           // Store caller number if provided
           if (msg.start.customParameters?.callerNumber) {
@@ -2798,7 +2801,6 @@ Keep it SHORT.`;
 
     // Send post-call email summary (awaited so it completes before cleanup exits)
     try {
-      console.log("📨 Triggering call summary email...");
       await sendCallSummaryEmail(data, currentState, {
         callId: streamSid || `CALL-${Date.now()}`,
         callerNumber: callerNumber,
@@ -2822,9 +2824,11 @@ Keep it SHORT.`;
     backchannel.cancel();
     
     if (openaiWs?.readyState === WebSocket.OPEN) {
-      console.log(`🔌 OPENAI_STREAM_FORCE_CLOSED reason=cleanup`);
       openaiWs.close();
     }
+
+    const callDurationSeconds = callConnectedTime ? Math.round((Date.now() - callConnectedTime) / 1000) : 0;
+    console.log(`📊 Call summary | caller: ${callerNumber || 'unknown'} | state: ${currentState} | intent: ${data.intent || 'none'} | transferred: ${transferRequested ? 'yes' : 'no'} | duration: ${callDurationSeconds}s`);
   }
 });
 
