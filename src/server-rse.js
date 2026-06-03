@@ -23,6 +23,7 @@ const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
+const { cleanCallData } = require('./utils/data-cleanup');
 
 // ============================================================================
 // CONFIGURATION
@@ -2785,8 +2786,9 @@ Keep it SHORT.`;
   // ============================================================================
   async function cleanup() {
     // Log collected data before cleanup
-    const data = stateMachine.getData();
+    let data = stateMachine.getData();
     const currentState = stateMachine.getState();
+    data = await cleanCallData(data);
     console.log("📋 Call data collected:", JSON.stringify(data, null, 2));
     console.log(`📋 Final state: ${currentState}`);
     
