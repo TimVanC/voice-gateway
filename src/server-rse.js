@@ -702,7 +702,6 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.created":
-        clearWatchdog();
         const nextResponseId = event.response?.id || null;
         if (suppressAutoResponseWhileTranscribing && !_callCompleted) {
           cancelResponseAudio("waiting_for_transcription", nextResponseId, {
@@ -712,6 +711,7 @@ wss.on("connection", (twilioWs, req) => {
           console.log(`⏭️ Suppressed auto-response while waiting for transcript (id: ${nextResponseId || "unknown"})`);
           break;
         }
+        clearWatchdog();
         const staleBytes = playBuffer.length;
         const previousResponseId = currentResponseId;
         // Reject model response when we ignored an early transcript (greeting guard) so we don't play e.g. "What's wrong with your generator?"
