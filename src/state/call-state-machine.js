@@ -3451,7 +3451,7 @@ function createCallStateMachine() {
   }
   
   /** Urgency-based availability: no heat, emergency, anytime, as soon as possible. Do not over-structure. */
-  const URGENCY_AVAILABILITY_NOTES = 'Anytime. No heat. Urgent.';
+  const URGENCY_AVAILABILITY_NOTES = 'Available anytime.';
   function hasUrgencyAvailability(text) {
     if (!text || text.length < 2) return false;
     const lower = text.toLowerCase();
