@@ -1489,6 +1489,13 @@ wss.on("connection", (twilioWs, req) => {
           const currentStateForTranscript = stateMachine.getState();
           const sinceGreeting = greetingSentTime ? Date.now() - greetingSentTime : Infinity;
           if (inGreeting && sinceGreeting < GREETING_GUARD_MS) {
+            // CRITICAL: Even inside the greeting guard, always honor explicit transfer requests.
+            // Older callers often interrupt immediately with "get me a person" - we must not drop that.
+            if (detectRealPersonRequest(transcript, currentStateForTranscript)) {
+              console.log(`🚨 Transfer request detected during greeting guard - honoring immediately: "${transcript}"`);
+              transferToRealPerson();
+              break;
+            }
             console.log(`⏭️ Ignoring early transcript during greeting guard (${(sinceGreeting/1000).toFixed(1)}s since greeting)`);
             rejectNextResponseDueToGreetingGuard = true;  // Reject model's reply so we don't play e.g. "What's wrong with your generator?"
             break;
