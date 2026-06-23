@@ -517,9 +517,9 @@ wss.on("connection", (twilioWs, req) => {
             },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.7,
+              threshold: VAD_CONFIG.threshold,
               prefix_padding_ms: VAD_CONFIG.prefix_padding_ms,
-              silence_duration_ms: 1500,
+              silence_duration_ms: VAD_CONFIG.silence_duration_ms,
               create_response: true,
               interrupt_response: true
             }
@@ -534,7 +534,7 @@ wss.on("connection", (twilioWs, req) => {
     };
 
     openaiWs.send(JSON.stringify(sessionConfig));
-    console.log(`⚙️ Session VAD configured: threshold=0.7, silence=1500ms`);
+    console.log(`⚙️ Session VAD configured: threshold=${VAD_CONFIG.threshold}, silence=${VAD_CONFIG.silence_duration_ms}ms`);
   }
 
   function connectToOpenAI() {
@@ -2073,6 +2073,11 @@ STRICT RULES:
       /\b(transfer|connect me|put me through|can i speak)\b/,
       /\b(not a robot|not ai|not automated|actual person)\b/,
       /\b(team member|a team member|speak to a team member|talk to a team member)\b/,
+      /\b(get me a person|get me someone|someone real|speak with someone|talk with someone)\b/,
+      /\b(don'?t want (a computer|a machine|a robot|to talk to a computer|to talk to a machine))\b/,
+      /\b(i want (a person|a human|to talk to (a person|someone|a human)))\b/,
+      /\b(rather (speak|talk) to (a person|someone|a human|a real person))\b/,
+      /\b(is (there |anyone |anybody )(there|available|i can talk to))\b/,
     ];
 
     if (realPersonPatterns.some(pattern => pattern.test(lowerTranscript))) return true;
