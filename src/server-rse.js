@@ -2757,6 +2757,15 @@ Keep it SHORT.`;
           }
           break;
           
+        case "dtmf":
+          const dtmfDigit = msg.dtmf?.digit;
+          console.log(`🔢 DTMF digit pressed: ${dtmfDigit}`);
+          if (dtmfDigit === '0' && !transferRequested && !_callCompleted) {
+            console.log("📞 DTMF 0 pressed - transferring to team member");
+            transferToRealPerson();
+          }
+          break;
+          
         case "stop":
           console.log("📞 Stream stopped");
           cleanup().catch(err => console.error("❌ Cleanup error:", err));
