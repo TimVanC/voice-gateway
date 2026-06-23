@@ -26,6 +26,9 @@ const Anthropic = require('@anthropic-ai/sdk');
 const twilio = require('twilio');
 const sgMail = require('@sendgrid/mail');
 const WebSocket = require('ws');
+const { google } = require('googleapis');
+const fs = require('fs');
+const path = require('path');
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
@@ -48,6 +51,14 @@ const BALANCE_WARN_THRESHOLD = 5;
 
 const MONITOR_EMAIL_TO = process.env.MONITOR_EMAIL_TO || 'timvancau@gmail.com';
 const HEALTH_URL = process.env.MONITOR_HEALTH_URL;
+
+// Google Sheets config, read exactly the way src/utils/google-sheets-logger.js
+// does it (lines ~30-33): GOOGLE_APPLICATION_CREDENTIALS may be a file path OR
+// inline JSON, with GOOGLE_SHEETS_CREDENTIALS as the inline-JSON fallback.
+const SPREADSHEET_ID = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+const SHEET_NAME = process.env.GOOGLE_SHEETS_SHEET_NAME || 'RSE Data Call Intake Log';
+const GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS; // File path or JSON
+const GOOGLE_SHEETS_CREDENTIALS_JSON = process.env.GOOGLE_SHEETS_CREDENTIALS; // Inline JSON (fallback)
 
 // ============================================================================
 // CHECK 1: ANTHROPIC MODEL CHECK
@@ -195,7 +206,173 @@ async function checkTwilioBalance() {
 }
 
 // ============================================================================
-// CHECK 4: RAILWAY / SERVER UP CHECK
+// CHECK 4: GOOGLE SHEETS CHECK (call intake destination — highest priority)
+// ============================================================================
+// Builds an authenticated Sheets client using the SAME credential-loading logic
+// as src/utils/google-sheets-logger.js (getSheetsClient, lines ~438-503):
+// GOOGLE_APPLICATION_CREDENTIALS may be inline JSON or a file path, with
+// GOOGLE_SHEETS_CREDENTIALS as the inline-JSON fallback. READ-ONLY here.
+function buildSheetsClient() {
+  let auth;
+
+  if (GOOGLE_APPLICATION_CREDENTIALS) {
+    const trimmed = GOOGLE_APPLICATION_CREDENTIALS.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      let credentials;
+      try {
+        credentials = JSON.parse(trimmed);
+      } catch (e) {
+        throw new Error('GOOGLE_APPLICATION_CREDENTIALS contains invalid JSON');
+      }
+      auth = new google.auth.GoogleAuth({
+        credentials,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+      });
+      return google.sheets({ version: 'v4', auth });
+    }
+
+    const credentialsPath = path.resolve(GOOGLE_APPLICATION_CREDENTIALS);
+    if (fs.existsSync(credentialsPath)) {
+      auth = new google.auth.GoogleAuth({
+        keyFile: credentialsPath,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+      });
+      return google.sheets({ version: 'v4', auth });
+    }
+    // Fall through to inline JSON fallback if the file path does not exist.
+  }
+
+  if (GOOGLE_SHEETS_CREDENTIALS_JSON) {
+    let credentials;
+    try {
+      credentials = typeof GOOGLE_SHEETS_CREDENTIALS_JSON === 'string'
+        ? JSON.parse(GOOGLE_SHEETS_CREDENTIALS_JSON)
+        : GOOGLE_SHEETS_CREDENTIALS_JSON;
+    } catch (e) {
+      throw new Error('GOOGLE_SHEETS_CREDENTIALS must be valid JSON');
+    }
+    auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    });
+    return google.sheets({ version: 'v4', auth });
+  }
+
+  throw new Error('Google credentials not configured (set GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_SHEETS_CREDENTIALS)');
+}
+
+async function checkGoogleSheets() {
+  const result = { name: 'Google Sheets', status: 'fail', detail: '' };
+  try {
+    if (!SPREADSHEET_ID) {
+      result.detail = 'Missing GOOGLE_SHEETS_SPREADSHEET_ID';
+      return result;
+    }
+    if (!GOOGLE_APPLICATION_CREDENTIALS && !GOOGLE_SHEETS_CREDENTIALS_JSON) {
+      result.detail = 'Missing Google credentials (GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_SHEETS_CREDENTIALS)';
+      return result;
+    }
+
+    const sheets = buildSheetsClient();
+
+    // READ-ONLY metadata read. Does NOT write/append/modify the spreadsheet.
+    // Request only the title field to keep the call as light as possible.
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId: SPREADSHEET_ID,
+      fields: 'properties.title,sheets.properties.title',
+    });
+
+    const title = meta.data && meta.data.properties ? meta.data.properties.title : '(unknown)';
+    const tabs = (meta.data && meta.data.sheets) ? meta.data.sheets.map((s) => s.properties.title) : [];
+    const tabPresent = tabs.includes(SHEET_NAME);
+
+    if (tabPresent) {
+      result.status = 'pass';
+      result.detail = `Reachable — spreadsheet "${title}", tab "${SHEET_NAME}" present`;
+    } else {
+      // Credentials and access are fine, but the expected tab is missing.
+      result.status = 'fail';
+      result.detail = `Spreadsheet "${title}" reachable but tab "${SHEET_NAME}" not found (tabs: ${tabs.join(', ') || 'none'})`;
+    }
+  } catch (err) {
+    const status = err && err.code ? `HTTP ${err.code}: ` : '';
+    result.detail = `Sheets access error — ${status}${err && err.message ? err.message : String(err)}`;
+  }
+  return result;
+}
+
+// ============================================================================
+// CHECK 5: EMAIL_TO PRESENCE CHECK (read-only; never emails EMAIL_TO)
+// ============================================================================
+// IMPORTANT: This validates EMAIL_TO format only. It NEVER sends mail to
+// EMAIL_TO. The monitor's only email recipient remains MONITOR_EMAIL_TO.
+function isValidEmail(addr) {
+  // Pragmatic email shape check (not full RFC 5322): local@domain.tld
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr);
+}
+
+async function checkEmailToPresence() {
+  const result = { name: 'EMAIL_TO config', status: 'fail', detail: '' };
+  try {
+    const raw = process.env.EMAIL_TO;
+    if (!raw || !String(raw).trim()) {
+      result.detail = 'Missing EMAIL_TO';
+      return result;
+    }
+
+    const addresses = String(raw)
+      .split(/[,\n;]+/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    if (addresses.length === 0) {
+      result.detail = 'EMAIL_TO is set but contains no addresses';
+      return result;
+    }
+
+    const invalid = addresses.filter((a) => !isValidEmail(a));
+    if (invalid.length > 0) {
+      result.detail = `EMAIL_TO has malformed address(es): ${invalid.join(', ')}`;
+      return result;
+    }
+
+    result.status = 'pass';
+    result.detail = `${addresses.length} valid recipient(s) configured`;
+  } catch (err) {
+    result.detail = `EMAIL_TO validation error — ${err && err.message ? err.message : String(err)}`;
+  }
+  return result;
+}
+
+// ============================================================================
+// CHECK 6: TRANSFER_PHONE_NUMBER PRESENCE CHECK
+// ============================================================================
+async function checkTransferNumber() {
+  const result = { name: 'TRANSFER_PHONE_NUMBER config', status: 'fail', detail: '' };
+  try {
+    const raw = process.env.TRANSFER_PHONE_NUMBER;
+    if (!raw || !String(raw).trim()) {
+      result.detail = 'Missing TRANSFER_PHONE_NUMBER';
+      return result;
+    }
+
+    const value = String(raw).trim();
+    // E.164: leading +, first digit 1-9, up to 15 digits total.
+    if (!/^\+[1-9]\d{1,14}$/.test(value)) {
+      result.detail = `TRANSFER_PHONE_NUMBER "${value}" is not valid E.164 (expected e.g. +18623701734)`;
+      return result;
+    }
+
+    result.status = 'pass';
+    result.detail = `Valid E.164 number configured (${value})`;
+  } catch (err) {
+    result.detail = `TRANSFER_PHONE_NUMBER validation error — ${err && err.message ? err.message : String(err)}`;
+  }
+  return result;
+}
+
+// ============================================================================
+// CHECK 7: RAILWAY / SERVER UP CHECK
 // ============================================================================
 function httpGetJson(targetUrl, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -322,6 +499,9 @@ async function main() {
   checks.push(await checkAnthropic());
   checks.push(await checkOpenAIRealtime());
   checks.push(await checkTwilioBalance());
+  checks.push(await checkGoogleSheets());
+  checks.push(await checkEmailToPresence());
+  checks.push(await checkTransferNumber());
   checks.push(await checkServerHealth());
 
   for (const c of checks) {
