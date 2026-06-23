@@ -35,7 +35,7 @@ const { URL } = require('url');
 const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 
 // Warn when the Twilio balance drops below this figure (account currency).
-const BALANCE_WARN_THRESHOLD = 20;
+const BALANCE_WARN_THRESHOLD = 5;
 
 const MONITOR_EMAIL_TO = process.env.MONITOR_EMAIL_TO || 'timvancau@gmail.com';
 const HEALTH_URL = process.env.MONITOR_HEALTH_URL;
