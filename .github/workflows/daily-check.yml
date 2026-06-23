@@ -29,4 +29,10 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           MONITOR_HEALTH_URL: ${{ secrets.MONITOR_HEALTH_URL }}
           MONITOR_EMAIL_TO: ${{ secrets.MONITOR_EMAIL_TO }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
+          GOOGLE_SHEETS_SHEET_NAME: ${{ secrets.GOOGLE_SHEETS_SHEET_NAME }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TRANSFER_PHONE_NUMBER: ${{ secrets.TRANSFER_PHONE_NUMBER }}
         run: node src/monitor/daily-check.js
