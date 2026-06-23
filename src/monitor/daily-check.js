@@ -25,6 +25,7 @@ require('dotenv').config();
 const Anthropic = require('@anthropic-ai/sdk');
 const twilio = require('twilio');
 const sgMail = require('@sendgrid/mail');
+const WebSocket = require('ws');
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
@@ -33,6 +34,14 @@ const { URL } = require('url');
 // src/utils/data-cleanup.js (currently 'claude-sonnet-4-6', see line ~46).
 // If the model is upgraded/deprecated there, update it here too.
 const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+
+// OpenAI Realtime endpoint that powers Ava's voice. This mirrors the connection
+// in src/server-rse.js (line ~544): GA endpoint, Authorization header only, no
+// OpenAI-Beta header.
+// IMPORTANT: The 'gpt-realtime' model string MUST be kept in sync with
+// src/server-rse.js (lines ~33 and ~509). If the model is changed/retired there,
+// update this URL too.
+const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime';
 
 // Warn when the Twilio balance drops below this figure (account currency).
 const BALANCE_WARN_THRESHOLD = 5;
@@ -75,7 +84,79 @@ async function checkAnthropic() {
 }
 
 // ============================================================================
-// CHECK 2: TWILIO BALANCE CHECK
+// CHECK 2: OPENAI REALTIME CHECK (powers Ava's voice — most critical dependency)
+// ============================================================================
+function checkOpenAIRealtime() {
+  // Returns a Promise that always resolves (never rejects) with a result object,
+  // so this check can never block the others or the email send.
+  return new Promise((resolve) => {
+    const result = { name: 'OpenAI Realtime', status: 'fail', detail: '' };
+
+    if (!process.env.OPENAI_API_KEY) {
+      result.detail = 'Missing OPENAI_API_KEY';
+      resolve(result);
+      return;
+    }
+
+    let settled = false;
+    let ws;
+
+    // Ensures we resolve exactly once and always tear down the socket.
+    const finish = (status, detail) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      result.status = status;
+      result.detail = detail;
+      try {
+        if (ws) ws.close();
+      } catch (e) {
+        // Ignore close errors; the result is already determined.
+      }
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      finish('fail', 'Timed out after 15000ms waiting for session.created');
+    }, 15000);
+
+    try {
+      ws = new WebSocket(OPENAI_REALTIME_URL, {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        },
+      });
+
+      ws.on('message', (data) => {
+        try {
+          const event = JSON.parse(data.toString());
+          if (event && event.type === 'session.created') {
+            finish('pass', 'Connection opened and session.created received');
+          } else if (event && event.type === 'error') {
+            const msg = event.error && event.error.message ? event.error.message : JSON.stringify(event.error);
+            finish('fail', `OpenAI error event before session.created — ${msg}`);
+          }
+        } catch (e) {
+          // Non-JSON / unexpected frame; keep waiting until session.created or timeout.
+        }
+      });
+
+      ws.on('close', (code, reason) => {
+        const reasonStr = reason ? reason.toString() : '';
+        finish('fail', `Connection closed before session.created (code: ${code}${reasonStr ? `, reason: ${reasonStr}` : ''})`);
+      });
+
+      ws.on('error', (err) => {
+        finish('fail', `Connection error — ${err && err.message ? err.message : String(err)}`);
+      });
+    } catch (err) {
+      finish('fail', `Failed to open WebSocket — ${err && err.message ? err.message : String(err)}`);
+    }
+  });
+}
+
+// ============================================================================
+// CHECK 3: TWILIO BALANCE CHECK
 // ============================================================================
 async function checkTwilioBalance() {
   const result = { name: 'Twilio balance', status: 'fail', detail: '' };
@@ -114,7 +195,7 @@ async function checkTwilioBalance() {
 }
 
 // ============================================================================
-// CHECK 3: RAILWAY / SERVER UP CHECK
+// CHECK 4: RAILWAY / SERVER UP CHECK
 // ============================================================================
 function httpGetJson(targetUrl, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -239,6 +320,7 @@ async function main() {
   // Run each check; each one handles its own errors and resolves a result object.
   const checks = [];
   checks.push(await checkAnthropic());
+  checks.push(await checkOpenAIRealtime());
   checks.push(await checkTwilioBalance());
   checks.push(await checkServerHealth());
 
