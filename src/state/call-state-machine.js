@@ -2169,6 +2169,18 @@ function createCallStateMachine() {
           }
         }
         
+        if (/\b(anytime|any\s+time|any\s+day|whenever|flexible)\b/i.test(lowerTranscript)) {
+          data.availability = 'Available anytime';
+          data.availability_confidence = 100;
+          data._availabilityComplete = true;
+          if (!hasRequiredName()) {
+            console.log(`📋 Name required before confirmation - forcing name intake`);
+            data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
+            return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+          }
+          return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
+        }
+
         if (transcript.length > 2 && looksLikeAvailability(lowerTranscript)) {
           const extracted = extractAvailability(transcript);
           let availabilityConfidencePercent = 80; // Default; reduce for hesitation
@@ -3443,11 +3455,9 @@ function createCallStateMachine() {
   }
   
   function isVagueAvailability(text) {
-    const vaguePatterns = ['anytime', 'whenever', 'flexible', 'any day', 'any time'];
-    return vaguePatterns.some(p => text.includes(p)) && 
-           !text.includes('morning') && 
-           !text.includes('afternoon') && 
-           !text.includes('evening');
+    const hasSpecificDay = /\b(weekday|weekdays|monday|tuesday|wednesday|thursday|friday|weekend|saturday|sunday)\b/i.test(text);
+    const hasTimeOfDay = text.includes('morning') || text.includes('afternoon') || text.includes('evening') || /\b(am|pm|\d+\s*(am|pm))\b/.test(text);
+    return hasSpecificDay && !hasTimeOfDay;
   }
   
   /** Urgency-based availability: no heat, emergency, anytime, as soon as possible. Do not over-structure. */
@@ -3532,6 +3542,9 @@ function createCallStateMachine() {
         data.details.systemType = normalizeSystemType(text);
         const uncertainPhrases = /\b(not\s+too?\s+sure|i'?d\s+take|maybe|i\s+think|unsure|not\s+sure|don'?t\s+know|might\s+be)\b/i;
         data.details.systemTypeUncertain = uncertainPhrases.test(text);
+        if (data.details.systemTypeUncertain && /\b(not\s+sure|don'?t\s+know|unsure|not\s+too?\s+sure)\b/i.test(data.details.systemType || '')) {
+          data.details.systemType = null;
+        }
       } else if (currentQuestion === DETAILS.hvac_service.symptoms) {
         data.details.symptoms = text;
       } else if (currentQuestion === DETAILS.hvac_service.start_time) {
@@ -3547,6 +3560,9 @@ function createCallStateMachine() {
         data.details.systemType = normalizeSystemType(text);
         const uncertainPhrases = /\b(not\s+too?\s+sure|i'?d\s+take|maybe|i\s+think|unsure|not\s+sure|don'?t\s+know|might\s+be)\b/i;
         data.details.systemTypeUncertain = uncertainPhrases.test(text);
+        if (data.details.systemTypeUncertain && /\b(not\s+sure|don'?t\s+know|unsure|not\s+too?\s+sure)\b/i.test(data.details.systemType || '')) {
+          data.details.systemType = null;
+        }
       } else if (currentQuestion === DETAILS.hvac_installation.property_type) {
         data.details.propertyType = text;
       }

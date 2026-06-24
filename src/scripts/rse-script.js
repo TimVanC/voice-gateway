@@ -520,7 +520,7 @@ Read back with spelling:
 - Availability: read the window
 - Issue: one sentence summary
 
-Then ask: "Is all of that correct?"
+Then ask: "Is everything correct?" Say only the read-back and this question. Do not add commentary, corrections, or follow-up questions.
 
 === SAFETY ===
 If smoke, gas smell, sparks, or total shutdown mentioned:
