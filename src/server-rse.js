@@ -838,7 +838,9 @@ wss.on("connection", (twilioWs, req) => {
             const normalizedActual = actualTranscript.toLowerCase().trim();
             const isValidPrefix = normalizedExpected.startsWith(normalizedActual);
 
-            if (audioDoneReceived && !isValidPrefix && !transcriptMatchesExpected(expectedTranscript, actualTranscript) && actualTranscript.length > 20) {
+            const currentState = stateMachine.getState();
+            const skipHallucinationCheck = currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE;
+            if (!skipHallucinationCheck && audioDoneReceived && !isValidPrefix && !transcriptMatchesExpected(expectedTranscript, actualTranscript) && actualTranscript.length > 20) {
               // Less than 30% match on key words - likely hallucination (fabricated line). Do NOT treat as spoken.
               console.log(`📜 AI said (rejected - not script): "${event.transcript}"`);
               // Track hallucination count for this prompt
