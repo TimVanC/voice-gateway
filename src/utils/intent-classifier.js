@@ -136,4 +136,55 @@ function classifyIntent(text) {
   return null;
 }
 
-module.exports = { classifyIntent };
+// ============================================================================
+// DETECT REAL PERSON REQUEST
+// ============================================================================
+
+/**
+ * Detects explicit requests to reach a human. Explicit phrasings ("real
+ * person", "agent", "transfer") fire in any state. Softer "reach" phrasings
+ * ("looking for", "speak to", "reach") only fire in early states AND only
+ * when aimed at a person AND the utterance carries no service intent —
+ * "I'm looking for someone to service my furnace" is intake, not a
+ * transfer request.
+ * @param {string} transcript - raw transcript (any case)
+ * @param {string} [state] - current call state name
+ */
+function detectRealPersonRequest(transcript, state) {
+  const lowerTranscript = String(transcript || '').toLowerCase();
+  const realPersonPatterns = [
+    /\b(real person|human|speak to someone|talk to someone|talk to a person|speak to a person)\b/,
+    /\b(agent|representative|operator|live person|live agent)\b/,
+    /\b(transfer|connect me|put me through|can i speak)\b/,
+    /\b(not a robot|not ai|not automated|actual person)\b/,
+    /\b(team member|a team member|speak to a team member|talk to a team member)\b/,
+    /\b(get me a person|get me someone|someone real|speak with someone|talk with someone)\b/,
+    /\b(don'?t want (a computer|a machine|a robot|to talk to a computer|to talk to a machine))\b/,
+    /\b(i want (a person|a human|to talk to (a person|someone|a human)))\b/,
+    /\b(rather (speak|talk) to (a person|someone|a human|a real person))\b/,
+    /\b(is (there |anyone |anybody )(there|available|i can talk to))\b/,
+  ];
+
+  if (realPersonPatterns.some(pattern => pattern.test(lowerTranscript))) return true;
+
+  // Staff name and "reach someone" patterns — ONLY active in greeting/intent state
+  // to avoid triggering when a caller gives their own name during intake
+  const isEarlyState = !state || state === 'greeting' || state === 'intent';
+  if (isEarlyState) {
+    const RSE_STAFF_NAMES = /\b(ronald|ron|zelda|raymond|andrew|shamyah|kai)\b/i;
+    const REACH_PATTERNS = /\b(get a hold of|reach|trying to reach|speak to|talk to|looking for|get through to)\b/i;
+    const PERSON_REFERENCE = /\b(someone|somebody|anyone|anybody|a person|person|people|human|staff|manager|owner|receptionist|the office)\b/i;
+    if (RSE_STAFF_NAMES.test(lowerTranscript)) return true;
+    // Reach phrasing counts as a transfer request only when aimed at a person
+    // and not carrying a service need (service needs go through intake).
+    if (REACH_PATTERNS.test(lowerTranscript) &&
+        PERSON_REFERENCE.test(lowerTranscript) &&
+        !classifyIntent(lowerTranscript)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+module.exports = { classifyIntent, detectRealPersonRequest };

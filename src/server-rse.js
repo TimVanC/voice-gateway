@@ -21,7 +21,7 @@ const { SYSTEM_PROMPT, GREETING, STATES, INTENT_TYPES, NEUTRAL, OUT_OF_SCOPE, CL
 const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = require('./config/vad-config');
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
-const { classifyIntent } = require('./utils/intent-classifier');
+const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
@@ -2067,39 +2067,6 @@ STRICT RULES:
       console.log(`🔄 Recovery: sending prompt for state ${stateMachine.getState()}`);
       sendStatePrompt(prompt);
     }
-  }
-  
-  // ============================================================================
-  // DETECT REAL PERSON REQUEST
-  // ============================================================================
-  function detectRealPersonRequest(transcript, state) {
-    const lowerTranscript = transcript.toLowerCase();
-    const realPersonPatterns = [
-      /\b(real person|human|speak to someone|talk to someone|talk to a person|speak to a person)\b/,
-      /\b(agent|representative|operator|live person|live agent)\b/,
-      /\b(transfer|connect me|put me through|can i speak)\b/,
-      /\b(not a robot|not ai|not automated|actual person)\b/,
-      /\b(team member|a team member|speak to a team member|talk to a team member)\b/,
-      /\b(get me a person|get me someone|someone real|speak with someone|talk with someone)\b/,
-      /\b(don'?t want (a computer|a machine|a robot|to talk to a computer|to talk to a machine))\b/,
-      /\b(i want (a person|a human|to talk to (a person|someone|a human)))\b/,
-      /\b(rather (speak|talk) to (a person|someone|a human|a real person))\b/,
-      /\b(is (there |anyone |anybody )(there|available|i can talk to))\b/,
-    ];
-
-    if (realPersonPatterns.some(pattern => pattern.test(lowerTranscript))) return true;
-
-    // Staff name and "reach someone" patterns — ONLY active in greeting/intent state
-    // to avoid triggering when a caller gives their own name during intake
-    const isEarlyState = !state || state === 'greeting' || state === 'intent';
-    if (isEarlyState) {
-      const RSE_STAFF_NAMES = /\b(ronald|ron|zelda|raymond|andrew|shamyah|kai)\b/i;
-      const REACH_PATTERNS = /\b(get a hold of|reach|trying to reach|speak to|talk to|looking for|get through to)\b/i;
-      if (RSE_STAFF_NAMES.test(lowerTranscript)) return true;
-      if (REACH_PATTERNS.test(lowerTranscript)) return true;
-    }
-
-    return false;
   }
   
   // ============================================================================
