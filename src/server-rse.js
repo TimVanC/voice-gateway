@@ -1012,10 +1012,10 @@ wss.on("connection", (twilioWs, req) => {
             const audioSeconds = totalAudioBytesSent / 8000;
             console.log(`⏸️ User heard ${audioSeconds.toFixed(1)}s of audio in ${currentState} state - waiting for response without recovery`);
             // Mark that confirmation was attempted (for completion tracking)
-            const callData = stateMachine.getData();
+            // NOTE: must go through updateData — getData() returns a copy
             if (currentState === STATES.CONFIRMATION && audioSeconds > 5) {
               // If we got 5+ seconds of confirmation audio, mark as delivered
-              callData._confirmationDelivered = true;
+              stateMachine.updateData('_confirmationDelivered', true);
             }
             // NO recovery timer - just wait for user to respond naturally
             responseInProgress = false;
@@ -1168,8 +1168,7 @@ wss.on("connection", (twilioWs, req) => {
               
               // Mark confirmation if in confirmation state
               if (currentState === STATES.CONFIRMATION) {
-                const callData = stateMachine.getData();
-                callData._confirmationDelivered = true;
+                stateMachine.updateData('_confirmationDelivered', true);
               }
               
               // Reset dynamic silence to default after turn completes
@@ -1282,13 +1281,11 @@ wss.on("connection", (twilioWs, req) => {
           
           // If confirmation prompt was delivered and completed, mark it
           if (currentState === STATES.CONFIRMATION) {
-            const callData = stateMachine.getData();
-            callData._confirmationDelivered = true;
+            stateMachine.updateData('_confirmationDelivered', true);
           }
           // If close state reached, mark it
           if (currentState === STATES.CLOSE) {
-            const callData = stateMachine.getData();
-            callData._closeStateReached = true;
+            stateMachine.updateData('_closeStateReached', true);
           }
           
           // HANG UP only after goodbye TTS completes and buffer has played out (see audio pump)

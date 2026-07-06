@@ -83,7 +83,14 @@ function createCallStateMachine() {
     _emailLocked: false,
     _addressLocked: false,
     _availabilityLocked: false,
-    
+
+    // Call-progress flags. Declared here because updateData() only accepts
+    // pre-declared keys — undeclared keys silently no-op, so server-side
+    // writes to these were being lost.
+    _confirmationDelivered: false,
+    _closeStateReached: false,
+    _anythingElsePrompted: false,
+
     // Details based on intent
     details: {
       // HVAC service
@@ -960,54 +967,22 @@ function createCallStateMachine() {
           }
           
           // CASE 3: SPELLING MODE — deterministic letter-only. Max 2 attempts: one retry then force lock. No diagnostic prompts.
+          // Every reply that isn't a yes/no/clarification is treated as a spelling
+          // attempt; valid letters lock, anything else retries once then force-locks.
           const strictSpelling = parseSpelledLettersOnly(transcript);
           const spellingAttempts = pendingClarification.spellingAttempts || 0;
-          if (strictSpelling !== null) {
-            const { lastName: spelledLastName, letterCount } = strictSpelling;
-            if (letterCount >= 3 && spelledLastName) {
-              data.firstName = cleanFieldValue(pendingClarification.value.firstName) || pendingClarification.value.firstName;
-              data.lastName = cleanFieldValue(spelledLastName) || spelledLastName;
-              data.name_confidence = 95;
-              data._nameComplete = true;
-              data._nameLocked = true;
-              clearPendingClarification();
-              console.log(`✅ Name CONFIRMED from spelling (letter-only, locked): ${data.firstName} ${data.lastName}`);
-              return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
-            }
-            if (spellingAttempts >= MAX_SPELLING_ATTEMPTS) {
-              return forceLockNameAndAdvance(spelledLastName || null, transcript);
-            }
-            pendingClarification.spellingAttempts = 2;
-            return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
-          } else {
-            if (spellingAttempts >= MAX_SPELLING_ATTEMPTS) {
-              return forceLockNameAndAdvance(null, transcript);
-            }
-            pendingClarification.spellingAttempts = 2;
-            return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
+          if (strictSpelling !== null && strictSpelling.letterCount >= 3 && strictSpelling.lastName) {
+            data.firstName = cleanFieldValue(pendingClarification.value.firstName) || pendingClarification.value.firstName;
+            data.lastName = cleanFieldValue(strictSpelling.lastName) || strictSpelling.lastName;
+            data.name_confidence = 95;
+            data._nameComplete = true;
+            data._nameLocked = true;
+            clearPendingClarification();
+            console.log(`✅ Name CONFIRMED from spelling (letter-only, locked): ${data.firstName} ${data.lastName}`);
+            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
           }
-          
-          // CASE 4: User provides a name correction (not spelled, e.g., "It's Smith, not Smythe")
-          const corr = extractName(transcript);
-          if (corr.firstName || corr.lastName) {
-            // User provided a different name - update pending and re-confirm without spelling
-            const newFirstName = corr.firstName || pendingClarification.value.firstName;
-            const newLastName = corr.lastName || pendingClarification.value.lastName;
-            console.log(`📋 Received name correction: "${newFirstName} ${newLastName}"`);
-            
-            pendingClarification.value.firstName = newFirstName;
-            pendingClarification.value.lastName = newLastName;
-            return {
-              nextState: currentState,  // STAY in NAME state - re-confirm the correction
-              prompt: `Got it, ${newFirstName} ${newLastName}. Is that correct?`,
-              action: 'ask'
-            };
-          }
-          
-          // CASE 5: Unclear response — one retry then force lock (spelling cap = 2)
-          const attempt = pendingClarification.spellingAttempts || 0;
-          if (attempt >= MAX_SPELLING_ATTEMPTS) {
-            return forceLockNameAndAdvance(null, transcript);
+          if (spellingAttempts >= MAX_SPELLING_ATTEMPTS) {
+            return forceLockNameAndAdvance((strictSpelling && strictSpelling.lastName) || null, transcript);
           }
           pendingClarification.spellingAttempts = 2;
           return { nextState: currentState, prompt: "Can you spell that one more time please?", action: 'ask' };
@@ -1306,7 +1281,7 @@ function createCallStateMachine() {
             data.state = addressParts.state || data.state;
             data.zip = addressParts.zip || data.zip;
             // If phone is already set, move to email/availability
-            if (data.phone || metadata?.callerNumber) {
+            if (data.phone) {
               // Check if we still need email
               if (!data.email) {
                 return {
@@ -1344,7 +1319,7 @@ function createCallStateMachine() {
         if (isAlreadyProvidedResponse(lowerTranscript) || lowerTranscript.includes('already') || lowerTranscript.includes('went over')) {
           // They already gave phone or are providing availability/other info
           // If phone is already set, move to email
-          if (data.phone || metadata?.callerNumber) {
+          if (data.phone) {
             console.log(`✅ Phone already collected, moving to email`);
             return {
               nextState: transitionTo(STATES.EMAIL),
@@ -1364,7 +1339,7 @@ function createCallStateMachine() {
         if (looksLikeAvailability(lowerTranscript)) {
           console.log(`📋 Availability detected in PHONE state: "${transcript}"`);
           // If phone is already collected, treat as availability and move forward
-          if (data.phone || metadata?.callerNumber) {
+          if (data.phone) {
             data.availability = extractAvailability(transcript);
             console.log(`📋 Availability: ${data.availability}`);
             // Check what we still need
