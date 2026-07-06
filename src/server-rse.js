@@ -22,6 +22,7 @@ const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = re
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
+const { isLikelySilenceHallucination } = require('./utils/transcript-filters');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
@@ -514,7 +515,9 @@ wss.on("connection", (twilioWs, req) => {
           input: {
             format: { type: "audio/pcmu" },
             transcription: {
-              model: "whisper-1"
+              // gpt-4o-mini-transcribe hallucinates far less than whisper-1
+              // on near-silent audio (phantom "Thank you." transcripts)
+              model: "gpt-4o-mini-transcribe"
             },
             turn_detection: {
               type: "server_vad",
@@ -1489,9 +1492,22 @@ wss.on("connection", (twilioWs, req) => {
           const transcript = event.transcript.trim();
           console.log(`📝 User said: "${transcript}"`);
           stateMachine.intakeLog('transcript', { transcript: transcript.substring(0, 100) });
-          
+
           waitingForTranscription = false;
-          
+
+          // ASR silence-hallucination filter: noise blips the VAD commits
+          // transcribe as "Thank you." / "Bye." (~1.3s events). Drop them
+          // silently — no re-prompt, no greeting retry (the re-asks were the
+          // damage: replayed greetings and duplicate questions). Watchdog is
+          // cleared so it can't fire a fallback off the phantom; auto-response
+          // suppression stays armed so the model can't answer phantom audio.
+          if (isLikelySilenceHallucination(transcript, lastSpeechDurationMs)) {
+            console.log(`🔇 Dropping likely ASR silence-hallucination: "${transcript}" (speech ${lastSpeechDurationMs}ms)`);
+            stateMachine.intakeLog('state_event', { event: 'silence_hallucination_dropped', transcript: transcript.substring(0, 40), duration_ms: lastSpeechDurationMs });
+            clearWatchdog();
+            break;
+          }
+
           const inGreeting = stateMachine.getState() === STATES.GREETING;
           const currentStateForTranscript = stateMachine.getState();
           const sinceGreeting = greetingSentTime ? Date.now() - greetingSentTime : Infinity;
