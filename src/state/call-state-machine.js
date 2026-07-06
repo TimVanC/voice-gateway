@@ -2263,7 +2263,7 @@ function createCallStateMachine() {
           };
         }
         // If user says "no" or gives a partial response, re-ask verification
-        if (lowerTranscript.includes('no') || lowerTranscript.includes('not') || lowerTranscript.length < 3) {
+        if (/\b(no|not|nope|nah)\b/.test(lowerTranscript) || lowerTranscript.length < 3) {
           return {
             nextState: currentState,
             prompt: CONFIRMATION.verify,
@@ -3591,15 +3591,6 @@ function createCallStateMachine() {
     console.log(`📋 Detail stored: ${text.substring(0, 50)}...`);
   }
   
-  function isConfirmation(text) {
-    const confirmPatterns = [
-      'yes', 'yep', 'yeah', 'correct', 'right', 'that\'s right', 
-      'sounds good', 'looks good', 'perfect', 'all good', 'good',
-      'that\'s correct', 'yes it is', 'yup'
-    ];
-    return confirmPatterns.some(p => text.includes(p));
-  }
-  
   /**
    * Detect if user is referring to their name (for backtracking)
    * Used to route back to NAME state when user mentions name-related issues
@@ -3646,15 +3637,6 @@ function createCallStateMachine() {
       }
     }
     return false;
-  }
-  
-  function isCorrection(text) {
-    const correctionPatterns = [
-      'no', 'not quite', 'actually', 'wait', 'change', 'wrong',
-      'incorrect', 'that\'s not', 'fix', 'update', 'correction',
-      'let me correct', 'that\'s wrong'
-    ];
-    return correctionPatterns.some(p => text.includes(p));
   }
   
   function hasMoreQuestions(text) {
@@ -3774,9 +3756,40 @@ function detectSafetyEmergency(text) {
   });
 }
 
+/**
+ * Affirmative confirmation detector for recap and field confirmations.
+ * Word-boundary matching with a negation gate: any negation anywhere in the
+ * utterance blocks confirmation, so "no, that's not right" / "the address is
+ * incorrect" can never count as a yes. "no problem" / "no worries" are
+ * affirmative idioms, not negations. Pure — module scope for direct testing.
+ * @param {string} text - transcript (any case)
+ */
+function isConfirmation(text) {
+  if (!text || typeof text !== 'string') return false;
+  const normalized = text.toLowerCase().replace(/[‘’]/g, "'");
+  const negation = /\b(no(?!\s+(problem|worries))|nope|nah|not|never|wrong|incorrect|isn'?t|doesn'?t|ain'?t)\b/;
+  if (negation.test(normalized)) return false;
+  const affirmative = /\b(yes|yeah|yep|yup|correct|right|exactly|perfect|sounds good|looks good|all good|good|that'?s it)\b/;
+  return affirmative.test(normalized);
+}
+
+/**
+ * Correction/rejection detector for recap and field confirmations.
+ * Word-boundary matching so "no" cannot fire inside "know" / "now".
+ * Pure — module scope for direct testing.
+ * @param {string} text - transcript (any case)
+ */
+function isCorrection(text) {
+  if (!text || typeof text !== 'string') return false;
+  const normalized = text.toLowerCase().replace(/[‘’]/g, "'");
+  return /\b(no|nope|nah|not quite|actually|wait|change|wrong|incorrect|that'?s not|fix|update|correction|mistake)\b/.test(normalized);
+}
+
 module.exports = {
   createCallStateMachine,
   STATES,
   INTENT_TYPES,
-  detectSafetyEmergency
+  detectSafetyEmergency,
+  isConfirmation,
+  isCorrection
 };
