@@ -1788,12 +1788,34 @@ function createCallStateMachine() {
           console.log(`⏳ Ignoring acknowledgment-only utterance in ADDRESS: "${transcript}"`);
           return {
             nextState: currentState,
-            prompt: ADDRESS.ask,
+            // When locked we're waiting on state/zip, not the full address
+            prompt: (data._addressLocked && (!data.state || !data.zip)) ? "Could you also provide the state and zip code?" : ADDRESS.ask,
             action: 'ask'
           };
         }
-        // If address already locked, skip to next state immediately
+        // Address locked: only state/zip enrichment remains. The state/zip
+        // follow-up question is asked AFTER locking, so the caller's answer
+        // lands here — merge it instead of discarding it (previously this
+        // guard short-circuited and every answer to the follow-up was lost).
         if (data._addressLocked) {
+          if (!data.state || !data.zip) {
+            const sz = extractStateAndZip(transcript);
+            if (sz.state && !data.state) data.state = sz.state;
+            if (sz.zip && !data.zip) data.zip = sz.zip;
+            if (sz.state || sz.zip) {
+              console.log(`✅ State/Zip merged post-lock: state="${data.state || 'N/A'}", zip="${data.zip || 'N/A'}"`);
+              intakeLog('field_parse', { field: 'state_zip', state: data.state, zip: data.zip, source: 'post_lock_merge' });
+            }
+            if (!data.state || !data.zip) {
+              data._stateZipAttempts = (data._stateZipAttempts || 0) + 1;
+              if (data._stateZipAttempts < MAX_PROMPT_ATTEMPTS) {
+                const missing = (!data.state && !data.zip) ? 'the state and zip code' : (!data.state ? 'the state' : 'the zip code');
+                return { nextState: currentState, prompt: `Could you also provide ${missing}?`, action: 'ask' };
+              }
+              console.log(`📋 State/zip attempt cap reached - advancing with state=${data.state || 'N/A'}, zip=${data.zip || 'N/A'}`);
+              intakeLog('retry_cap_reached', { field: 'state_zip', attempts: data._stateZipAttempts });
+            }
+          }
           return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
         }
         // Immediate confirmation (Phase 2): we asked "Did you say the street name was X? Did you say the town was Y?"
@@ -1808,6 +1830,11 @@ function createCallStateMachine() {
             data._addressComplete = true;
             data._addressLocked = true;  // Do not re-parse during recap; CSV reads only this
             clearPendingClarification();
+            // Ask for state/zip if missing (locked guard above merges the answer)
+            if (!data.state || !data.zip) {
+              const missing = (!data.state && !data.zip) ? 'the state and zip code' : (!data.state ? 'the state' : 'the zip code');
+              return { nextState: currentState, prompt: `Could you also provide ${missing}?`, action: 'ask' };
+            }
             return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
           }
           
@@ -1860,6 +1887,11 @@ function createCallStateMachine() {
           data._addressComplete = true;
           data._addressLocked = true;
           clearPendingClarification();
+          // Ask for state/zip if missing (locked guard above merges the answer)
+          if (!data.state || !data.zip) {
+            const missing = (!data.state && !data.zip) ? 'the state and zip code' : (!data.state ? 'the state' : 'the zip code');
+            return { nextState: currentState, prompt: `Could you also provide ${missing}?`, action: 'ask' };
+          }
           return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
         }
         
@@ -3154,6 +3186,10 @@ function createCallStateMachine() {
       .replace(/^(yeah\s*,?\s*)?(sure\s*,?\s*)?(no\s+problem\s*,?\s*)?(that'?s|it'?s|that\s+would\s+be)\s*/gi, '')
       .trim();
     
+    // Collapse digit-by-digit spoken zips ("0 7 0 5 2" → "07052") so the
+    // 5-contiguous-digit match below can see them (ASR emits spaced digits)
+    cleaned = cleaned.replace(/\b(\d)[\s.\-]+(\d)[\s.\-]+(\d)[\s.\-]+(\d)[\s.\-]+(\d)\b/g, '$1$2$3$4$5');
+
     // Extract zip code (5 digits)
     const zipMatch = cleaned.match(/\b(\d{5})(?:-?\d{4})?\b/);
     if (zipMatch) {
