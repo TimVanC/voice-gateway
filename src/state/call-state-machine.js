@@ -2583,15 +2583,6 @@ function createCallStateMachine() {
     return d && d.generatorType === 'new';
   }
   
-  function detectSafetyEmergency(text) {
-    const emergencyKeywords = [
-      'smoke', 'fire', 'gas smell', 'smells like gas', 'sparks', 
-      'sparking', 'burning', 'flames', 'carbon monoxide', 'co detector',
-      'total shutdown', 'completely out', 'emergency', 'dangerous'
-    ];
-    return emergencyKeywords.some(kw => text.includes(kw));
-  }
-  
   /**
    * Transcript looks like ASR mishearing of letter-by-letter spelling (e.g. "bye van kallenberg" for B-Y V-A-N ...).
    * When true, do NOT lock extractName result — ask for letter-by-letter spelling instead.
@@ -3748,8 +3739,44 @@ function createCallStateMachine() {
   };
 }
 
+/**
+ * Detect a genuine safety emergency in the caller's answer to the safety-check
+ * question ("any smoke, gas smell, or sparks right now?").
+ *
+ * The question itself names the danger words, so a natural denial ("no smoke,
+ * no gas, nothing like that") contains them. A keyword therefore only counts
+ * when the clause it appears in is NOT negated. Clauses end at punctuation or
+ * "but" — deliberately not at "and"/"or", because negation distributes across
+ * those ("no smoke or sparks" is one negated clause).
+ *
+ * Module-scope and exported (pure function) so tests can exercise it directly.
+ * @param {string} text - lowercased transcript
+ */
+function detectSafetyEmergency(text) {
+  if (!text || typeof text !== 'string') return false;
+  const emergencyKeywords = [
+    'smoke', 'fire', 'gas smell', 'smells like gas', 'sparks',
+    'sparking', 'burning', 'flames', 'carbon monoxide', 'co detector',
+    'total shutdown', 'completely out', 'emergency', 'dangerous'
+  ];
+  // "I smell gas" / "gas leak" / "odor of gas" — the common phrasings the
+  // keyword list misses: gas + smell/leak/odor/fumes in the same clause.
+  const gasWord = /\bgas\b/;
+  const gasSignal = /\b(smell|smells|smelling|smelled|leak|leaking|leaks|odor|odour|fumes)\b/;
+  const negation = /\b(no|not|nothing|none|never|neither|nor|without|don'?t|doesn'?t|didn'?t|isn'?t|aren'?t|ain'?t|wasn'?t|weren'?t|can'?t|couldn'?t|won'?t|haven'?t|hasn'?t)\b/;
+  // ASR may emit curly apostrophes; normalize so the contraction patterns match.
+  const normalized = text.toLowerCase().replace(/[‘’]/g, "'");
+  const clauses = normalized.split(/[,.;!?]+|\bbut\b/);
+  return clauses.some(clause => {
+    if (negation.test(clause)) return false;
+    if (emergencyKeywords.some(kw => clause.includes(kw))) return true;
+    return gasWord.test(clause) && gasSignal.test(clause);
+  });
+}
+
 module.exports = {
   createCallStateMachine,
   STATES,
-  INTENT_TYPES
+  INTENT_TYPES,
+  detectSafetyEmergency
 };
