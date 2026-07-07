@@ -23,6 +23,7 @@ const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
 const { isLikelySilenceHallucination } = require('./utils/transcript-filters');
+const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
@@ -77,9 +78,19 @@ app.get("/health", (req, res) => {
 });
 
 // ============================================================================
+// TWILIO WEBHOOK SIGNATURE VALIDATION (fail-closed)
+// Rejects any request without a valid X-Twilio-Signature — without this,
+// anyone who finds the URL can open OpenAI sessions or trigger dial-outs.
+// ============================================================================
+const twilioWebhookGuard = createTwilioSignatureValidator({
+  authToken: TWILIO_AUTH_TOKEN,
+  baseUrl: BASE_URL
+});
+
+// ============================================================================
 // TWILIO WEBHOOK - RETURNS TWIML TO START STREAM
 // ============================================================================
-app.post("/twilio/voice", (req, res) => {
+app.post("/twilio/voice", twilioWebhookGuard, (req, res) => {
   console.log("\n📞 Incoming call");
   console.log(`From: ${req.body.From?.replace(/(\d{3})\d{4}(\d{4})/, '$1***$2') || 'Unknown'}`);
   
@@ -99,7 +110,7 @@ app.post("/twilio/voice", (req, res) => {
 // ============================================================================
 // TWILIO TRANSFER ENDPOINT
 // ============================================================================
-app.post("/twilio/transfer", (req, res) => {
+app.post("/twilio/transfer", twilioWebhookGuard, (req, res) => {
   console.log("🔄 Transfer endpoint called");
   const response = new twilio.twiml.VoiceResponse();
   response.say("Transferring you to a real person now.");
