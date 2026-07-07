@@ -283,8 +283,10 @@ function createCallStateMachine() {
         return getConfirmationPrompt();
         
       case STATES.CLOSE:
-        // Only return the "anything else?" prompt ONCE per call
-        if (data._anythingElsePrompted) return null;
+        // Always return the prompt: getNextPrompt is only consulted by
+        // recovery nets (watchdog, silence recovery) in CLOSE, and returning
+        // null starved them — a silent caller in CLOSE got permanent dead air.
+        // Normal CLOSE flow never calls this, so re-asking is recovery-only.
         return CLOSE.anything_else;
         
       case STATES.ENDED:

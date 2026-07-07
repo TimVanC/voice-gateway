@@ -212,18 +212,49 @@ wss.on("connection", (twilioWs, req) => {
   let rejectNextResponseDueToGreetingGuard = false;  // When we ignore early transcript, reject model's reply (no generator question)
   
   // ============================================================================
-  // 3-SECOND WATCHDOG: No dead air. If no response within 3s after speech_end, send fallback.
+  // DEAD-AIR WATCHDOG. Armed in two situations:
+  //  (a) speech_end — the caller spoke, we owe a reply within WATCHDOG_MS.
+  //  (b) a response died without delivering the scripted prompt (cancelled
+  //      with nothing in flight, or completed with a transcript that clearly
+  //      is not the prompt). Before (b) existed, those paths had no net
+  //      faster than the 20s keep-alive — observed as 22s of dead air.
+  // Any legitimate follow-up (new prompt, response.created) clears it.
   // ============================================================================
   let watchdogTimer = null;
-  let speechEndedAt = null;
-  const WATCHDOG_MS = 3000;
+  const WATCHDOG_MS = 3000;              // after caller speech
+  const DEAD_AIR_RECOVERY_MS = 4000;     // after a dead response (headroom for late transcripts)
+  const MAX_DEAD_AIR_RECOVERIES = 3;     // per call; cap reached → offer live agent
+  let deadAirRecoveries = 0;
 
   function clearWatchdog() {
     if (watchdogTimer) {
       clearTimeout(watchdogTimer);
       watchdogTimer = null;
     }
-    speechEndedAt = null;
+  }
+
+  function armWatchdog(delayMs, reason, isDeadAirRecovery = false) {
+    if (watchdogTimer) clearTimeout(watchdogTimer);
+    watchdogTimer = setTimeout(() => {
+      watchdogTimer = null;
+      if (_callCompleted) return;
+      if (responseInProgress) return;  // something is already speaking
+      if (speechStartTime) return;     // caller mid-speech; their transcript drives the next turn
+      if (isDeadAirRecovery) {
+        if (deadAirRecoveries >= MAX_DEAD_AIR_RECOVERIES) {
+          console.error(`🚨 WATCHDOG: dead-air recovery cap (${MAX_DEAD_AIR_RECOVERIES}) reached - offering live agent`);
+          offerTransferForCommunicationIssue('dead_air_recoveries_exceeded');
+          return;
+        }
+        deadAirRecoveries++;
+      }
+      console.error(`⚠️ WATCHDOG: No response within ${delayMs}ms after ${reason} - sending fallback`);
+      stateMachine.intakeLog('state_event', { event: 'watchdog_fallback', reason, delay_ms: delayMs });
+      const fallback = stateMachine.getNextPrompt();
+      if (fallback && openaiWs?.readyState === WebSocket.OPEN) {
+        sendStatePrompt(fallback);
+      }
+    }, delayMs);
   }
 
   function markResponseCancelled(responseId, reason) {
@@ -966,7 +997,20 @@ wss.on("connection", (twilioWs, req) => {
         // CRITICAL: Save expectedTranscript early for confirmation check later
         // This must be done before any code path nullifies it
         const completedPrompt = expectedTranscript;
-        
+
+        // Detect a completed response whose transcript is clearly NOT the
+        // scripted prompt — a hallucination that slipped past the
+        // transcript.done guard (that guard is gated on audioDoneReceived,
+        // which isn't always set). The caller never heard the question.
+        // Computed here because branches below null the tracking vars.
+        const scriptedPromptUndelivered = Boolean(
+          completedPrompt && actualTranscript &&
+          actualTranscript.trim().length > 0 &&
+          !completedPrompt.toLowerCase().trim().startsWith(actualTranscript.toLowerCase().trim()) &&
+          !transcriptMatchesExpected(completedPrompt, actualTranscript) &&
+          ![STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED].includes(currentState)
+        );
+
         // Clear response ID when response is done
         if (event.response?.id === currentResponseId) {
           currentResponseId = null;
@@ -1300,10 +1344,25 @@ wss.on("connection", (twilioWs, req) => {
         responseInProgress = false;
         tts_active = false;
         audioStreamingStarted = false;  // Reset for next response
-        
+
         // Reset dynamic silence to default after turn completes
         currentSilenceDuration = VAD_CONFIG.silence_default;
-        
+
+        // DEAD-AIR NET: the exchange died with us owing the next utterance —
+        // cancelled with nothing in flight, or completed without delivering
+        // the scripted prompt. Without this, the only remaining nets were the
+        // 20s keep-alive / 45s monitor (observed: 22s of silence). Any
+        // legitimate follow-up (transcript → prompt, response.created)
+        // clears the watchdog before it fires.
+        if (!_callCompleted && currentState !== STATES.ENDED && !pendingUserInput) {
+          if (status === "cancelled") {
+            armWatchdog(DEAD_AIR_RECOVERY_MS, 'response_cancelled', true);
+          } else if (status !== "incomplete" && scriptedPromptUndelivered) {
+            console.error(`🚨 Scripted prompt NOT delivered (expected: "${(completedPrompt || '').substring(0, 60)}...") - arming dead-air recovery`);
+            armWatchdog(DEAD_AIR_RECOVERY_MS, 'scripted_prompt_undelivered', true);
+          }
+        }
+
         // Start confirmation recovery timer if we just sent a yes/no question
         // Detect by checking if the prompt contained confirmation language
         // Use completedPrompt (saved before nullifying) instead of expectedTranscript
@@ -1414,20 +1473,7 @@ wss.on("connection", (twilioWs, req) => {
           longSpeechTimer = null;
         }
         speechStartTime = null;
-        speechEndedAt = Date.now();
-        if (watchdogTimer) clearTimeout(watchdogTimer);
-        watchdogTimer = setTimeout(() => {
-          watchdogTimer = null;
-          if (_callCompleted) return;
-          if (responseInProgress) return;
-          const elapsed = speechEndedAt ? Date.now() - speechEndedAt : 0;
-          if (elapsed < WATCHDOG_MS) return;
-          console.error(`⚠️ WATCHDOG: No response within ${WATCHDOG_MS}ms after speech_end - sending fallback`);
-          const fallback = stateMachine.getNextPrompt();
-          if (fallback && openaiWs?.readyState === WebSocket.OPEN) {
-            sendStatePrompt(fallback);
-          }
-        }, WATCHDOG_MS);
+        armWatchdog(WATCHDOG_MS, 'speech_end');
         
         // ===================================================================
         // CRITICAL: Cancel OpenAI's auto-response!
@@ -1788,6 +1834,19 @@ Say the ENTIRE sentence above, word for word.`,
       audioCompletionTimeout = null;
     }
   }
+
+  // Arm the TTS-failure timeout at response.create time. Previously only
+  // response.created armed it — if OpenAI rejects the create (e.g.
+  // "Conversation already has an active response"), no lifecycle event ever
+  // arrives and responseInProgress wedges true, which disables the watchdog,
+  // keep-alive recovery, and silence recovery simultaneously.
+  // checkForTTSFailure() unwedges with bounded retries → transfer offer.
+  function armTtsFailureTimeout() {
+    clearAudioCompletionTimeout();
+    audioCompletionTimeout = setTimeout(() => {
+      checkForTTSFailure();
+    }, TTS_FAILURE_TIMEOUT_MS);
+  }
   
   function checkForTTSFailure() {
     if (!responseInProgress) {
@@ -1883,7 +1942,7 @@ Say the ENTIRE sentence above, word for word.`,
     currentPromptText = GREETING.primary;
     expectedTranscript = GREETING.primary;
     responseInProgress = true;
-    clearAudioCompletionTimeout();
+    armTtsFailureTimeout();
     
     openaiWs.send(JSON.stringify({
       type: "response.create",
@@ -1908,7 +1967,7 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
     currentPromptText = GREETING.primary;
     expectedTranscript = GREETING.primary;
     responseInProgress = true;
-    clearAudioCompletionTimeout();
+    armTtsFailureTimeout();
     openaiWs.send(JSON.stringify({
       type: "response.create",
       response: {
@@ -2322,6 +2381,7 @@ STRICT RULES:
     console.log(`🚫 Out-of-scope request - transferring to team member`);
     if (openaiWs?.readyState === WebSocket.OPEN && !responseInProgress) {
       responseInProgress = true;
+      armTtsFailureTimeout();
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: {
@@ -2378,8 +2438,8 @@ STRICT RULES:
     currentPromptText = prompt;
     expectedTranscript = prompt;  // Store expected transcript
     
-    // Clear any existing timeout
-    clearAudioCompletionTimeout();
+    // Arm failure timeout at create-time (catches rejected response.create)
+    armTtsFailureTimeout();
     
     responseInProgress = true;
     
@@ -2562,6 +2622,7 @@ Keep it SHORT.`;
     }
     
     responseInProgress = true;
+    armTtsFailureTimeout();
     openaiWs.send(JSON.stringify({
       type: "response.create",
       response: {
