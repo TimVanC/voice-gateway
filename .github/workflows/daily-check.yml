@@ -2,25 +2,53 @@ name: RSE Ava Daily Check
 
 on:
   schedule:
-    - cron: '0 13 * * *'
+    # Target: 8:00 AM America/New_York every day. GitHub cron is UTC-only, so we
+    # schedule both candidate UTC hours and let the DST guard step pick the right one:
+    #   12:03 UTC = 8:03 AM EDT (Mar-Nov)
+    #   13:03 UTC = 8:03 AM EST (Nov-Mar)
+    # Minute 3 instead of 0 because top-of-hour schedules queue the longest.
+    - cron: '3 12 * * *'
+    - cron: '3 13 * * *'
   workflow_dispatch:
 
 jobs:
   daily-check:
     runs-on: ubuntu-latest
     steps:
+      - name: Decide whether this trigger matches 8 AM Eastern
+        id: guard
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "schedule" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          zone=$(TZ=America/New_York date +%Z)   # EDT or EST
+          if { [ "$zone" = "EDT" ] && [ "$SCHEDULE" = "3 12 * * *" ]; } || \
+             { [ "$zone" = "EST" ] && [ "$SCHEDULE" = "3 13 * * *" ]; }; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping: schedule '$SCHEDULE' is not 8 AM in zone $zone"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repo
+        if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Node
+        if: steps.guard.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install dependencies
+        if: steps.guard.outputs.run == 'true'
         run: npm install
 
       - name: Run daily check
+        if: steps.guard.outputs.run == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
