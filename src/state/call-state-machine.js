@@ -1742,9 +1742,19 @@ function createCallStateMachine() {
         }
         
         // Normal flow: store the detail answer
+        const answeredQuestion = currentQuestion;
         storeDetailAnswer(transcript, analysis);
-        detailsQuestionIndex++;
-        
+        if (answeredQuestion === DETAILS.generator.existing_or_new) {
+          // The existing/new answer swaps in a different question list
+          // (existing_issue, or new_type + new_brand). Restart that list from
+          // its first question instead of carrying the old index into it,
+          // which skipped "What's the issue?" for existing generators and
+          // "residential or commercial?" for new installs.
+          detailsQuestionIndex = 0;
+        } else {
+          detailsQuestionIndex++;
+        }
+
         const nextDetailPrompt = getDetailsPrompt();
         if (nextDetailPrompt) {
           return {
