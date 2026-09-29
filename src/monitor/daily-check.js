@@ -498,7 +498,13 @@ async function main() {
   const checks = [];
   checks.push(await checkAnthropic());
   checks.push(await checkOpenAIRealtime());
-  checks.push(await checkTwilioBalance());
+  // Twilio check runs only where credentials are provided. They are deliberately
+  // NOT provided on GitHub-hosted runners: those call Twilio from a different
+  // Azure IP/country every day, which Twilio's fraud detection treats as a stolen
+  // Auth Token and locks the account (Sep 7 and Sep 28 2026).
+  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+    checks.push(await checkTwilioBalance());
+  }
   checks.push(await checkGoogleSheets());
   checks.push(await checkEmailToPresence());
   checks.push(await checkTransferNumber());
