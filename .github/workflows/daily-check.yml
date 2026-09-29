@@ -51,8 +51,8 @@ jobs:
         if: steps.guard.outputs.run == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          # No Twilio credentials here on purpose: calling Twilio from GitHub's
+          # rotating runner IPs trips Twilio's fraud lock. See daily-check.js.
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           MONITOR_HEALTH_URL: ${{ secrets.MONITOR_HEALTH_URL }}
