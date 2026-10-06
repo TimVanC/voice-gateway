@@ -27,6 +27,7 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
+const { startDailyCheckSchedule, parseTimes } = require('./monitor/schedule');
 
 // ============================================================================
 // CONFIGURATION
@@ -2803,6 +2804,41 @@ server.listen(PORT, () => {
   console.log(`🎧 Waiting for calls...`);
   console.log();
 });
+
+// ============================================================================
+// DAILY HEALTH CHECK (8 AM and 4 PM Eastern, runs here on Railway)
+// ============================================================================
+// Enabled automatically in Railway's "production" environment only. Railway
+// injects the environment name; the "staging" environment (deployed from the
+// staging branch) has the same credentials and would otherwise email a second
+// report every morning. DAILY_CHECK_SCHEDULE=on|off forces it either way, e.g.
+// off while debugging production, or on for a local dry run.
+// See src/monitor/schedule.js for why this moved off GitHub Actions.
+const RAILWAY_ENV = process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || '';
+const DAILY_CHECK_FLAG = (process.env.DAILY_CHECK_SCHEDULE || '').trim().toLowerCase();
+let DAILY_CHECK_ENABLED = RAILWAY_ENV === 'production';
+if (['on', 'true', '1', 'yes'].includes(DAILY_CHECK_FLAG)) {
+  DAILY_CHECK_ENABLED = true;
+} else if (['off', 'false', '0', 'no'].includes(DAILY_CHECK_FLAG)) {
+  DAILY_CHECK_ENABLED = false;
+} else if (DAILY_CHECK_FLAG) {
+  console.warn(`⚠️ Ignoring DAILY_CHECK_SCHEDULE="${DAILY_CHECK_FLAG}" (expected on or off); using the environment rule`);
+}
+// Local times in America/New_York, comma separated.
+const DAILY_CHECK_TIMES = process.env.DAILY_CHECK_TIMES || '08:00,16:00';
+if (DAILY_CHECK_ENABLED) {
+  try {
+    startDailyCheckSchedule({ times: parseTimes(DAILY_CHECK_TIMES) });
+    if ((process.env.MONITOR_TWILIO_BALANCE || '').toLowerCase() !== 'on') {
+      console.log('ℹ️ Twilio balance check is off (set MONITOR_TWILIO_BALANCE=on here, in production only, to warn on low balance)');
+    }
+  } catch (err) {
+    console.error(`❌ Daily check schedule NOT started: ${err.message} (DAILY_CHECK_TIMES="${DAILY_CHECK_TIMES}")`);
+  }
+} else {
+  const where = RAILWAY_ENV ? `Railway environment "${RAILWAY_ENV}"` : 'not on Railway';
+  console.log(`🗓️ Daily check schedule off (${where}; set DAILY_CHECK_SCHEDULE=on to force)`);
+}
 
 // ============================================================================
 // PROCESS-LEVEL ERROR HANDLING
