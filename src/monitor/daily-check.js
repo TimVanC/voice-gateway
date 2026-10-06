@@ -1,10 +1,13 @@
 /**
- * Daily Health Check (standalone one-shot script)
+ * Daily Health Check
  *
  * Runs a series of independent health checks and emails a single status report
- * to one recipient, then exits. Designed to be run as a scheduled cron / one-shot
- * job (e.g. Railway cron). It does NOT touch the call/voice path or any state
- * machine code.
+ * to one recipient. Two ways to run it:
+ *   - inside the server on Railway, every day at 8:00 AM Eastern, via
+ *     src/monitor/schedule.js (the primary, on-time report), or
+ *   - as a one-shot script (`node src/monitor/daily-check.js`), which is how the
+ *     GitHub Actions backup runs it; exits 0 when all good, 1 otherwise.
+ * It does NOT touch the call/voice path or any state machine code.
  *
  * Checks performed (in order):
  *   1. Anthropic model availability (cheap test call)
@@ -32,6 +35,7 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const { BASE_URL } = require('../config/baseUrl');
 
 // IMPORTANT: This model string MUST be kept in sync with the one used in
 // src/utils/data-cleanup.js (currently 'claude-sonnet-4-6', see line ~46).
@@ -50,7 +54,16 @@ const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime
 const BALANCE_WARN_THRESHOLD = 5;
 
 const MONITOR_EMAIL_TO = process.env.MONITOR_EMAIL_TO || 'timvancau@gmail.com';
-const HEALTH_URL = process.env.MONITOR_HEALTH_URL;
+// Public URL to probe. Defaults to this deployment's own public base URL so the
+// in-server schedule needs no extra config; GitHub Actions sets it explicitly.
+const HEALTH_URL = process.env.MONITOR_HEALTH_URL || `${BASE_URL}/health`;
+// Twilio's fraud detection locks the account when the Auth Token is used from
+// an IP/country it does not expect (Sep 7 and Sep 28 2026, both GitHub-hosted
+// runners). So the balance check is opt-in: set MONITOR_TWILIO_BALANCE=on only
+// where the token is already used routinely (the Railway server).
+const TWILIO_BALANCE_ENABLED = (process.env.MONITOR_TWILIO_BALANCE || '').toLowerCase() === 'on';
+// Backup runners (GitHub Actions) set this so a healthy day sends no duplicate email.
+const EMAIL_ONLY_ON_FAILURE = (process.env.MONITOR_EMAIL_ONLY_ON_FAILURE || '').toLowerCase() === 'true';
 
 // Google Sheets config, read exactly the way src/utils/google-sheets-logger.js
 // does it (lines ~30-33): GOOGLE_APPLICATION_CREDENTIALS may be a file path OR
@@ -447,8 +460,13 @@ function statusLabel(status) {
 }
 
 async function sendReport(checks, allGood) {
-  const result = { sent: false, detail: '' };
+  const result = { sent: false, skipped: false, detail: '' };
   try {
+    if (allGood && EMAIL_ONLY_ON_FAILURE) {
+      result.skipped = true;
+      result.detail = 'skipped: all checks passed and MONITOR_EMAIL_ONLY_ON_FAILURE is set';
+      return result;
+    }
     if (!process.env.SENDGRID_API_KEY) {
       result.detail = 'Missing SENDGRID_API_KEY';
       return result;
@@ -491,18 +509,14 @@ async function sendReport(checks, allGood) {
 // ============================================================================
 // MAIN
 // ============================================================================
-async function main() {
+async function runDailyCheck() {
   console.log('🔍 Running RSE Ava daily health check...');
 
   // Run each check; each one handles its own errors and resolves a result object.
   const checks = [];
   checks.push(await checkAnthropic());
   checks.push(await checkOpenAIRealtime());
-  // Twilio check runs only where credentials are provided. They are deliberately
-  // NOT provided on GitHub-hosted runners: those call Twilio from a different
-  // Azure IP/country every day, which Twilio's fraud detection treats as a stolen
-  // Auth Token and locks the account (Sep 7 and Sep 28 2026).
-  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+  if (TWILIO_BALANCE_ENABLED) {
     checks.push(await checkTwilioBalance());
   }
   checks.push(await checkGoogleSheets());
@@ -521,18 +535,28 @@ async function main() {
   const email = await sendReport(checks, allGood);
   if (email.sent) {
     console.log(`📧 Report emailed to ${MONITOR_EMAIL_TO}: ${email.detail}`);
+  } else if (email.skipped) {
+    console.log(`📧 Report email ${email.detail}`);
   } else {
     console.error(`❌ Report email NOT sent: ${email.detail}`);
   }
 
-  // Exit non-zero if any check failed/warned OR the email could not be sent, so
-  // the scheduler surfaces the problem.
-  const ok = allGood && email.sent;
-  process.exit(ok ? 0 : 1);
+  // Not ok if any check failed/warned OR the email could not be sent, so
+  // whoever runs us can surface the problem.
+  const ok = allGood && (email.sent || email.skipped);
+  return { checks, allGood, email, ok };
 }
 
-main().catch((err) => {
-  // Last-resort guard: main() should never throw, but if it does, fail loudly.
-  console.error('❌ Fatal error in daily-check:', err);
-  process.exit(1);
-});
+module.exports = { runDailyCheck };
+
+// One-shot mode (GitHub Actions backup / `node src/monitor/daily-check.js`).
+// When required by the server nothing runs until the schedule fires.
+if (require.main === module) {
+  runDailyCheck()
+    .then((result) => process.exit(result.ok ? 0 : 1))
+    .catch((err) => {
+      // Last-resort guard: runDailyCheck() should never throw, but if it does, fail loudly.
+      console.error('❌ Fatal error in daily-check:', err);
+      process.exit(1);
+    });
+}

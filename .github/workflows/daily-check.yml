@@ -1,5 +1,11 @@
 name: RSE Ava Daily Check
 
+# BACKUP ONLY. The on-time 8:00 AM Eastern report is sent by the Railway server
+# itself (src/monitor/schedule.js). GitHub's cron has been starting this repo's
+# scheduled runs 3-9 hours late every day, so this job exists to catch the one
+# thing the server cannot report on: the server being down. It emails only when
+# something fails (MONITOR_EMAIL_ONLY_ON_FAILURE), so a healthy day is silent.
+
 on:
   schedule:
     # Target: 8:00 AM America/New_York every day. GitHub cron is UTC-only, so we
@@ -7,13 +13,17 @@ on:
     #   12:03 UTC = 8:03 AM EDT (Mar-Nov)
     #   13:03 UTC = 8:03 AM EST (Nov-Mar)
     # Minute 3 instead of 0 because top-of-hour schedules queue the longest.
+    # In practice GitHub starts these hours late; see the note above.
     - cron: '3 12 * * *'
     - cron: '3 13 * * *'
   workflow_dispatch:
 
 jobs:
   daily-check:
-    runs-on: ubuntu-latest
+    # Pinned ahead of GitHub moving ubuntu-latest to 26.04 (Oct 19 - Nov 19 2026).
+    runs-on: ubuntu-26.04
+    # The check takes ~30 s; do not let a stuck runner hold a slot for hours.
+    timeout-minutes: 10
     steps:
       - name: Decide whether this trigger matches 8 AM Eastern
         id: guard
@@ -35,11 +45,11 @@ jobs:
 
       - name: Checkout repo
         if: steps.guard.outputs.run == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node
         if: steps.guard.outputs.run == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
 
@@ -57,6 +67,7 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           MONITOR_HEALTH_URL: ${{ secrets.MONITOR_HEALTH_URL }}
           MONITOR_EMAIL_TO: ${{ secrets.MONITOR_EMAIL_TO }}
+          MONITOR_EMAIL_ONLY_ON_FAILURE: 'true'
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
           GOOGLE_SHEETS_SHEET_NAME: ${{ secrets.GOOGLE_SHEETS_SHEET_NAME }}
