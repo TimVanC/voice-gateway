@@ -11,6 +11,10 @@
  * fraud detection treats as a stolen Auth Token. The server on Railway is
  * already up 24/7 with every credential the check needs.
  *
+ * Known limitation: state lives in memory only. A deploy or restart that lands
+ * inside the ~30 s a check takes can lose that slot (the next slot still runs),
+ * and two containers alive at the same instant would both report.
+ *
  * No dependencies: next-run math uses Intl.DateTimeFormat, which Node ships
  * with full ICU, so IANA zone names work.
  */
@@ -21,6 +25,9 @@ const { BASE_URL } = require('../config/baseUrl');
 const DEFAULT_TIME_ZONE = 'America/New_York';
 const DEFAULT_TIMES = [{ hour: 8, minute: 0 }, { hour: 16, minute: 0 }];
 const MINUTE_MS = 60 * 1000;
+// A check normally takes ~30 s. Anything past this is treated as hung and
+// abandoned so the next slot is still armed.
+const DEFAULT_WATCHDOG_MS = 10 * MINUTE_MS;
 
 /** Parse "08:00,16:00" into [{ hour, minute }]. Throws on malformed input. */
 function parseTimes(spec) {
@@ -109,10 +116,10 @@ function defaultHealthUrl() {
 }
 
 /**
- * Start the schedule. Returns { stop(), nextRunAt() }.
+ * Start the schedule. Returns { stop(), nextRunAt(), isRunning() }.
  *
- * A crashing check is logged and the next slot is still armed, so the voice
- * server is never affected. The timer is unref'd so it never keeps a
+ * A crashing or hung check is logged and the next slot is still armed, so the
+ * voice server is never affected. The timers are unref'd so they never keep a
  * shutting-down process alive.
  */
 function startDailyCheckSchedule({
@@ -121,11 +128,15 @@ function startDailyCheckSchedule({
   run = () => runDailyCheck({ healthUrl: defaultHealthUrl() }),
   now = () => Date.now(),
   logger = console,
+  watchdogMs = DEFAULT_WATCHDOG_MS,
 } = {}) {
   let timer = null;
   let stopped = false;
   let running = false;
   let nextAt = null;
+  // The slot most recently fired. Re-arming never goes back to it, so a
+  // backward clock step during a run cannot repeat the slot.
+  let lastFiredAt = 0;
 
   const schedule = (delayMs, fn) => {
     timer = setTimeout(fn, delayMs);
@@ -134,11 +145,20 @@ function startDailyCheckSchedule({
 
   const arm = () => {
     if (stopped) return;
-    nextAt = nextRunAt(now(), { times, timeZone });
+    nextAt = nextRunAt(Math.max(now(), lastFiredAt), { times, timeZone });
     const delay = Math.max(1000, nextAt - now());
     logger.log(`🗓️ Daily check scheduled for ${formatInZone(nextAt, timeZone)} (in ${Math.round(delay / MINUTE_MS)} min)`);
     schedule(delay, fire);
   };
+
+  const withWatchdog = (promise) => new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`daily check still running after ${Math.round(watchdogMs / MINUTE_MS)} min; abandoning it`)), watchdogMs);
+    if (typeof t.unref === 'function') t.unref();
+    Promise.resolve(promise).then(
+      (value) => { clearTimeout(t); resolve(value); },
+      (err) => { clearTimeout(t); reject(err); },
+    );
+  });
 
   const fire = async () => {
     timer = null;
@@ -149,10 +169,15 @@ function startDailyCheckSchedule({
     if (early > 0) { schedule(early, fire); return; }
     if (running) { arm(); return; }
     running = true;
+    lastFiredAt = nextAt;
+    const startedAt = now();
     try {
-      await run();
+      const result = await withWatchdog(run());
+      const secs = ((now() - startedAt) / 1000).toFixed(1);
+      const verdict = result && typeof result.ok === 'boolean' ? (result.ok ? 'all good' : 'attention needed') : 'done';
+      logger.log(`✅ Daily check finished in ${secs}s: ${verdict}`);
     } catch (err) {
-      logger.error('❌ Daily check crashed (next slot still scheduled):', err);
+      logger.error('❌ Daily check failed (next slot still scheduled):', err);
     } finally {
       running = false;
       arm();
@@ -164,6 +189,7 @@ function startDailyCheckSchedule({
   return {
     stop() { stopped = true; if (timer) clearTimeout(timer); timer = null; },
     nextRunAt() { return nextAt; },
+    isRunning() { return running; },
   };
 }
 
@@ -176,4 +202,5 @@ module.exports = {
   defaultHealthUrl,
   DEFAULT_TIME_ZONE,
   DEFAULT_TIMES,
+  DEFAULT_WATCHDOG_MS,
 };

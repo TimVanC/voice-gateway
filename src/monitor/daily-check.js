@@ -87,7 +87,7 @@ async function checkAnthropic() {
       return result;
     }
 
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: 30000, maxRetries: 1 });
 
     const response = await client.messages.create({
       model: ANTHROPIC_MODEL,
@@ -296,7 +296,7 @@ async function checkGoogleSheets() {
     const meta = await sheets.spreadsheets.get({
       spreadsheetId: SPREADSHEET_ID,
       fields: 'properties.title,sheets.properties.title',
-    });
+    }, { timeout: 30000 });
 
     const title = meta.data && meta.data.properties ? meta.data.properties.title : '(unknown)';
     const tabs = (meta.data && meta.data.sheets) ? meta.data.sheets.map((s) => s.properties.title) : [];
@@ -507,6 +507,7 @@ async function sendReport(checks, allGood) {
     ];
 
     sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+    sgMail.setTimeout(30000);
     const [response] = await sgMail.send({
       from: process.env.EMAIL_FROM,
       to: MONITOR_EMAIL_TO,
