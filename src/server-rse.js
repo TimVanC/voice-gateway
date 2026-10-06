@@ -27,7 +27,7 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
-const { startDailyCheckSchedule } = require('./monitor/schedule');
+const { startDailyCheckSchedule, parseTimes } = require('./monitor/schedule');
 
 // ============================================================================
 // CONFIGURATION
@@ -2806,7 +2806,7 @@ server.listen(PORT, () => {
 });
 
 // ============================================================================
-// DAILY HEALTH CHECK (8:00 AM Eastern, runs here on Railway)
+// DAILY HEALTH CHECK (8 AM and 4 PM Eastern, runs here on Railway)
 // ============================================================================
 // Enabled automatically in Railway's "production" environment only. Railway
 // injects the environment name; the "staging" environment (deployed from the
@@ -2817,8 +2817,14 @@ server.listen(PORT, () => {
 const RAILWAY_ENV = process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || '';
 const DAILY_CHECK_FLAG = (process.env.DAILY_CHECK_SCHEDULE || '').toLowerCase();
 const DAILY_CHECK_ENABLED = DAILY_CHECK_FLAG ? DAILY_CHECK_FLAG === 'on' : RAILWAY_ENV === 'production';
+// Local times in America/New_York, comma separated.
+const DAILY_CHECK_TIMES = process.env.DAILY_CHECK_TIMES || '08:00,16:00';
 if (DAILY_CHECK_ENABLED) {
-  startDailyCheckSchedule();
+  try {
+    startDailyCheckSchedule({ times: parseTimes(DAILY_CHECK_TIMES) });
+  } catch (err) {
+    console.error(`❌ Daily check schedule NOT started: ${err.message} (DAILY_CHECK_TIMES="${DAILY_CHECK_TIMES}")`);
+  }
 } else {
   const where = RAILWAY_ENV ? `Railway environment "${RAILWAY_ENV}"` : 'not on Railway';
   console.log(`🗓️ Daily check schedule off (${where}; set DAILY_CHECK_SCHEDULE=on to force)`);

@@ -2,8 +2,8 @@
  * Daily check scheduler
  *
  * Runs the daily health check (src/monitor/daily-check.js) inside the
- * long-running server at a fixed wall-clock time in a fixed time zone
- * (default 8:00 AM America/New_York), every day, DST-aware.
+ * long-running server at fixed wall-clock times in a fixed time zone
+ * (default 8:00 AM and 4:00 PM America/New_York), every day, DST-aware.
  *
  * Why here and not GitHub Actions: GitHub's cron scheduler has been starting
  * this repo's scheduled runs 3-9 hours late every day, and GitHub-hosted
@@ -16,9 +16,28 @@
  */
 
 const { runDailyCheck } = require('./daily-check');
+const { BASE_URL } = require('../config/baseUrl');
 
 const DEFAULT_TIME_ZONE = 'America/New_York';
+const DEFAULT_TIMES = [{ hour: 8, minute: 0 }, { hour: 16, minute: 0 }];
 const MINUTE_MS = 60 * 1000;
+
+/** Parse "08:00,16:00" into [{ hour, minute }]. Throws on malformed input. */
+function parseTimes(spec) {
+  const times = String(spec || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const m = /^(\d{1,2}):(\d{2})$/.exec(s);
+      const hour = m ? Number(m[1]) : NaN;
+      const minute = m ? Number(m[2]) : NaN;
+      if (!m || hour > 23 || minute > 59) throw new Error(`Bad time "${s}" (expected HH:MM, 24-hour)`);
+      return { hour, minute };
+    });
+  if (!times.length) throw new Error('No times given (expected e.g. "08:00,16:00")');
+  return times;
+}
 
 /** Wall-clock date/time of `ms` (epoch millis) in `timeZone`. */
 function wallClock(ms, timeZone) {
@@ -50,14 +69,21 @@ function zonedTimeToUtc({ year, month, day, hour, minute }, timeZone) {
   return guess;
 }
 
-/** Next epoch millis strictly after `nowMs` at which `timeZone` reads hour:minute. */
-function nextRunAt(nowMs, { hour, minute, timeZone }) {
+/**
+ * Earliest epoch millis strictly after `nowMs` at which `timeZone` reads one
+ * of `times`. Looks at today and tomorrow in the zone's calendar, which always
+ * yields a candidate in the future.
+ */
+function nextRunAt(nowMs, { times = DEFAULT_TIMES, timeZone = DEFAULT_TIME_ZONE } = {}) {
   const today = wallClock(nowMs, timeZone);
-  let at = zonedTimeToUtc({ ...today, hour, minute }, timeZone);
-  if (at <= nowMs) {
-    at = zonedTimeToUtc({ ...today, day: today.day + 1, hour, minute }, timeZone);
+  let best = Infinity;
+  for (const { hour, minute } of times) {
+    for (const dayOffset of [0, 1]) {
+      const at = zonedTimeToUtc({ year: today.year, month: today.month, day: today.day + dayOffset, hour, minute }, timeZone);
+      if (at > nowMs && at < best) best = at;
+    }
   }
-  return at;
+  return best;
 }
 
 function formatInZone(ms, timeZone) {
@@ -69,18 +95,30 @@ function formatInZone(ms, timeZone) {
   }).format(new Date(ms));
 }
 
+const formatTime = ({ hour, minute }) => `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+
 /**
- * Start the daily schedule. Returns { stop(), nextRunAt() }.
+ * The public URL the in-server check probes. Railway injects
+ * RAILWAY_PUBLIC_DOMAIN, which is exactly the address callers reach; BASE_URL
+ * covers other hosts. MONITOR_HEALTH_URL overrides both.
+ */
+function defaultHealthUrl() {
+  if (process.env.MONITOR_HEALTH_URL) return process.env.MONITOR_HEALTH_URL;
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/health`;
+  return `${BASE_URL}/health`;
+}
+
+/**
+ * Start the schedule. Returns { stop(), nextRunAt() }.
  *
- * A crashing check is logged and tomorrow is still armed, so the voice server
- * is never affected. The timer is unref'd so it never keeps a shutting-down
- * process alive.
+ * A crashing check is logged and the next slot is still armed, so the voice
+ * server is never affected. The timer is unref'd so it never keeps a
+ * shutting-down process alive.
  */
 function startDailyCheckSchedule({
-  hour = 8,
-  minute = 0,
+  times = DEFAULT_TIMES,
   timeZone = DEFAULT_TIME_ZONE,
-  run = runDailyCheck,
+  run = () => runDailyCheck({ healthUrl: defaultHealthUrl() }),
   now = () => Date.now(),
   logger = console,
 } = {}) {
@@ -96,7 +134,7 @@ function startDailyCheckSchedule({
 
   const arm = () => {
     if (stopped) return;
-    nextAt = nextRunAt(now(), { hour, minute, timeZone });
+    nextAt = nextRunAt(now(), { times, timeZone });
     const delay = Math.max(1000, nextAt - now());
     logger.log(`🗓️ Daily check scheduled for ${formatInZone(nextAt, timeZone)} (in ${Math.round(delay / MINUTE_MS)} min)`);
     schedule(delay, fire);
@@ -114,13 +152,14 @@ function startDailyCheckSchedule({
     try {
       await run();
     } catch (err) {
-      logger.error('❌ Daily check crashed (will try again tomorrow):', err);
+      logger.error('❌ Daily check crashed (next slot still scheduled):', err);
     } finally {
       running = false;
       arm();
     }
   };
 
+  logger.log(`🗓️ Daily check times: ${times.map(formatTime).join(', ')} ${timeZone}`);
   arm();
   return {
     stop() { stopped = true; if (timer) clearTimeout(timer); timer = null; },
@@ -128,4 +167,13 @@ function startDailyCheckSchedule({
   };
 }
 
-module.exports = { startDailyCheckSchedule, nextRunAt, zonedTimeToUtc, wallClock, DEFAULT_TIME_ZONE };
+module.exports = {
+  startDailyCheckSchedule,
+  parseTimes,
+  nextRunAt,
+  zonedTimeToUtc,
+  wallClock,
+  defaultHealthUrl,
+  DEFAULT_TIME_ZONE,
+  DEFAULT_TIMES,
+};

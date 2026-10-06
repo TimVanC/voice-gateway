@@ -35,7 +35,6 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
-const { BASE_URL } = require('../config/baseUrl');
 
 // IMPORTANT: This model string MUST be kept in sync with the one used in
 // src/utils/data-cleanup.js (currently 'claude-sonnet-4-6', see line ~46).
@@ -54,9 +53,13 @@ const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime
 const BALANCE_WARN_THRESHOLD = 5;
 
 const MONITOR_EMAIL_TO = process.env.MONITOR_EMAIL_TO || 'timvancau@gmail.com';
-// Public URL to probe. Defaults to this deployment's own public base URL so the
-// in-server schedule needs no extra config; GitHub Actions sets it explicitly.
-const HEALTH_URL = process.env.MONITOR_HEALTH_URL || `${BASE_URL}/health`;
+// Public URL to probe. One-shot runs (GitHub Actions) must set MONITOR_HEALTH_URL
+// explicitly so a missing secret is reported as such; the in-server schedule
+// passes its own public URL to runDailyCheck() instead.
+const HEALTH_URL = process.env.MONITOR_HEALTH_URL;
+// The subject and "Run at" line show this zone (plus UTC) so a report sent at
+// 19:33Z reads as 3:33 PM EDT at a glance.
+const REPORT_TIME_ZONE = 'America/New_York';
 // Twilio's fraud detection locks the account when the Auth Token is used from
 // an IP/country it does not expect (Sep 7 and Sep 28 2026, both GitHub-hosted
 // runners). So the balance check is opt-in: set MONITOR_TWILIO_BALANCE=on only
@@ -415,18 +418,18 @@ function httpGetJson(targetUrl, timeoutMs) {
   });
 }
 
-async function checkServerHealth() {
+async function checkServerHealth(healthUrl) {
   const result = { name: 'Railway server health', status: 'fail', detail: '' };
   try {
-    if (!HEALTH_URL) {
+    if (!healthUrl) {
       result.detail = 'Missing MONITOR_HEALTH_URL';
       return result;
     }
 
-    const { statusCode, body } = await httpGetJson(HEALTH_URL, 10000);
+    const { statusCode, body } = await httpGetJson(healthUrl, 10000);
 
     if (statusCode !== 200) {
-      result.detail = `Unexpected HTTP ${statusCode} from ${HEALTH_URL}`;
+      result.detail = `Unexpected HTTP ${statusCode} from ${healthUrl}`;
       return result;
     }
 
@@ -445,7 +448,13 @@ async function checkServerHealth() {
       result.detail = `HTTP 200 but status was "${json && json.status}" (expected "healthy")`;
     }
   } catch (err) {
-    result.detail = `Health check error — ${err && err.message ? err.message : String(err)}`;
+    // A refused connection surfaces as an AggregateError whose own message is
+    // empty; the useful text is on its nested errors.
+    const nested = err && Array.isArray(err.errors) && err.errors.length
+      ? err.errors.map((e) => (e && e.message ? e.message : String(e))).join('; ')
+      : '';
+    const message = nested || (err && err.message ? err.message : String(err));
+    result.detail = `Health check error — ${message} (${healthUrl})`;
   }
   return result;
 }
@@ -462,11 +471,6 @@ function statusLabel(status) {
 async function sendReport(checks, allGood) {
   const result = { sent: false, skipped: false, detail: '' };
   try {
-    if (allGood && EMAIL_ONLY_ON_FAILURE) {
-      result.skipped = true;
-      result.detail = 'skipped: all checks passed and MONITOR_EMAIL_ONLY_ON_FAILURE is set';
-      return result;
-    }
     if (!process.env.SENDGRID_API_KEY) {
       result.detail = 'Missing SENDGRID_API_KEY';
       return result;
@@ -475,15 +479,27 @@ async function sendReport(checks, allGood) {
       result.detail = 'Missing EMAIL_FROM';
       return result;
     }
+    // Checked after the credentials above on purpose: a backup runner with a
+    // missing SendGrid secret must still fail on a healthy day, not only on the
+    // day the email is needed.
+    if (allGood && EMAIL_ONLY_ON_FAILURE) {
+      result.skipped = true;
+      result.detail = 'skipped: all checks passed and MONITOR_EMAIL_ONLY_ON_FAILURE is set';
+      return result;
+    }
 
-    const subject = allGood
-      ? 'RSE Ava daily check: ALL GOOD'
-      : 'RSE Ava daily check: ATTENTION NEEDED';
+    const now = new Date();
+    const localTime = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, timeStyle: 'short' }).format(now);
+    const localDate = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, dateStyle: 'medium', timeStyle: 'short' }).format(now);
+    const zone = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, timeZoneName: 'short' })
+      .formatToParts(now).find((p) => p.type === 'timeZoneName').value;
 
-    const now = new Date().toISOString();
+    // Keep the "RSE Ava daily check" prefix: mailbox filters key on it.
+    const subject = `RSE Ava daily check: ${allGood ? 'ALL GOOD' : 'ATTENTION NEEDED'} (${localTime} ${zone})`;
+
     const lines = [
       'RSE Ava — Daily Health Check',
-      `Run at: ${now}`,
+      `Run at: ${localDate} ${zone} (${now.toISOString()})`,
       '',
       ...checks.map((c) => `[${statusLabel(c.status)}] ${c.name}: ${c.detail}`),
       '',
@@ -509,7 +525,7 @@ async function sendReport(checks, allGood) {
 // ============================================================================
 // MAIN
 // ============================================================================
-async function runDailyCheck() {
+async function runDailyCheck({ healthUrl = HEALTH_URL } = {}) {
   console.log('🔍 Running RSE Ava daily health check...');
 
   // Run each check; each one handles its own errors and resolves a result object.
@@ -522,7 +538,7 @@ async function runDailyCheck() {
   checks.push(await checkGoogleSheets());
   checks.push(await checkEmailToPresence());
   checks.push(await checkTransferNumber());
-  checks.push(await checkServerHealth());
+  checks.push(await checkServerHealth(healthUrl));
 
   for (const c of checks) {
     console.log(`[${statusLabel(c.status)}] ${c.name}: ${c.detail}`);

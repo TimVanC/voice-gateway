@@ -1,22 +1,31 @@
 name: RSE Ava Daily Check
 
-# BACKUP ONLY. The on-time 8:00 AM Eastern report is sent by the Railway server
-# itself (src/monitor/schedule.js). GitHub's cron has been starting this repo's
-# scheduled runs 3-9 hours late every day, so this job exists to catch the one
-# thing the server cannot report on: the server being down. It emails only when
-# something fails (MONITOR_EMAIL_ONLY_ON_FAILURE), so a healthy day is silent.
+# BACKUP ONLY. The on-time 8 AM and 4 PM Eastern reports are sent by the Railway
+# server itself (src/monitor/schedule.js). GitHub's cron has been starting this
+# repo's scheduled runs 3-9 hours late every day, so this job exists to catch the
+# one thing the server cannot report on: the server being down. Scheduled runs
+# email only when something fails, so a healthy day is silent; a manual
+# "Run workflow" always emails the full report, which is how to test the email path.
 
 on:
   schedule:
-    # Target: 8:00 AM America/New_York every day. GitHub cron is UTC-only, so we
-    # schedule both candidate UTC hours and let the DST guard step pick the right one:
-    #   12:03 UTC = 8:03 AM EDT (Mar-Nov)
-    #   13:03 UTC = 8:03 AM EST (Nov-Mar)
+    # Targets: 8:00 AM and 4:00 PM America/New_York. GitHub cron is UTC-only, so
+    # both candidate UTC hours are scheduled for each and the DST guard step
+    # picks the right one:
+    #   12:03 / 20:03 UTC = 8:03 AM / 4:03 PM EDT (Mar-Nov)
+    #   13:03 / 21:03 UTC = 8:03 AM / 4:03 PM EST (Nov-Mar)
     # Minute 3 instead of 0 because top-of-hour schedules queue the longest.
     # In practice GitHub starts these hours late; see the note above.
     - cron: '3 12 * * *'
     - cron: '3 13 * * *'
+    - cron: '3 20 * * *'
+    - cron: '3 21 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: read
+  # Needed by the keepalive step below.
+  actions: write
 
 jobs:
   daily-check:
@@ -25,7 +34,7 @@ jobs:
     # The check takes ~30 s; do not let a stuck runner hold a slot for hours.
     timeout-minutes: 10
     steps:
-      - name: Decide whether this trigger matches 8 AM Eastern
+      - name: Decide whether this trigger matches 8 AM or 4 PM Eastern
         id: guard
         env:
           SCHEDULE: ${{ github.event.schedule }}
@@ -35,13 +44,22 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           zone=$(TZ=America/New_York date +%Z)   # EDT or EST
-          if { [ "$zone" = "EDT" ] && [ "$SCHEDULE" = "3 12 * * *" ]; } || \
-             { [ "$zone" = "EST" ] && [ "$SCHEDULE" = "3 13 * * *" ]; }; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Skipping: schedule '$SCHEDULE' is not 8 AM in zone $zone"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
+          case "$zone|$SCHEDULE" in
+            "EDT|3 12 * * *"|"EDT|3 20 * * *"|"EST|3 13 * * *"|"EST|3 21 * * *")
+              echo "run=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "Skipping: schedule '$SCHEDULE' is not 8 AM or 4 PM in zone $zone"
+              echo "run=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # GitHub switches off scheduled workflows in public repositories after 60
+      # days without a push; scheduled runs do not count. Re-enabling the
+      # workflow resets that clock, so this backup cannot silently stop.
+      - name: Keep the schedule alive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow enable daily-check.yml
 
       - name: Checkout repo
         if: steps.guard.outputs.run == 'true'
@@ -67,7 +85,8 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           MONITOR_HEALTH_URL: ${{ secrets.MONITOR_HEALTH_URL }}
           MONITOR_EMAIL_TO: ${{ secrets.MONITOR_EMAIL_TO }}
-          MONITOR_EMAIL_ONLY_ON_FAILURE: 'true'
+          # Scheduled runs are silent when healthy; manual runs always email.
+          MONITOR_EMAIL_ONLY_ON_FAILURE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
           GOOGLE_SHEETS_SHEET_NAME: ${{ secrets.GOOGLE_SHEETS_SHEET_NAME }}
