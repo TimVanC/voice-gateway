@@ -27,7 +27,10 @@ require('dotenv').config();
 
 const Anthropic = require('@anthropic-ai/sdk');
 const twilio = require('twilio');
-const sgMail = require('@sendgrid/mail');
+// Own client instance: the server's call-summary emails use the module-level
+// @sendgrid/mail singleton, and the API key/timeout set here must not touch it.
+const { MailService } = require('@sendgrid/mail');
+const sgMail = new MailService();
 const WebSocket = require('ws');
 const { google } = require('googleapis');
 const fs = require('fs');
