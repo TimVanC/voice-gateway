@@ -75,6 +75,32 @@ curl https://voice-gateway-production-187c.up.railway.app/health
 {"status":"ok","timestamp":"2025-10-15T19:50:00.000Z"}
 ```
 
+## 📬 Daily Health Check (8:00 AM Eastern)
+
+`src/monitor/daily-check.js` tests Anthropic, OpenAI Realtime, Google Sheets, the
+email/transfer config and the public `/health` endpoint, then emails one report.
+
+- **Where it runs:** inside the production server on Railway
+  (`src/monitor/schedule.js`), every day at 08:00 America/New_York, DST-aware.
+  Only the Railway `production` environment runs it; `staging` and local
+  servers log "schedule off". Force either way with `DAILY_CHECK_SCHEDULE=on|off`.
+- **Recipient:** `MONITOR_EMAIL_TO` (default timvancau@gmail.com), sent through
+  SendGrid from `EMAIL_FROM`.
+- **Health URL:** `MONITOR_HEALTH_URL`, defaulting to `PUBLIC_BASE_URL/health`.
+- **Twilio balance:** opt-in with `MONITOR_TWILIO_BALANCE=on`. Never enable it
+  anywhere with a changing IP; Twilio locked the account twice in Sep 2026 when
+  the check ran from GitHub-hosted runners.
+- **Backup:** `.github/workflows/daily-check.yml` still runs on GitHub's cron,
+  which starts hours late, and emails only when something fails
+  (`MONITOR_EMAIL_ONLY_ON_FAILURE=true`). It exists to catch the one thing the
+  server cannot report: the server being down.
+- **Run by hand:** `node src/monitor/daily-check.js` (exit 0 means all good).
+- **Report never arrived?** A SendGrid 202 only means "queued". Run
+  `node src/monitor/sendgrid-diagnostics.js` locally with `SENDGRID_API_KEY` in
+  your `.env` (never on GitHub: this repo is public, so Actions logs are public).
+  It prints per-day delivered/bounced/dropped counts, the suppression lists with
+  SendGrid's reasons, and sender-authentication status.
+
 ## 💻 Local Development
 
 ### Environment Variables
