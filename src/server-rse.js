@@ -27,6 +27,7 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
+const { saveCall: saveCallToDb, createTranscriptRecorder } = require('./utils/call-db');
 
 // ============================================================================
 // CONFIGURATION
@@ -136,6 +137,8 @@ wss.on("connection", (twilioWs, req) => {
   let streamSid = null;
   let callSid = null;  // Store call SID for transfers
   let callerNumber = null;  // Store caller number for logging
+  const transcriptRecorder = createTranscriptRecorder();  // Ordered caller/Ava turns, saved to the DB at hang-up
+  let dbSaveStarted = false;  // cleanup() can run twice (stop + close); write the DB row once
   let openaiWs = null;
   let transferRequested = false;  // Track if transfer has been requested
   let baseUrl = BASE_URL || null;  // Store base URL for transfers (from config/baseUrl.js)
@@ -983,6 +986,7 @@ wss.on("connection", (twilioWs, req) => {
             } else {
               // Transcript matches or is acceptable - this is what was actually spoken
               console.log(`📜 AI generated transcript: "${event.transcript}"`);
+              transcriptRecorder.add('ava', event.transcript);
               if (hallucinationCount > 0) {
                 console.log(`✅ Response matched expected - resetting hallucination counter`);
                 hallucinationCount = 0;
@@ -992,6 +996,7 @@ wss.on("connection", (twilioWs, req) => {
           } else {
             // No expected transcript to compare - log as spoken
             console.log(`📜 AI generated transcript: "${event.transcript}"`);
+            transcriptRecorder.add('ava', event.transcript);
           }
         } else {
           console.log(`⚠️ No transcript in audio_transcript.done event`);
@@ -1561,6 +1566,10 @@ wss.on("connection", (twilioWs, req) => {
             clearWatchdog();
             break;
           }
+
+          // Everything the caller actually said goes into the saved transcript,
+          // including turns the guards below decide not to act on.
+          transcriptRecorder.add('caller', transcript);
 
           const inGreeting = stateMachine.getState() === STATES.GREETING;
           const currentStateForTranscript = stateMachine.getState();
@@ -2756,6 +2765,25 @@ Keep it SHORT.`;
     }).catch(err => {
       console.error('❌ Failed to log to Google Sheets:', err.message);
     });
+
+    // Save the call and its transcript to Neon (non-blocking, written
+    // alongside the Sheet row; saveCall never throws and we do not await it).
+    if (!dbSaveStarted) {
+      dbSaveStarted = true;
+      const endedAt = Date.now();
+      saveCallToDb(data, currentState, {
+        callId: streamSid || `CALL-${endedAt}`,
+        twilioCallSid: callSid,
+        callerNumber: callerNumber,
+        wasTransferred: transferRequested,
+        startedAt: callConnectedTime || endedAt,
+        endedAt,
+        environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || 'local',
+        transcript: transcriptRecorder.turns()
+      }).catch(err => {
+        console.error('❌ Call DB save rejected unexpectedly:', err.message);
+      });
+    }
 
     // Send post-call email summary (awaited so it completes before cleanup exits)
     try {

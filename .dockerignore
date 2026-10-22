@@ -1,0 +1,8 @@
+# Keep the Railway image to the server. The web app deploys to Vercel on its own.
+web
+node_modules
+.git
+.claude
+.env
+.env.*
+secrets
