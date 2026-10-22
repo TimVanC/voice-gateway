@@ -21,6 +21,15 @@ const WRITE_TIMEOUT_MS = 15_000;
 let pool = null;
 let warnedDisabled = false;
 
+/**
+ * TLS for the connection: verified TLS for a hosted database (Neon), none
+ * for a local server or when the URL says sslmode=disable.
+ */
+function sslConfig(url) {
+  if (/sslmode=disable/i.test(url) || /@(localhost|127\.0\.0\.1)[:/]/i.test(url)) return false;
+  return { rejectUnauthorized: true };
+}
+
 function getPool() {
   if (!DATABASE_URL) return null;
   if (pool) return pool;
@@ -28,7 +37,7 @@ function getPool() {
   const { Pool } = require('pg');
   pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: true },
+    ssl: sslConfig(DATABASE_URL),
     max: 3,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
@@ -131,8 +140,10 @@ function buildCallRow(callData, currentState, metadata) {
     twilio_call_sid: toText(metadata.twilioCallSid),
     source: 'server',
     environment: metadata.environment || null,
+    sheet_row_number: null,
     is_test: testByNumber,
     test_reason: testByNumber ? 'caller is an RSE number' : null,
+    pre_caller_id_fix: false,
     direction: 'inbound',
     caller_number: toText(metadata.callerNumber),
     started_at: startedAt,
@@ -282,5 +293,6 @@ module.exports = {
   withTransaction,
   getPool,
   closePool,
+  sslConfig,
   CALL_COLUMNS,
 };

@@ -392,7 +392,12 @@ async function main() {
     const batch = ordered.slice(i, i + BATCH);
     await withTransaction(async (client) => {
       for (const { row } of batch) {
-        const res = await insertCall(client, row, []);
+        let res;
+        try {
+          res = await insertCall(client, row, []);
+        } catch (err) {
+          throw new Error(`Sheet row ${row.sheet_row_number} (call_id ${row.call_id}): ${err.message}`);
+        }
         if (res.inserted) inserted += 1; else skipped += 1;
       }
     });

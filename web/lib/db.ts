@@ -10,9 +10,11 @@ export function getPool(): Pool {
     if (!connectionString) {
       throw new Error("DATABASE_URL is not set");
     }
+    // Verified TLS for Neon; none for a local database.
+    const local = /sslmode=disable/i.test(connectionString) || /@(localhost|127\.0\.0\.1)[:/]/i.test(connectionString);
     globalForPg.avaPool = new Pool({
       connectionString,
-      ssl: { rejectUnauthorized: true },
+      ssl: local ? false : { rejectUnauthorized: true },
       max: 3,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,

@@ -11,6 +11,7 @@ require('dotenv').config({ quiet: true });
 const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
+const { sslConfig } = require('../src/utils/call-db');
 
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'db', 'migrations');
 
@@ -22,7 +23,7 @@ async function main() {
   }
 
   const files = fs.readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort();
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: true }, max: 1 });
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: sslConfig(process.env.DATABASE_URL), max: 1 });
   const client = await pool.connect();
   try {
     await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
