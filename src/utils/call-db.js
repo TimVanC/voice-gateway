@@ -22,12 +22,21 @@ let pool = null;
 let warnedDisabled = false;
 
 /**
- * TLS for the connection: verified TLS for a hosted database (Neon), none
- * for a local server or when the URL says sslmode=disable.
+ * Connection settings for `pg` from a DATABASE_URL: verified TLS for a
+ * hosted database (Neon), none for a local server or sslmode=disable. The
+ * sslmode / channel_binding query parameters Neon puts in its URLs are
+ * removed, because `ssl` is set explicitly here and pg warns about them.
  */
-function sslConfig(url) {
-  if (/sslmode=disable/i.test(url) || /@(localhost|127\.0\.0\.1)[:/]/i.test(url)) return false;
-  return { rejectUnauthorized: true };
+function poolConfig(url) {
+  const local = /sslmode=disable/i.test(url) || /@(localhost|127\.0\.0\.1)[:/]/i.test(url);
+  let connectionString = url;
+  try {
+    const u = new URL(url);
+    u.searchParams.delete('sslmode');
+    u.searchParams.delete('channel_binding');
+    connectionString = u.toString();
+  } catch (_) { /* leave a non-URL string to pg to reject */ }
+  return { connectionString, ssl: local ? false : { rejectUnauthorized: true } };
 }
 
 function getPool() {
@@ -36,8 +45,7 @@ function getPool() {
   // Required lazily so the server still boots if `pg` is somehow missing.
   const { Pool } = require('pg');
   pool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: sslConfig(DATABASE_URL),
+    ...poolConfig(DATABASE_URL),
     max: 3,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
@@ -293,6 +301,6 @@ module.exports = {
   withTransaction,
   getPool,
   closePool,
-  sslConfig,
+  poolConfig,
   CALL_COLUMNS,
 };

@@ -10,10 +10,15 @@ export function getPool(): Pool {
     if (!connectionString) {
       throw new Error("DATABASE_URL is not set");
     }
-    // Verified TLS for Neon; none for a local database.
+    // Verified TLS for Neon; none for a local database. The sslmode and
+    // channel_binding parameters in Neon's URLs are dropped because ssl is
+    // set explicitly here and pg warns about them otherwise.
     const local = /sslmode=disable/i.test(connectionString) || /@(localhost|127\.0\.0\.1)[:/]/i.test(connectionString);
+    const url = new URL(connectionString);
+    url.searchParams.delete("sslmode");
+    url.searchParams.delete("channel_binding");
     globalForPg.avaPool = new Pool({
-      connectionString,
+      connectionString: url.toString(),
       ssl: local ? false : { rejectUnauthorized: true },
       max: 3,
       idleTimeoutMillis: 30_000,
