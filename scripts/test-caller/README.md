@@ -60,6 +60,21 @@ Scenarios: `no-heat`, `generator-install`, `membership-pricing`,
 for s in no-heat generator-install membership-pricing solar-out-of-scope asks-for-person; do node scripts/test-caller/run.js --scenario $s --spawn || echo "FAILED: $s"; done
 ```
 
+### Windows timers
+
+On Windows, Node's `setInterval(fn, 20)` fires about 33 times a second, not
+50 (the system timer ticks every 15.6 ms), so every 20 ms audio pacer runs at
+two thirds speed and recordings come out choppy. `precise-timers.js` replaces
+`setInterval` with a drift-correcting one; `run.js` loads it for itself and
+preloads it into the Ava process it spawns (`node --require`), which changes
+nothing in Ava's code and nothing on Linux, where Railway runs her.
+`TEST_CALLER_NO_TIMER_SHIM=1` spawns Ava without it. If you start Ava by hand
+on Windows for local mode, start her the same way:
+
+```bash
+node --require scripts/test-caller/precise-timers.js src/server-rse.js
+```
+
 ## Output
 
 Each run writes `scripts/test-caller/out/<timestamp>-<scenario>/` (gitignored):

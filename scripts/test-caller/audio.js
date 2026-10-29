@@ -16,6 +16,7 @@ const FRAME_MS = 20;
 const FRAME_BYTES = (SAMPLE_RATE / 1000) * FRAME_MS; // 160
 const SILENCE_BYTE = 0xff; // mu-law digital silence, same value Ava pads with
 const SILENCE_FRAME = Buffer.alloc(FRAME_BYTES, SILENCE_BYTE);
+const RESYNC_MS = 200; // stream-vs-clock disagreement that counts as a real gap
 
 /** True when every byte is mu-law silence: the frame carries no audio at all. */
 function isDigitalSilence(frame) {
@@ -60,10 +61,20 @@ function toFrames(mulaw) {
 class TrackRecorder {
   constructor() {
     this.sides = { caller: [], ava: [] }; // { atMs, frame }
+    this.next = { caller: null, ava: null }; // next slot (ms) for a contiguous stream
   }
 
+  /**
+   * Each side is a continuous 50 frames/s stream, so consecutive frames go
+   * into consecutive slots regardless of timer jitter on arrival; only when
+   * the clock and the stream disagree by more than RESYNC_MS (a real gap,
+   * or frames that were cleared) does placement jump back to the clock.
+   */
   add(side, atMs, frame) {
-    this.sides[side].push({ atMs, frame });
+    const expected = this.next[side];
+    const slot = expected != null && Math.abs(atMs - expected) <= RESYNC_MS ? expected : Math.round(atMs / FRAME_MS) * FRAME_MS;
+    this.sides[side].push({ atMs: slot, frame });
+    this.next[side] = slot + FRAME_MS;
   }
 
   durationMs() {

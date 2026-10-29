@@ -23,6 +23,7 @@
  * was not reached, 2 the harness itself failed (no server, no key, ...).
  */
 
+require('./precise-timers'); // Windows: make the 20 ms pacers really run at 50 frames/s
 require('dotenv').config({ quiet: true });
 
 const fs = require('fs');
@@ -107,7 +108,11 @@ async function spawnAva({ logPath, keepSideEffects }) {
   delete env.NODE_ENV; // local URL config, never the production one
   if (!keepSideEffects) for (const k of SIDE_EFFECT_VARS) delete env[k];
   const log = fs.openSync(logPath, 'a');
-  const child = spawn(process.execPath, [path.join(REPO, 'src', 'server-rse.js')], {
+  // Ava's own 20 ms audio pump suffers the same Windows timer coarseness, so
+  // the shim is preloaded into her process too (no change to her code; Linux
+  // ignores it). TEST_CALLER_NO_TIMER_SHIM=1 runs her untouched.
+  const nodeArgs = process.env.TEST_CALLER_NO_TIMER_SHIM ? [] : ['--require', path.join(HERE, 'precise-timers.js')];
+  const child = spawn(process.execPath, [...nodeArgs, path.join(REPO, 'src', 'server-rse.js')], {
     cwd: REPO,
     env,
     stdio: ['ignore', log, log],
