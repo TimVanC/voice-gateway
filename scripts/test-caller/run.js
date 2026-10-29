@@ -114,7 +114,7 @@ async function spawnAva({ logPath, keepSideEffects }) {
     windowsHide: true,
   });
   child.on('exit', (code) => { child.exitCode = code; });
-  const deadline = Date.now() + 20000;
+  const deadline = Date.now() + 45000;
   while (Date.now() < deadline) {
     if (child.exitCode != null) throw new Error(`Ava exited with code ${child.exitCode}; see ${logPath}`);
     const ok = await new Promise((resolve) => {
@@ -129,7 +129,7 @@ async function spawnAva({ logPath, keepSideEffects }) {
     await report.sleep(300);
   }
   child.kill();
-  throw new Error(`Ava did not answer /health on port ${port} within 20 s; see ${logPath}`);
+  throw new Error(`Ava did not answer /health on port ${port} within 45 s; see ${logPath}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +213,7 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
     for (const frame of toFrames(buf)) queue.push({ frame, tag: responseId });
   });
   persona.on('caller_transcript', (text, responseId) => {
+    if (goodbyeAt != null && responseId !== goodbyeResponseId) return; // audio was never sent
     const utt = callerUtts.find((u) => u.tag === responseId);
     const t = utt ? utt.start : (responseFirstSend.get(responseId) ?? now());
     if (utt) utt.text = text;
