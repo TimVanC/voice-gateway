@@ -156,16 +156,19 @@ npm run dev                  # http://localhost:3000
 
 **Current state (Oct 29, 2026):** the project exists as `rse-ava-calls` on Vercel
 (team "Tim's projects"), live at https://rse-ava-calls.vercel.app, with the three
-variables set for Production and Preview. It was deployed from the local `web/`
-folder with the CLI, not from GitHub, because `web/` is not on `main` until the
-Neon PR merges. To redeploy by hand:
+variables set for Production and Preview. It is connected to the
+`TimVanC/voice-gateway` GitHub repo with Root Directory `web` and the Next.js
+preset, so every push builds: `main` becomes production, any other branch gets
+a preview deployment at
+`rse-ava-calls-git-<branch>-tims-projects-6e08583a.vercel.app` (preview URLs
+ask for a Vercel login first; the production URL does not). Until the Neon PR
+merges, `main` has no `web/` folder, so production stays on the last good
+deployment. A manual deploy from the local folder still works:
 
 ```bash
 cd web && vercel deploy --prod
 ```
 
-After the merge, connect the repo in Vercel → Project → Settings → Git and set
-Root Directory to `web`; from then on pushes to `main` redeploy automatically.
 The steps below describe that Git-connected setup from scratch.
 
 1. Vercel → Add New Project → import `TimVanC/voice-gateway`.
