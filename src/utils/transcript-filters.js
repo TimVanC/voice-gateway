@@ -50,4 +50,19 @@ function isLikelySilenceHallucination(transcript, durationMs) {
   return SILENCE_HALLUCINATIONS.has(normalized);
 }
 
-module.exports = { isLikelySilenceHallucination, MAX_HALLUCINATION_SPEECH_MS };
+/**
+ * True when a transcript carries a clear yes or no anywhere in it: "Yes,
+ * that's correct.", "No, that's all.", "Yep, all correct". Used by the
+ * duplicate-transcript guard in CONFIRMATION/CLOSE, where the caller
+ * legitimately answers two prompts in a row with the same words (the
+ * availability read-back and then the final recap) and must not be told
+ * "Sorry, I didn't catch that".
+ * @param {string} transcript - raw transcript (any case, any punctuation)
+ */
+function isClearYesOrNo(transcript) {
+  if (!transcript || typeof transcript !== 'string') return false;
+  const normalized = transcript.toLowerCase().replace(/[‘’]/g, "'");
+  return /\b(yes|yeah|yep|yup|correct|that'?s\s+(right|correct)|all\s+correct|no|nope|nah)\b/.test(normalized);
+}
+
+module.exports = { isLikelySilenceHallucination, MAX_HALLUCINATION_SPEECH_MS, isClearYesOrNo };
