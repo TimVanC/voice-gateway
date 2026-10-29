@@ -492,12 +492,33 @@ async function main() {
   };
   fs.writeFileSync(path.join(outDir, 'report.json'), JSON.stringify(summary, null, 2));
 
+  // Neon: the call, transcript, recording and this run, for the web app.
+  if (process.env.DATABASE_URL) {
+    const stored = await require('./store').storeRun({
+      databaseUrl: process.env.DATABASE_URL,
+      callId,
+      callSid: leg.callSid,
+      scenario,
+      mode: args.mode,
+      summary,
+      result,
+      turns: call.turns,
+      recorder: call.recorder,
+      t0: call.t0,
+      callerNumber: args.mode === 'phone' ? (process.env.TEST_CALLER_FROM || '') : scenario.callerNumber,
+      log,
+    });
+    if (stored) summary.web = stored;
+    fs.writeFileSync(path.join(outDir, 'report.json'), JSON.stringify(summary, null, 2));
+  }
+
   log('');
   log(report.renderLatency(latency, dead, { clears: call.clears, routineClears: call.routineClears, interjections: call.interjectionsFired }));
   log(report.renderChecks(check, result, { endedHow: call.endedHow, durationMs: call.endInfo.t }));
   log(`Audio: ${path.relative(process.cwd(), wav.mixPath)} (${wav.seconds.toFixed(1)} s), transcript: ${path.relative(process.cwd(), path.join(outDir, 'transcript.txt'))}`);
   const u = persona.usage;
   log(`Persona tokens: ${u.inputAudioTokens} audio in, ${u.outputAudioTokens} audio out (${u.inputTokens} in / ${u.outputTokens} out total)`);
+  if (summary.web) log(`Web app: ${summary.web.url}`);
   process.exitCode = check.pass ? 0 : 1;
 }
 

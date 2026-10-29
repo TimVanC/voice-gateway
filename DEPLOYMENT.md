@@ -95,7 +95,10 @@ after it, never blocks the call, and logs-and-continues on any failure. With
    ```
 
    This applies `db/migrations/*.sql` once each (tracked in `schema_migrations`).
-   Re-running is a no-op.
+   Re-running is a no-op. `001` creates `calls` and `transcript_turns`; `002`
+   adds `recordings` (raw mu-law audio of both sides, written by the test
+   caller in `scripts/test-caller`) and `test_runs` (that harness's pass/fail
+   and latency numbers), which the web app plays back and shows on the call page.
 3. **Railway → Variables**, in BOTH `production` and `staging`:
 
    | Variable | Value |

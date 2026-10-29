@@ -103,6 +103,11 @@ export default async function CallsPage({
                       {name || <span className="muted">unknown</span>}
                       <div>
                         <FlagBadges isTest={c.is_test} preFix={c.pre_caller_id_fix} source={c.source} testReason={c.test_reason} />
+                        {c.has_recording && (
+                          <span className="badge rec" title="Recording available">
+                            audio
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="nowrap">{formatPhone(c.phone_number ?? c.caller_number)}</td>

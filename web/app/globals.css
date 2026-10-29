@@ -209,6 +209,14 @@ th.nowrap {
   background: var(--ok-bg);
   color: var(--ok-text);
 }
+.badge.rec {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.badge.status-failed {
+  background: #fde8e8;
+  color: #b42318;
+}
 .badge.status-transferred {
   background: var(--accent-soft);
   color: var(--accent);
@@ -269,6 +277,24 @@ dd .conf {
   color: var(--muted);
   font-size: 12px;
   margin-left: 6px;
+}
+
+.recording audio {
+  width: 100%;
+  max-width: 720px;
+  display: block;
+}
+.test-run dl {
+  margin-bottom: 12px;
+}
+table.checks {
+  width: auto;
+  min-width: 420px;
+  font-size: 13px;
+}
+table.checks td,
+table.checks th {
+  padding: 5px 10px;
 }
 
 .transcript {

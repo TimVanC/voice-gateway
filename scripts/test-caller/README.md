@@ -76,6 +76,17 @@ Each run writes `scripts/test-caller/out/<timestamp>-<scenario>/` (gitignored):
 - `report.json`: everything above plus the intake Ava captured and the check result.
 - `server.log`: Ava's own log, when spawned.
 
+When `DATABASE_URL` is set (the Neon database from `DEPLOYMENT.md`), the run
+is also stored there so it shows up in the call-log web app: the `calls` row
+(Ava's own when she wrote one, marked `test-caller scenario <name>`; otherwise
+one the harness builds from its intake check), the transcript, the recording
+of both sides (`recordings`, raw mu-law, played back as a stereo WAV), and a
+`test_runs` row with the pass/fail, latency and dead-air numbers. The run
+prints the call's web app link at the end (`TEST_CALLER_WEB_URL` overrides
+the default `https://rse-ava-calls.vercel.app`). Apply
+`db/migrations/002_recordings_and_test_runs.sql` once with
+`node scripts/db-migrate.js` before the first stored run.
+
 Exit code 0 when the expected outcome was reached and every required field
 matched; 1 when a required field is wrong or the call never reached the
 expected state (confirmation, out-of-scope close, or transfer); 2 when the

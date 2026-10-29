@@ -88,6 +88,17 @@ class TrackRecorder {
     return out;
   }
 
+  /** One side as a continuous mu-law track (silence where nothing was said). */
+  renderMulaw(side, totalSamples) {
+    const out = Buffer.alloc(totalSamples, SILENCE_BYTE);
+    for (const { atMs, frame } of this.sides[side]) {
+      const start = Math.round(atMs / FRAME_MS) * FRAME_BYTES;
+      if (start >= totalSamples) continue;
+      frame.copy(out, start, 0, Math.min(frame.length, totalSamples - start));
+    }
+    return out;
+  }
+
   /** Stereo WAV (caller left, Ava right) and a mono mix. */
   writeWavs(dir) {
     const totalSamples = Math.ceil((this.durationMs() / 1000) * SAMPLE_RATE);

@@ -46,6 +46,50 @@ export interface CallRow {
   is_safety_risk: boolean | null;
   intake_json: Record<string, unknown> | null;
   created_at: Date;
+  has_recording?: boolean; // list query only
+}
+
+export interface RecordingMeta {
+  id: number;
+  source: string;
+  codec: string;
+  sample_rate: number;
+  duration_seconds: number | null;
+  created_at: Date;
+}
+
+export interface RecordingAudio {
+  sample_rate: number;
+  caller_audio: Buffer;
+  ava_audio: Buffer;
+}
+
+export interface TestRunRow {
+  id: number;
+  scenario: string;
+  mode: string;
+  passed: boolean;
+  outcome_expected: string | null;
+  outcome_reached: boolean | null;
+  ended_how: string | null;
+  latency_p50_ms: number | null;
+  latency_p90_ms: number | null;
+  latency_max_ms: number | null;
+  dead_air_max_ms: number | null;
+  dead_air_gaps: number | null;
+  barge_ins: number | null;
+  interjections: number | null;
+  report: TestRunReport;
+  created_at: Date;
+}
+
+/** The shape scripts/test-caller writes to report.json (only what the page reads). */
+export interface TestRunReport {
+  fields?: { field: string; expected: unknown; actual: unknown; ok: boolean | null; required: boolean }[];
+  intakeSource?: string;
+  latency?: { firstAudible?: { p50: number | null; p90: number | null; max: number | null } };
+  routineClears?: number;
+  [key: string]: unknown;
 }
 
 export interface TranscriptTurn {
@@ -97,7 +141,8 @@ export async function listCalls(f: CallFilters): Promise<{ rows: CallRow[]; tota
     query<CallRow>(
       `SELECT id, call_id, source, is_test, test_reason, pre_caller_id_fix, caller_number, started_at,
               duration_seconds, first_name, last_name, phone_number, email, primary_intent,
-              call_summary, call_status, was_transferred, created_at
+              call_summary, call_status, was_transferred, created_at,
+              EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id) AS has_recording
          FROM calls ${sql}
         ORDER BY started_at DESC, id DESC
         LIMIT ${PAGE_SIZE} OFFSET $6`,
@@ -108,14 +153,28 @@ export async function listCalls(f: CallFilters): Promise<{ rows: CallRow[]; tota
   return { rows, total: counts[0]?.n ?? 0 };
 }
 
-export async function getCall(id: number): Promise<{ call: CallRow; turns: TranscriptTurn[] } | null> {
+export async function getCall(
+  id: number,
+): Promise<{ call: CallRow; turns: TranscriptTurn[]; recording: RecordingMeta | null; testRuns: TestRunRow[] } | null> {
   const calls = await query<CallRow>(`SELECT * FROM calls WHERE id = $1`, [id]);
   if (calls.length === 0) return null;
-  const turns = await query<TranscriptTurn>(
-    `SELECT id, sequence, speaker, text, at FROM transcript_turns WHERE call_id = $1 ORDER BY sequence`,
-    [id],
+  const [turns, recordings, testRuns] = await Promise.all([
+    query<TranscriptTurn>(`SELECT id, sequence, speaker, text, at FROM transcript_turns WHERE call_id = $1 ORDER BY sequence`, [id]),
+    query<RecordingMeta>(`SELECT id, source, codec, sample_rate, duration_seconds, created_at FROM recordings WHERE call_id = $1`, [id]),
+    query<TestRunRow>(`SELECT * FROM test_runs WHERE call_id = $1 ORDER BY created_at DESC`, [id]),
+  ]);
+  return { call: calls[0], turns, recording: recordings[0] ?? null, testRuns };
+}
+
+/** The raw mu-law audio of both sides; null when the call has no recording. */
+export async function getRecordingAudio(callId: number): Promise<RecordingAudio | null> {
+  const rows = await query<RecordingAudio & { codec: string }>(
+    `SELECT codec, sample_rate, caller_audio, ava_audio FROM recordings WHERE call_id = $1`,
+    [callId],
   );
-  return { call: calls[0], turns };
+  if (rows.length === 0) return null;
+  if (rows[0].codec !== "pcmu") throw new Error(`unsupported recording codec ${rows[0].codec}`);
+  return rows[0];
 }
 
 export async function countSummary(): Promise<{ total: number; real: number; test: number; withTranscript: number }> {

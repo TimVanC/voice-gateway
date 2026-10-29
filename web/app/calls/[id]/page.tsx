@@ -28,8 +28,9 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
   if (!Number.isFinite(numericId)) notFound();
   const result = await getCall(numericId);
   if (!result) notFound();
-  const { call, turns } = result;
+  const { call, turns, recording, testRuns } = result;
   const name = fullName(call.first_name, call.last_name);
+  const ms = (v: number | null | undefined) => (v === null || v === undefined ? null : `${v} ms`);
 
   return (
     <>
@@ -83,6 +84,93 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
             </dl>
           </section>
         </div>
+
+        <h2>Recording</h2>
+        {recording ? (
+          <section className="card recording">
+            <audio controls preload="metadata" src={`/calls/${call.id}/recording`} />
+            <p className="muted small" style={{ margin: "8px 0 0" }}>
+              {formatDuration(recording.duration_seconds === null ? null : Math.round(Number(recording.duration_seconds)))} · stereo: caller on the
+              left, Ava on the right · 8 kHz phone audio
+              {recording.source === "test-caller" ? " · captured by the test caller" : ""} ·{" "}
+              <a href={`/calls/${call.id}/recording`} download={`call-${call.id}.wav`}>
+                download WAV
+              </a>
+            </p>
+          </section>
+        ) : (
+          <div className="card empty">No recording for this call.</div>
+        )}
+
+        {testRuns.length > 0 && (
+          <>
+            <h2>Test run</h2>
+            {testRuns.map((run) => (
+              <section key={run.id} className="card test-run">
+                <p style={{ marginTop: 0 }}>
+                  <span className={`badge ${run.passed ? "status-completed" : "status-failed"}`}>{run.passed ? "PASS" : "FAIL"}</span>
+                  <strong>{run.scenario}</strong> <span className="muted">· {run.mode} mode · {formatDateTime(run.created_at)}</span>
+                </p>
+                <dl>
+                  <Field
+                    label="Outcome"
+                    value={run.outcome_expected ? `expected ${run.outcome_expected.replace(/_/g, " ")}: ${run.outcome_reached ? "reached" : "not reached"}` : null}
+                  />
+                  <Field label="Call ended" value={run.ended_how} />
+                  <Field
+                    label="Ava's reply"
+                    value={
+                      run.latency_p50_ms === null ? null : `first frame p50 ${ms(run.latency_p50_ms)}, p90 ${ms(run.latency_p90_ms)}, max ${ms(run.latency_max_ms)}`
+                    }
+                  />
+                  <Field
+                    label="First audible"
+                    value={
+                      run.report.latency?.firstAudible?.p50 == null
+                        ? null
+                        : `p50 ${ms(run.report.latency.firstAudible.p50)}, p90 ${ms(run.report.latency.firstAudible.p90)}, max ${ms(run.report.latency.firstAudible.max)}`
+                    }
+                  />
+                  <Field
+                    label="Dead air"
+                    value={run.dead_air_max_ms === null ? null : `longest gap ${ms(run.dead_air_max_ms)}, ${run.dead_air_gaps ?? 0} gap(s) of 3 s or more`}
+                  />
+                  <Field
+                    label="Barge-ins"
+                    value={run.barge_ins === null ? null : `${run.barge_ins} (caller interjected ${run.interjections ?? 0} time(s); ${run.report.routineClears ?? 0} routine clears)`}
+                  />
+                  <Field label="Intake read from" value={run.report.intakeSource ?? null} />
+                </dl>
+                {run.report.fields && run.report.fields.length > 0 && (
+                  <table className="checks">
+                    <thead>
+                      <tr>
+                        <th>Field</th>
+                        <th>Expected</th>
+                        <th>Ava stored</th>
+                        <th>Check</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {run.report.fields.map((f) => (
+                        <tr key={f.field}>
+                          <td>{f.field}</td>
+                          <td>{String(f.expected ?? "")}</td>
+                          <td>{f.actual === null || f.actual === undefined ? <span className="muted">—</span> : String(f.actual)}</td>
+                          <td>
+                            <span className={`badge ${f.ok === true ? "status-completed" : f.ok === false ? (f.required ? "status-failed" : "prefix") : "sheets"}`}>
+                              {f.ok === true ? "ok" : f.ok === false ? (f.required ? "fail" : "warn") : "n/a"}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </section>
+            ))}
+          </>
+        )}
 
         <h2>Transcript</h2>
         {turns.length === 0 ? (
