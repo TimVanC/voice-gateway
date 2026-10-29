@@ -414,6 +414,9 @@ async function main() {
     if (!from) throw new Error('phone mode needs a from number: TEST_CALLER_FROM or the first entry of TEST_CALLER_NUMBERS (a Twilio number on the account)');
     if (!to) throw new Error('phone mode needs Ava\'s number in TWILIO_NUMBER (or TEST_CALLER_TO)');
     if (!publicUrl) throw new Error('phone mode needs TEST_CALLER_PUBLIC_URL (e.g. an ngrok https URL forwarding to TEST_CALLER_PORT)');
+    if (from.replace(/\D/g, '').slice(-10) === to.replace(/\D/g, '').slice(-10)) {
+      throw new Error(`from and to are the same number (${to}); set TEST_CALLER_TO to Ava's live number and TEST_CALLER_FROM to a different Twilio number on the account`);
+    }
     leg = new TwilioPhoneLeg({
       accountSid: process.env.TWILIO_ACCOUNT_SID,
       authToken: process.env.TWILIO_AUTH_TOKEN,
