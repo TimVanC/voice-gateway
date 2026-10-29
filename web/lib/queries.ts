@@ -166,6 +166,31 @@ export async function getCall(
   return { call: calls[0], turns, recording: recordings[0] ?? null, testRuns };
 }
 
+export interface TestRunListRow extends TestRunRow {
+  call_db_id: number;
+  started_at: Date;
+  duration_seconds: number | null;
+  first_name: string | null;
+  last_name: string | null;
+  primary_intent: string | null;
+  final_state: string | null;
+  has_recording: boolean;
+}
+
+/** Every test-caller run, newest first, with the call it was attached to. */
+export async function listTestRuns(limit = 200): Promise<TestRunListRow[]> {
+  return query<TestRunListRow>(
+    `SELECT t.*, c.id AS call_db_id, c.started_at, c.duration_seconds, c.first_name, c.last_name,
+            c.primary_intent, c.final_state,
+            EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = c.id) AS has_recording
+       FROM test_runs t
+       JOIN calls c ON c.id = t.call_id
+      ORDER BY t.created_at DESC
+      LIMIT $1`,
+    [limit],
+  );
+}
+
 /** The raw mu-law audio of both sides; null when the call has no recording. */
 export async function getRecordingAudio(callId: number): Promise<RecordingAudio | null> {
   const rows = await query<RecordingAudio & { codec: string }>(

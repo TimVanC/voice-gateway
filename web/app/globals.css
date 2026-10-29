@@ -209,6 +209,26 @@ th.nowrap {
   background: var(--ok-bg);
   color: var(--ok-text);
 }
+.topnav {
+  display: flex;
+  gap: 4px;
+  margin-left: 18px;
+}
+.topnav a {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: none;
+  background: #eef0f3;
+}
+.topnav a:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  text-decoration: none;
+}
+
 .badge.rec {
   background: var(--accent-soft);
   color: var(--accent);
