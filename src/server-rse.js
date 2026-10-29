@@ -22,7 +22,7 @@ const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = re
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
-const { isLikelySilenceHallucination } = require('./utils/transcript-filters');
+const { isLikelySilenceHallucination, isClearYesOrNo } = require('./utils/transcript-filters');
 const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
@@ -2056,12 +2056,15 @@ STRICT RULES:
     
     // Avoid processing the same transcript twice
     // But if it's a duplicate, re-prompt the user after a short delay
-    // EXCEPTION: In confirmation/close states, accept "Yes"/"No" even if duplicate
+    // EXCEPTION: In confirmation/close states, accept any clear yes/no even if
+    // duplicate. The caller answers the availability read-back and then the
+    // final recap with the same words ("Yes, that's correct."); treating the
+    // second as a duplicate re-read the recap and the call never closed.
     if (transcript === lastProcessedTranscript) {
       const state = stateMachine.getState();
       // Strip trailing punctuation before matching (user says "Yes." not "Yes")
       const cleaned = transcript.trim().replace(/[.,!?]+$/, '');
-      const isAffirmative = /^(yes|yeah|yep|yup|correct|that'?s\s+right|sounds\s+good|all\s+good|good|no|nope|nah)$/i.test(cleaned);
+      const isAffirmative = /^(sounds\s+good|all\s+good|good)$/i.test(cleaned) || isClearYesOrNo(transcript);
       if ((state === STATES.CONFIRMATION || state === STATES.CLOSE) && isAffirmative) {
         console.log(`✅ Accepting "${transcript}" in ${state} (not treating as duplicate)`);
         lastProcessedTranscript = null; // allow this one through
