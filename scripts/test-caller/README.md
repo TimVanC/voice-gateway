@@ -124,10 +124,9 @@ TEST_CALLER_PUBLIC_URL=https://xxxx.ngrok.app node scripts/test-caller/run.js --
 The harness calls Ava's number (`TWILIO_NUMBER`, or `TEST_CALLER_TO`) from the
 first number in `TEST_CALLER_NUMBERS` (or `TEST_CALLER_FROM`), which must be a
 Twilio number on the account, so the call is flagged as a test downstream.
-The two must differ: `to` is the number callers dial (the production number
-on Railway), `from` is the spare dev number on the account. On a dev machine
-whose `.env` carries the dev number as `TWILIO_NUMBER`, set `TEST_CALLER_TO`
-to the live number explicitly. `TEST_CALLER_PUBLIC_URL` is the `https://...`
+The two must differ: `to` is Ava's own Twilio number (`TWILIO_NUMBER`, the
+888 line; the public 833 number is a Grasshopper line that forwards to it),
+`from` is the backup Twilio number used for staging. `TEST_CALLER_PUBLIC_URL` is the `https://...`
 address ngrok prints for the tunnel (a free account gets a new random one
 each start unless you claim its one static domain), and the WebSocket path
 `/caller-stream` is appended automatically.
