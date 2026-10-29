@@ -148,7 +148,8 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
   const activeResponses = new Set();
   const responseFirstSend = new Map(); // responseId -> ms
   const speechStartedAt = new Map(); // persona item_id -> ms (Ava speech detected)
-  let clears = 0;
+  let clears = 0; // barge-in clears
+  let routineClears = 0; // clear-before-speaking, Ava's normal behaviour
   let interjectionsFired = 0;
   let callerSpeaking = false;
   let callerLastSendAt = 0;
@@ -184,10 +185,13 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
     }
   });
   leg.on('heard', (frame) => { if (frame) persona.feedAudio(frame); });
+  // Ava sends `clear` before every response she starts (routine). It is a
+  // barge-in only when she was talking and the caller was talking too.
   leg.on('clear', ({ droppedFrames }) => {
-    clears++;
-    event('ava_clear', { droppedFrames });
-    note(`Ava cleared playback (barge-in), ${droppedFrames} frames dropped`);
+    const bargeIn = avaSpeaking && callerSpeaking;
+    if (bargeIn) clears++; else routineClears++;
+    event('ava_clear', { droppedFrames, bargeIn });
+    if (bargeIn) note(`Ava stopped talking because the caller spoke (barge-in), ${droppedFrames} frames dropped`);
   });
   leg.on('protocol-error', (m) => { event('protocol_error', { message: m }); say(`  !! ${m}`); });
   leg.on('error', (err) => { event('leg_error', { message: err.message }); say(`  !! leg error: ${err.message}`); });
@@ -198,8 +202,14 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
     activeResponses.delete(id);
     event('caller_response_done', { responseId: id, status });
   });
+  // Once the caller has said goodbye they stop talking, like a person who is
+  // lowering the phone; if Ava has not ended the call shortly after, they hang up.
+  let goodbyeAt = null;
+  let goodbyeResponseId = null;
+  const hangupAfterGoodbyeMs = scenario.hangupAfterGoodbyeMs || 15000;
   persona.on('audio', (buf, responseId) => {
     if (endInfo) return;
+    if (goodbyeAt != null && responseId !== goodbyeResponseId) return; // said goodbye already
     for (const frame of toFrames(buf)) queue.push({ frame, tag: responseId });
   });
   persona.on('caller_transcript', (text, responseId) => {
@@ -208,6 +218,17 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
     if (utt) utt.text = text;
     turns.push({ t, speaker: 'caller', text });
     say(`  [${report.fmtTime(t)}] CALLER: ${text}`);
+    if (goodbyeAt == null && /\b(bye|goodbye)\b/i.test(text)) {
+      goodbyeAt = now();
+      goodbyeResponseId = responseId;
+      event('caller_goodbye', { responseId });
+      setTimeout(() => {
+        if (endInfo) return;
+        note(`caller hung up ${Math.round(hangupAfterGoodbyeMs / 1000)} s after saying goodbye; Ava had not ended the call`);
+        event('caller_hangup_after_goodbye');
+        leg.hangup();
+      }, hangupAfterGoodbyeMs);
+    }
   });
   persona.on('ava_speech_started', (itemId) => { speechStartedAt.set(itemId, now()); event('persona_vad_start', { itemId }); });
   persona.on('ava_speech_stopped', (itemId) => event('persona_vad_stop', { itemId }));
@@ -304,7 +325,14 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
   clearInterval(tick);
   persona.close();
 
-  return { t0, events, turns, callerUtts, avaUtts, recorder, clears, interjectionsFired, endInfo };
+  const endedHow = endInfo.by === 'ava'
+    ? 'Ava ended the call'
+    : events.some((e) => e.type === 'caller_hangup_after_goodbye')
+      ? `caller hung up ${Math.round(hangupAfterGoodbyeMs / 1000)} s after saying goodbye (Ava never hung up)`
+      : events.some((e) => e.type === 'timeout')
+        ? `caller gave up at the ${scenario.maxCallSeconds || 240} s limit (Ava never hung up)`
+        : 'caller hung up';
+  return { t0, events, turns, callerUtts, avaUtts, recorder, clears, routineClears, interjectionsFired, endInfo, endedHow };
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +439,7 @@ async function main() {
   fs.writeFileSync(path.join(outDir, 'events.jsonl'), call.events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   const latency = report.computeLatency(call.callerUtts, call.avaUtts);
   const dead = report.deadAir(call.callerUtts, call.avaUtts, call.endInfo.t, 3000);
-  fs.writeFileSync(path.join(outDir, 'latency.md'), report.renderLatency(latency, dead, { clears: call.clears, interjections: call.interjectionsFired }));
+  fs.writeFileSync(path.join(outDir, 'latency.md'), report.renderLatency(latency, dead, { clears: call.clears, routineClears: call.routineClears, interjections: call.interjectionsFired }));
 
   // Intake -----------------------------------------------------------------
   let result = null;
@@ -443,6 +471,7 @@ async function main() {
     callSid: leg.callSid,
     durationMs: call.endInfo.t,
     endedBy: call.endInfo.by,
+    endedHow: call.endedHow,
     outcome: check.outcome,
     fields: check.fields,
     pass: check.pass,
@@ -452,6 +481,7 @@ async function main() {
     latency: latency.stats,
     deadAir: { maxGapMs: dead.maxGapMs, gapsOver3s: dead.gapsOver.length },
     clears: call.clears,
+    routineClears: call.routineClears,
     interjections: call.interjectionsFired,
     personaUsage: persona.usage,
     files: { outDir, wav: wav.mixPath, stereo: wav.stereoPath, serverLog: serverLogPath },
@@ -459,8 +489,8 @@ async function main() {
   fs.writeFileSync(path.join(outDir, 'report.json'), JSON.stringify(summary, null, 2));
 
   log('');
-  log(report.renderLatency(latency, dead, { clears: call.clears, interjections: call.interjectionsFired }));
-  log(report.renderChecks(check, result));
+  log(report.renderLatency(latency, dead, { clears: call.clears, routineClears: call.routineClears, interjections: call.interjectionsFired }));
+  log(report.renderChecks(check, result, { endedHow: call.endedHow, durationMs: call.endInfo.t }));
   log(`Audio: ${path.relative(process.cwd(), wav.mixPath)} (${wav.seconds.toFixed(1)} s), transcript: ${path.relative(process.cwd(), path.join(outDir, 'transcript.txt'))}`);
   const u = persona.usage;
   log(`Persona tokens: ${u.inputAudioTokens} audio in, ${u.outputAudioTokens} audio out (${u.inputTokens} in / ${u.outputTokens} out total)`);

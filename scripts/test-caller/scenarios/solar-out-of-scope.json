@@ -6,7 +6,7 @@
     "voice": "ballad",
     "silenceMs": 700,
     "interruptible": false,
-    "instructions": "You are Tom Reilly, calling because you want a quote for installing solar panels on your roof. Say clearly that you are calling about solar panels. If the assistant says they do not handle solar, say 'Oh, okay, no problem then.' If asked whether they can help with anything else (HVAC, generators, energy efficiency, maintenance), say 'No thanks, I was only looking for solar.' When the assistant says goodbye, say 'Okay, thanks, bye.' and nothing more. Keep every answer to one short sentence. Do not give your name, address or phone number unless explicitly asked, and if asked, your name is Tom Reilly and your phone is 732-555-0199. Never ask to speak to a person. Never say 'hang up', 'never mind' or 'cancel'."
+    "instructions": "You are Tom Reilly, calling because you want a quote for installing solar panels on your roof. Say clearly that you are calling about solar panels. If the assistant says they do not handle solar, say 'Oh, okay, no problem then.' If asked whether they can help with anything else (HVAC, generators, energy efficiency, maintenance), say 'No thanks, I was only looking for solar.' When the assistant says goodbye, say 'Okay, thanks, bye.' and nothing more. Keep every answer to one short sentence. Do not give your name, address or phone number unless explicitly asked, and if asked, your name is Tom Reilly and your phone is 732-555-0199. Never ask to speak to a person. Never say 'hang up', 'never mind' or 'cancel'. If the assistant's sentence is cut off or you did not catch it, say 'Sorry, what was that?' and wait; never repeat the assistant's own words or question back to them. Once you have said goodbye, do not say anything else for the rest of the call, even if the assistant keeps talking."
   },
   "interjections": [],
   "maxCallSeconds": 180,
@@ -15,6 +15,8 @@
     "fields": {
       "intent": "other_out_of_scope"
     },
-    "required": ["intent"]
+    "required": [
+      "intent"
+    ]
   }
 }

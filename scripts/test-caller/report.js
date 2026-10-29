@@ -182,8 +182,20 @@ function inferFromTranscript(turns) {
 // Expectations
 // ---------------------------------------------------------------------------
 
+// Transcription sometimes writes "Fourteen Elm Street"; compare on digits.
+const NUMBER_WORDS = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70,
+  eighty: 80, ninety: 90, hundred: 100,
+};
 function norm(s) {
-  return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9@]+/g, ' ').trim();
+  return String(s == null ? '' : s)
+    .toLowerCase()
+    .replace(/[^a-z0-9@]+/g, ' ')
+    .replace(/\b([a-z]+)\b/g, (w) => (w in NUMBER_WORDS ? String(NUMBER_WORDS[w]) : w))
+    .replace(/\b(\d+) (\d+)\b/g, (m, a, b) => (Number(a) >= 20 && Number(b) < 10 ? String(Number(a) + Number(b)) : m))
+    .trim();
 }
 function digits(s) {
   return String(s == null ? '' : s).replace(/\D/g, '');
@@ -361,7 +373,7 @@ function renderLatency(latency, dead, extra = {}) {
   lines.push('');
   lines.push(`Caller turns: ${stats.turns}; answered: ${stats.answered}; Ava talked over the caller: ${stats.overlaps}; unanswered: ${stats.unanswered}.`);
   lines.push(`Dead air: longest gap ${ms(dead.maxGapMs)}; gaps of 3 s or more: ${dead.gapsOver.length}${dead.gapsOver.length ? ' (' + dead.gapsOver.map((g) => `${fmtTime(g.from)} for ${Math.round(g.ms / 100) / 10} s`).join(', ') + ')' : ''}.`);
-  if (extra.clears != null) lines.push(`Ava cleared playback (barge-in) ${extra.clears} time(s).`);
+  if (extra.clears != null) lines.push(`Barge-ins (Ava stopped because the caller spoke): ${extra.clears}; routine clears before Ava speaks: ${extra.routineClears == null ? '-' : extra.routineClears}.`);
   if (extra.interjections != null) lines.push(`Caller interjected ${extra.interjections} time(s) while Ava was talking.`);
   return lines.join('\n') + '\n';
 }
@@ -371,8 +383,9 @@ function cell(s) {
   return t.length > 60 ? t.slice(0, 57) + '...' : t;
 }
 
-function renderChecks(check, result) {
+function renderChecks(check, result, extra = {}) {
   const lines = [];
+  if (extra.endedHow) lines.push(`Call length ${fmtTime(extra.durationMs || 0)}: ${extra.endedHow}.`);
   lines.push(`Intake source: ${result.source}${result.finalState ? `; final state: ${result.finalState}` : ''}`);
   const o = check.outcome;
   lines.push(`Outcome: expected ${o.want} -> ${o.ok ? 'REACHED' : 'NOT REACHED'} (confirmation=${yn(o.reached.confirmation)} out_of_scope=${yn(o.reached.out_of_scope)} transfer=${yn(o.reached.transfer)})`);

@@ -69,8 +69,9 @@ Each run writes `scripts/test-caller/out/<timestamp>-<scenario>/` (gitignored):
 - `call.wav`: both sides mixed, 8 kHz mono; `call-stereo.wav`: caller left, Ava right.
 - `latency.md`: per caller turn, time from the end of the caller's speech to
   Ava's first audio frame (and first audible frame), p50/p90/max, how often
-  Ava talked over the caller, dead-air gaps of 3 s or more, how many times
-  Ava cleared playback.
+  Ava talked over the caller, dead-air gaps of 3 s or more, barge-ins (Ava
+  sent `clear` while both sides were talking) and routine clears (Ava clears
+  the line before every response she starts; those are normal).
 - `events.jsonl`: the raw timeline (speech starts/ends, VAD, clears, interjections).
 - `report.json`: everything above plus the intake Ava captured and the check result.
 - `server.log`: Ava's own log, when spawned.
@@ -88,7 +89,7 @@ harness itself failed (no server, bad key, no tunnel).
   "callerNumber": "+19735550142",
   "persona": { "voice": "ash", "silenceMs": 700, "interruptible": false, "instructions": "You are Maria Lopez, ..." },
   "interjections": [ { "text": "mm-hm", "onAvaUtterance": 2, "afterMs": 1500 } ],
-  "maxCallSeconds": 240,
+  "maxCallSeconds": 360,
   "expect": {
     "outcome": "confirmation",
     "fields": { "intent": "hvac_service", "firstName": "Maria", "phone": "9735550142", "address": "14 Elm" },
@@ -102,8 +103,15 @@ harness itself failed (no server, bad key, no tunnel).
   `interrupt_response` flag); off by default so the caller finishes what they say.
 - `interjections` make the caller say a clip while Ava is still talking: the
   Nth Ava utterance, after so many ms. Use it to test barge-in handling.
+- `maxCallSeconds` is the caller's patience; a full intake takes 4 to 5 minutes
+  at Ava's current pace, so keep it at 360 for intake scenarios.
+- Once the caller has said goodbye they go quiet, and if Ava has not ended the
+  call `hangupAfterGoodbyeMs` later (default 15000) they hang up. The report
+  says who ended the call and how; "Ava never hung up" is a finding, not a
+  harness failure.
 - `expect.fields` are compared loosely: phone by last ten digits, email exactly,
-  everything else as a case-insensitive substring of what Ava stored.
+  everything else as a case-insensitive substring of what Ava stored, with
+  number words turned into digits ("Fourteen Elm Street" matches "14 Elm").
   Only `required` fields fail the run; the rest warn.
 
 ## Phone mode (real PSTN call)
@@ -128,12 +136,14 @@ when `GITHUB_ACTIONS` is set; keep it that way.
 
 ## Cost per run
 
-Two Realtime sessions (Ava's and the caller's) for a 2 to 4 minute call, plus
-transcription on both sides. At the published `gpt-realtime` audio rates this is
-roughly $0.50 to $1.50 per local run; check the OpenAI usage page after the
-first few runs and adjust. Phone mode adds Twilio: an outbound leg plus Ava's
-inbound leg and two media streams, a few cents per minute. Nothing else is
-billed; no new services are involved.
+Two Realtime sessions (Ava's and the caller's) for a 3 to 5 minute call, plus
+transcription on both sides. A measured 4-minute `no-heat` run cost the caller
+side about 6,500 audio tokens in and 1,200 out, which at the published
+`gpt-realtime` audio rates ($32 / $64 per million) is about $0.30; Ava's side
+is similar plus her text prompts, so budget roughly $0.60 to $1.00 per local
+run and check the OpenAI usage page after the first few. Phone mode adds
+Twilio: an outbound leg plus Ava's inbound leg and two media streams, a few
+cents per minute. Nothing else is billed; no new services are involved.
 
 ## Reading the numbers
 
@@ -141,6 +151,6 @@ billed; no new services are involved.
 interesting columns are "first frame" (Ava's pacing loop started sending real
 audio) and "first audible" (the caller could actually hear something), the
 "Ava started before caller finished" flags (Ava talking over the caller), the
-dead-air gaps, and the clear count (Ava cut herself off because she heard the
-caller). The caller side has its own VAD delay (`silenceMs`, default 700 ms),
-so compare runs with the same scenario settings.
+dead-air gaps, and the barge-in count (Ava cut herself off because she heard
+the caller). The caller side has its own VAD delay (`silenceMs`, default
+700 ms), so compare runs with the same scenario settings.

@@ -6,10 +6,10 @@
     "voice": "verse",
     "silenceMs": 700,
     "interruptible": false,
-    "instructions": "You are David Chen, calling RSE Energy because you want a new whole-house standby generator installed at your home; you do not have one yet. Facts about you: name David Chen; address 88 Ridge Road, Summit, New Jersey; phone 201-555-0177; email d chen at example dot com (say it exactly like that: 'd chen at example dot com'); it is a residential property; you are exploring options and have no brand in mind, though you have heard of Generac; you are available Saturdays or weekday evenings after 6. You are calm and businesslike, answering only what is asked in one or two short sentences, never volunteering extra details. When your details are read back and you are asked if they are correct, say 'Yes, that's correct.' When asked if there is anything else, say 'No, that's all.' When the assistant says goodbye, say 'Thank you, goodbye.' and nothing more. Never ask to speak to a person. Never say 'hang up', 'never mind' or 'cancel'."
+    "instructions": "You are David Chen, calling RSE Energy because you want a new whole-house standby generator installed at your home; you do not have one yet. Facts about you: name David Chen; address 88 Ridge Road, Summit, New Jersey; phone 201-555-0177; email d chen at example dot com (say it exactly like that: 'd chen at example dot com'); it is a residential property; you are exploring options and have no brand in mind, though you have heard of Generac; if asked about smoke, gas smell or sparks, answer only: 'No, nothing like that'; you are available Saturdays or weekday evenings after 6. You are calm and businesslike, answering only what is asked in one or two short sentences, never volunteering extra details. When your details are read back and you are asked if they are correct, say 'Yes, that's correct.' When asked if there is anything else, say 'No, that's all.' When the assistant says goodbye, say 'Thank you, goodbye.' and nothing more. Never ask to speak to a person. Never say 'hang up', 'never mind' or 'cancel'. If the assistant's sentence is cut off or you did not catch it, say 'Sorry, what was that?' and wait; never repeat the assistant's own words or question back to them. Once you have said goodbye, do not say anything else for the rest of the call, even if the assistant keeps talking."
   },
   "interjections": [],
-  "maxCallSeconds": 240,
+  "maxCallSeconds": 360,
   "expect": {
     "outcome": "confirmation",
     "fields": {
@@ -21,6 +21,12 @@
       "address": "88 Ridge",
       "availability": "Saturday"
     },
-    "required": ["intent", "firstName", "lastName", "phone", "address"]
+    "required": [
+      "intent",
+      "firstName",
+      "lastName",
+      "phone",
+      "address"
+    ]
   }
 }
