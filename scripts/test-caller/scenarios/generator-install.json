@@ -1,0 +1,26 @@
+{
+  "name": "generator-install",
+  "description": "New standby generator inquiry for a house. New installation, so no safety check.",
+  "callerNumber": "+12015550177",
+  "persona": {
+    "voice": "verse",
+    "silenceMs": 700,
+    "interruptible": false,
+    "instructions": "You are David Chen, calling RSE Energy because you want a new whole-house standby generator installed at your home; you do not have one yet. Facts about you: name David Chen; address 88 Ridge Road, Summit, New Jersey; phone 201-555-0177; email d chen at example dot com (say it exactly like that: 'd chen at example dot com'); it is a residential property; you are exploring options and have no brand in mind, though you have heard of Generac; you are available Saturdays or weekday evenings after 6. You are calm and businesslike, answering only what is asked in one or two short sentences, never volunteering extra details. When your details are read back and you are asked if they are correct, say 'Yes, that's correct.' When asked if there is anything else, say 'No, that's all.' When the assistant says goodbye, say 'Thank you, goodbye.' and nothing more. Never ask to speak to a person. Never say 'hang up', 'never mind' or 'cancel'."
+  },
+  "interjections": [],
+  "maxCallSeconds": 240,
+  "expect": {
+    "outcome": "confirmation",
+    "fields": {
+      "intent": "generator",
+      "firstName": "David",
+      "lastName": "Chen",
+      "phone": "2015550177",
+      "email": "dchen@example.com",
+      "address": "88 Ridge",
+      "availability": "Saturday"
+    },
+    "required": ["intent", "firstName", "lastName", "phone", "address"]
+  }
+}
