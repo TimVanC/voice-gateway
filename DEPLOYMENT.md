@@ -213,12 +213,72 @@ email/transfer config and the public `/health` endpoint, then emails one report.
   "Run workflow" always emails the full report, which is how to test the email
   path. Each run re-enables the workflow, because GitHub switches off cron in
   public repositories after 60 days without a push.
+- **Daily smoke call:** see the next section. When it is on, its line
+  (`Ava answers the phone`) is part of this report.
 - **Run by hand:** `node src/monitor/daily-check.js` (exit 0 means all good).
 - **Report never arrived?** A SendGrid 202 only means "queued". Run
   `node src/monitor/sendgrid-diagnostics.js` locally with `SENDGRID_API_KEY` in
   your `.env` (never on GitHub: this repo is public, so Actions logs are public).
   It prints per-day delivered/bounced/dropped counts, the suppression lists with
   SendGrid's reasons, and sender-authentication status.
+
+## 📞 Daily Smoke Call (Ava answers the phone)
+
+Once a day the production server phones Ava's own number and checks that she
+answers with her opening greeting (`src/monitor/smoke-call.js`). It is the one
+check that proves the whole path a customer takes: Twilio, the webhook, the
+media stream, OpenAI Realtime and Ava's greeting.
+
+- **What happens:** at the 8:00 AM daily check the server calls `TWILIO_NUMBER`
+  from `SMOKE_CALL_FROM` with TwiML that streams the call back to the server
+  at `wss://<PUBLIC_BASE_URL host>/smoke/stream`. The server stays silent,
+  collects about 15 s of audio after Ava's first sound, hangs up, transcribes
+  the clip once (`gpt-4o-mini-transcribe`) and compares it with
+  `GREETING.primary` in `src/scripts/rse-script.js` (at least 70% of the
+  greeting's words, in order; case and punctuation ignored).
+  **PASS** = audio within 10 s of the stream starting and the greeting heard.
+  **FAIL** names the reason: the call never connected, no audio, or a
+  transcript that is not the greeting (quoted).
+- **Where it shows:** one line in the daily check email
+  (`[PASS] Ava answers the phone: answered 2.9 s after the stream started and
+  said her greeting (...)`), one log line (`✅ Daily smoke call PASS` /
+  `❌ Daily smoke call FAIL`), and, with `DATABASE_URL` set, the web app's
+  **Test calls** tab (scenario `daily-greeting`, with the transcript, the
+  reason on failure and the recording). The call is marked `is_test` with
+  reason "daily smoke call", so the main Calls list hides it. It attaches to
+  the row Ava writes for the call; if she never answered, it writes its own
+  row with source `smoke-test` so the failure is visible.
+- **Flags (Railway → Variables, production):**
+
+  | Variable | Value |
+  |---|---|
+  | `DAILY_SMOKE_CALL` | `on` to enable. Unset or anything else: no call is ever placed. |
+  | `SMOKE_CALL_FROM` | the Twilio number to call from, E.164. Default: the first number in `TEST_CALLER_NUMBERS` (today the backup (973) number). Must be a number on the account and must differ from `TWILIO_NUMBER`. |
+
+  It also needs `TWILIO_NUMBER`, `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`,
+  `OPENAI_API_KEY` and `PUBLIC_BASE_URL` (or Railway's `RAILWAY_PUBLIC_DOMAIN`),
+  all already set in production. The server logs at start-up whether the
+  smoke call is on and which numbers it will use.
+- **When:** inside the daily check, so production only (`DAILY_CHECK_SCHEDULE`
+  rules apply) and at its times (`DAILY_CHECK_TIMES`, default 8 AM and 4 PM).
+  A passing morning call is not repeated at the 4 PM check (its line repeats
+  the morning result); a failed one is tried again. A restart between the two
+  can cost one extra call.
+- **Never from GitHub Actions.** Twilio locked the account twice for API calls
+  from Actions runners. The one-shot `node src/monitor/daily-check.js` never
+  places the call, and `smoke-call.js` refuses when `GITHUB_ACTIONS` is set.
+- **Cost:** about 30 s of Twilio outbound + inbound legs and two media
+  streams (roughly 3 to 5 cents), one 15 s transcription (well under a cent)
+  and Ava's own Realtime session for the greeting (a few cents). Budget
+  about 10 cents a day. No Realtime session is opened on the smoke side.
+- **Local run:** start a tunnel (`ngrok http 8099`), then
+
+  ```bash
+  PORT=8099 PUBLIC_BASE_URL=https://xxxx.ngrok.app DAILY_SMOKE_CALL=on   DAILY_CHECK_SCHEDULE=on DAILY_CHECK_TIMES=HH:MM MONITOR_HEALTH_URL=http://localhost:8099/health   node src/server-rse.js
+  ```
+
+  with `HH:MM` a minute or two ahead (Eastern). The local server places the
+  call; whoever answers `TWILIO_NUMBER` (production Ava) is what gets checked.
 
 ## 💻 Local Development
 

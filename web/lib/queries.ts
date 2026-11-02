@@ -83,13 +83,35 @@ export interface TestRunRow {
   created_at: Date;
 }
 
-/** The shape scripts/test-caller writes to report.json (only what the page reads). */
+/**
+ * The report JSON on a test_runs row (only what the pages read). Two writers:
+ * scripts/test-caller (report.json) and the daily smoke call
+ * (src/monitor/smoke-call.js, kind "smoke", scenario "daily-greeting").
+ */
 export interface TestRunReport {
   fields?: { field: string; expected: unknown; actual: unknown; ok: boolean | null; required: boolean }[];
   intakeSource?: string;
   latency?: { firstAudible?: { p50: number | null; p90: number | null; max: number | null } };
   routineClears?: number;
+  // daily smoke call
+  kind?: "smoke";
+  transcript?: string | null;
+  reason?: string | null;
+  expectedGreeting?: string;
+  greetingMatch?: { matched: number; total: number; fraction: number; ok: boolean } | null;
+  timings?: { ringMs?: number; firstAudioMs?: number; streamMs?: number; callMs?: number; transcribeMs?: number };
+  audioMs?: number;
+  callSid?: string | null;
+  from?: string;
+  to?: string;
   [key: string]: unknown;
+}
+
+/** test_runs.scenario of the daily smoke call. */
+export const SMOKE_SCENARIO = "daily-greeting";
+
+export function isSmokeRun(run: { scenario: string; report: TestRunReport }): boolean {
+  return run.scenario === SMOKE_SCENARIO || run.report?.kind === "smoke";
 }
 
 export interface TranscriptTurn {

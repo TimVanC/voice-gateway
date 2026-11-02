@@ -529,7 +529,15 @@ async function sendReport(checks, allGood) {
 // ============================================================================
 // MAIN
 // ============================================================================
-async function runDailyCheck({ healthUrl = HEALTH_URL } = {}) {
+/**
+ * @param {object} [opts]
+ * @param {string} [opts.healthUrl]
+ * @param {Array<() => Promise<{name: string, status: string, detail: string}>>} [opts.extraChecks]
+ *   Checks only the server can run, appended after the built-in ones: today
+ *   the daily smoke call (src/monitor/smoke-call.js). Each gets its own line
+ *   in the report; one that throws becomes a FAIL line.
+ */
+async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) {
   console.log('🔍 Running RSE Ava daily health check...');
 
   // Run each check; each one handles its own errors and resolves a result object.
@@ -543,6 +551,13 @@ async function runDailyCheck({ healthUrl = HEALTH_URL } = {}) {
   checks.push(await checkEmailToPresence());
   checks.push(await checkTransferNumber());
   checks.push(await checkServerHealth(healthUrl));
+  for (const extra of extraChecks) {
+    try {
+      checks.push(await extra());
+    } catch (err) {
+      checks.push({ name: 'Extra check', status: 'fail', detail: `threw — ${err && err.message ? err.message : String(err)}` });
+    }
+  }
 
   for (const c of checks) {
     console.log(`[${statusLabel(c.status)}] ${c.name}: ${c.detail}`);

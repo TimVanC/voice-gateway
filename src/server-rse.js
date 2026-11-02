@@ -28,7 +28,9 @@ const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
 const { saveCall: saveCallToDb, createTranscriptRecorder } = require('./utils/call-db');
-const { startDailyCheckSchedule, parseTimes } = require('./monitor/schedule');
+const { startDailyCheckSchedule, parseTimes, defaultHealthUrl } = require('./monitor/schedule');
+const { runDailyCheck } = require('./monitor/daily-check');
+const smokeCall = require('./monitor/smoke-call');
 
 // ============================================================================
 // CONFIGURATION
@@ -130,6 +132,14 @@ app.post("/twilio/transfer", twilioWebhookGuard, (req, res) => {
 // WEBSOCKET HANDLER - MAIN CALL LOGIC
 // ============================================================================
 wss.on("connection", (twilioWs, req) => {
+  // The daily smoke call's own stream (src/monitor/smoke-call.js): Twilio
+  // sends us what Ava says on a call this server placed to her number.
+  // Handled apart from the call logic below, which is untouched.
+  if (smokeCall.isSmokeStreamRequest(req)) {
+    console.log(`📞 New connection on ${smokeCall.STREAM_PATH} (daily smoke call)`);
+    smokeCall.handleStream(twilioWs, req);
+    return;
+  }
   console.log("📞 New connection");
   
   // ============================================================================
@@ -2854,9 +2864,27 @@ if (['on', 'true', '1', 'yes'].includes(DAILY_CHECK_FLAG)) {
 }
 // Local times in America/New_York, comma separated.
 const DAILY_CHECK_TIMES = process.env.DAILY_CHECK_TIMES || '08:00,16:00';
+// Daily smoke call (src/monitor/smoke-call.js): with DAILY_SMOKE_CALL=on the
+// daily check also phones Ava's number from a test number and checks that
+// she answers with her greeting. It runs inside the daily check, so it is
+// subject to the same production-only rule and never runs on GitHub Actions.
+const SMOKE_CALL = smokeCall.smokeCallConfig();
+const extraChecks = [];
+if (SMOKE_CALL.enabled && SMOKE_CALL.problems.length) {
+  console.warn(`⚠️ DAILY_SMOKE_CALL is on but no call can be placed: ${SMOKE_CALL.problems.join('; ')}`);
+} else if (SMOKE_CALL.enabled) {
+  extraChecks.push(() => smokeCall.smokeCheck({ twilioClient }));
+  console.log(`📞 Daily smoke call on: ${SMOKE_CALL.from} → ${SMOKE_CALL.to}, stream ${SMOKE_CALL.streamUrl}, placed by the daily check${DAILY_CHECK_ENABLED ? '' : ' (which is off here, so no call will be placed)'}`);
+} else {
+  console.log('📞 Daily smoke call off (set DAILY_SMOKE_CALL=on to phone Ava once a day)');
+}
+
 if (DAILY_CHECK_ENABLED) {
   try {
-    startDailyCheckSchedule({ times: parseTimes(DAILY_CHECK_TIMES) });
+    startDailyCheckSchedule({
+      times: parseTimes(DAILY_CHECK_TIMES),
+      run: () => runDailyCheck({ healthUrl: defaultHealthUrl(), extraChecks }),
+    });
     if ((process.env.MONITOR_TWILIO_BALANCE || '').toLowerCase() !== 'on') {
       console.log('ℹ️ Twilio balance check is off (set MONITOR_TWILIO_BALANCE=on here, in production only, to warn on low balance)');
     }

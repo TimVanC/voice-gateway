@@ -4,7 +4,7 @@ import TopBar from "@/components/TopBar";
 import { FlagBadges, StatusBadge } from "@/components/Badges";
 import { requireSession } from "@/lib/auth";
 import { formatDateTime, formatDuration, formatIntent, formatPhone, formatTime, fullName } from "@/lib/format";
-import { getCall } from "@/lib/queries";
+import { getCall, isSmokeRun } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -78,7 +78,18 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
               <Field label="Transferred" value={call.was_transferred === null ? null : call.was_transferred ? "yes" : "no"} />
               <Field label="Safety risk" value={call.is_safety_risk === null ? null : call.is_safety_risk ? "yes" : "no"} />
               <Field label="Final state" value={call.final_state} />
-              <Field label="Source" value={call.source === "sheets" ? `Google Sheet (row ${call.sheet_row_number ?? "?"} at import)` : `server (${call.environment ?? "unknown"})`} />
+              <Field
+                label="Source"
+                value={
+                  call.source === "sheets"
+                    ? `Google Sheet (row ${call.sheet_row_number ?? "?"} at import)`
+                    : call.source === "smoke-test"
+                      ? `daily smoke call, ${call.environment ?? "unknown"} server (Ava wrote no row of her own for this call)`
+                      : call.source === "test-caller"
+                        ? `test caller (${call.environment ?? "unknown"})`
+                        : `server (${call.environment ?? "unknown"})`
+                }
+              />
               <Field label="Call ID" value={<code>{call.call_id}</code>} />
               <Field label="Twilio call SID" value={call.twilio_call_sid ? <code>{call.twilio_call_sid}</code> : null} />
             </dl>
@@ -92,7 +103,8 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
             <p className="muted small" style={{ margin: "8px 0 0" }}>
               {formatDuration(recording.duration_seconds === null ? null : Math.round(Number(recording.duration_seconds)))} · stereo: caller on the
               left, Ava on the right · 8 kHz phone audio
-              {recording.source === "test-caller" ? " · captured by the test caller" : ""} ·{" "}
+              {recording.source === "test-caller" ? " · captured by the test caller" : ""}
+              {recording.source === "smoke-test" ? " · captured by the daily smoke call (the caller side is silent)" : ""} ·{" "}
               <a href={`/calls/${call.id}/recording`} download={`call-${call.id}.wav`}>
                 download WAV
               </a>
@@ -109,8 +121,42 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
               <section key={run.id} className="card test-run">
                 <p style={{ marginTop: 0 }}>
                   <span className={`badge ${run.passed ? "status-completed" : "status-failed"}`}>{run.passed ? "PASS" : "FAIL"}</span>
-                  <strong>{run.scenario}</strong> <span className="muted">· {run.mode} mode · {formatDateTime(run.created_at)}</span>
+                  <strong>{isSmokeRun(run) ? "Daily smoke call" : run.scenario}</strong>{" "}
+                  <span className="muted">
+                    · {isSmokeRun(run) ? `${run.scenario} · ` : ""}
+                    {run.mode} mode · {formatDateTime(run.created_at)}
+                  </span>
                 </p>
+                {isSmokeRun(run) ? (
+                  <dl>
+                    <Field label="Check" value="Ava answers a real call to her number with her opening greeting" />
+                    {!run.passed && <Field label="Why it failed" value={<span className="fail-reason">{run.report.reason ?? "unknown"}</span>} />}
+                    <Field
+                      label="Answered after"
+                      value={
+                        run.report.timings?.firstAudioMs == null
+                          ? null
+                          : `${ms(run.report.timings.firstAudioMs)} from the stream starting (${ms(run.report.timings.ringMs)} of dialling before that)`
+                      }
+                    />
+                    <Field label="Heard" value={run.report.transcript ? `“${run.report.transcript}”` : null} />
+                    <Field
+                      label="Greeting match"
+                      value={
+                        run.report.greetingMatch
+                          ? `${run.report.greetingMatch.matched} of ${run.report.greetingMatch.total} greeting words heard in order (${Math.round(run.report.greetingMatch.fraction * 100)}%, needs 70%)`
+                          : null
+                      }
+                    />
+                    <Field label="Expected" value={run.report.expectedGreeting ? <span className="muted">“{run.report.expectedGreeting}”</span> : null} />
+                    <Field label="Call ended" value={run.ended_how} />
+                    <Field
+                      label="Placed"
+                      value={run.report.from && run.report.to ? `from ${formatPhone(run.report.from)} to ${formatPhone(run.report.to)}` : null}
+                    />
+                    <Field label="Twilio call SID" value={run.report.callSid ? <code>{run.report.callSid}</code> : null} />
+                  </dl>
+                ) : (
                 <dl>
                   <Field
                     label="Outcome"
@@ -141,6 +187,7 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
                   />
                   <Field label="Intake read from" value={run.report.intakeSource ?? null} />
                 </dl>
+                )}
                 {run.report.fields && run.report.fields.length > 0 && (
                   <table className="checks">
                     <thead>

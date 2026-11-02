@@ -237,6 +237,9 @@ th.nowrap {
   background: #fde8e8;
   color: #b42318;
 }
+.fail-reason {
+  color: #b42318;
+}
 .badge.status-transferred {
   background: var(--accent-soft);
   color: var(--accent);
