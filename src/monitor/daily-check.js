@@ -1,10 +1,13 @@
 /**
- * Daily Health Check (standalone one-shot script)
+ * Daily Health Check
  *
  * Runs a series of independent health checks and emails a single status report
- * to one recipient, then exits. Designed to be run as a scheduled cron / one-shot
- * job (e.g. Railway cron). It does NOT touch the call/voice path or any state
- * machine code.
+ * to one recipient. Two ways to run it:
+ *   - inside the server on Railway, every day at 8:00 AM Eastern, via
+ *     src/monitor/schedule.js (the primary, on-time report), or
+ *   - as a one-shot script (`node src/monitor/daily-check.js`), which is how the
+ *     GitHub Actions backup runs it; exits 0 when all good, 1 otherwise.
+ * It does NOT touch the call/voice path or any state machine code.
  *
  * Checks performed (in order):
  *   1. Anthropic model availability (cheap test call)
@@ -24,7 +27,10 @@ require('dotenv').config();
 
 const Anthropic = require('@anthropic-ai/sdk');
 const twilio = require('twilio');
-const sgMail = require('@sendgrid/mail');
+// Own client instance: the server's call-summary emails use the module-level
+// @sendgrid/mail singleton, and the API key/timeout set here must not touch it.
+const { MailService } = require('@sendgrid/mail');
+const sgMail = new MailService();
 const WebSocket = require('ws');
 const { google } = require('googleapis');
 const fs = require('fs');
@@ -50,7 +56,20 @@ const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime
 const BALANCE_WARN_THRESHOLD = 5;
 
 const MONITOR_EMAIL_TO = process.env.MONITOR_EMAIL_TO || 'timvancau@gmail.com';
+// Public URL to probe. One-shot runs (GitHub Actions) must set MONITOR_HEALTH_URL
+// explicitly so a missing secret is reported as such; the in-server schedule
+// passes its own public URL to runDailyCheck() instead.
 const HEALTH_URL = process.env.MONITOR_HEALTH_URL;
+// The subject and "Run at" line show this zone (plus UTC) so a report sent at
+// 19:33Z reads as 3:33 PM EDT at a glance.
+const REPORT_TIME_ZONE = 'America/New_York';
+// Twilio's fraud detection locks the account when the Auth Token is used from
+// an IP/country it does not expect (Sep 7 and Sep 28 2026, both GitHub-hosted
+// runners). So the balance check is opt-in: set MONITOR_TWILIO_BALANCE=on only
+// where the token is already used routinely (the Railway server).
+const TWILIO_BALANCE_ENABLED = (process.env.MONITOR_TWILIO_BALANCE || '').toLowerCase() === 'on';
+// Backup runners (GitHub Actions) set this so a healthy day sends no duplicate email.
+const EMAIL_ONLY_ON_FAILURE = (process.env.MONITOR_EMAIL_ONLY_ON_FAILURE || '').toLowerCase() === 'true';
 
 // Google Sheets config, read exactly the way src/utils/google-sheets-logger.js
 // does it (lines ~30-33): GOOGLE_APPLICATION_CREDENTIALS may be a file path OR
@@ -71,7 +90,7 @@ async function checkAnthropic() {
       return result;
     }
 
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: 30000, maxRetries: 1 });
 
     const response = await client.messages.create({
       model: ANTHROPIC_MODEL,
@@ -280,7 +299,7 @@ async function checkGoogleSheets() {
     const meta = await sheets.spreadsheets.get({
       spreadsheetId: SPREADSHEET_ID,
       fields: 'properties.title,sheets.properties.title',
-    });
+    }, { timeout: 30000 });
 
     const title = meta.data && meta.data.properties ? meta.data.properties.title : '(unknown)';
     const tabs = (meta.data && meta.data.sheets) ? meta.data.sheets.map((s) => s.properties.title) : [];
@@ -402,18 +421,18 @@ function httpGetJson(targetUrl, timeoutMs) {
   });
 }
 
-async function checkServerHealth() {
+async function checkServerHealth(healthUrl) {
   const result = { name: 'Railway server health', status: 'fail', detail: '' };
   try {
-    if (!HEALTH_URL) {
+    if (!healthUrl) {
       result.detail = 'Missing MONITOR_HEALTH_URL';
       return result;
     }
 
-    const { statusCode, body } = await httpGetJson(HEALTH_URL, 10000);
+    const { statusCode, body } = await httpGetJson(healthUrl, 10000);
 
     if (statusCode !== 200) {
-      result.detail = `Unexpected HTTP ${statusCode} from ${HEALTH_URL}`;
+      result.detail = `Unexpected HTTP ${statusCode} from ${healthUrl}`;
       return result;
     }
 
@@ -425,6 +444,7 @@ async function checkServerHealth() {
       return result;
     }
 
+    result.json = json; // for smokeCallRelayCheck; not printed
     if (json && json.status === 'healthy') {
       result.status = 'pass';
       result.detail = `HTTP 200, status "healthy"`;
@@ -432,8 +452,57 @@ async function checkServerHealth() {
       result.detail = `HTTP 200 but status was "${json && json.status}" (expected "healthy")`;
     }
   } catch (err) {
-    result.detail = `Health check error — ${err && err.message ? err.message : String(err)}`;
+    // A refused connection surfaces as an AggregateError whose own message is
+    // empty; the useful text is on its nested errors.
+    const nested = err && Array.isArray(err.errors) && err.errors.length
+      ? err.errors.map((e) => (e && e.message ? e.message : String(e))).join('; ')
+      : '';
+    const message = nested || (err && err.message ? err.message : String(err));
+    result.detail = `Health check error — ${message} (${healthUrl})`;
   }
+  return result;
+}
+
+// ============================================================================
+// CHECK 8: DAILY SMOKE CALL, AS REPORTED BY THE SERVER
+// ============================================================================
+// The server places the call itself (src/monitor/smoke-call.js) and shows the
+// newest result on /health. A run of this script that did not place the call
+// (the GitHub Actions backup, or a server with the smoke call off) relays
+// that result here, so the email always carries the line. Nothing here
+// touches Twilio.
+function etDayOf(iso) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: REPORT_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso));
+}
+
+function etTimeOf(iso) {
+  return new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso));
+}
+
+function smokeCallRelayCheck(healthJson, now = new Date()) {
+  const result = { name: 'Ava answers the phone', status: 'fail', detail: '' };
+  const sc = healthJson && healthJson.smoke_call;
+  if (!sc) {
+    result.status = 'warning';
+    result.detail = 'the server does not report the daily smoke call (build without it?)';
+    return result;
+  }
+  if (!sc.enabled) {
+    result.status = 'warning';
+    result.detail = 'daily smoke call is off on the server (set DAILY_SMOKE_CALL=on in Railway production)';
+    return result;
+  }
+  if (!sc.last) {
+    result.detail = `no smoke call result yet (server up since ${etTimeOf(sc.server_started_at)})`;
+    return result;
+  }
+  const verdict = sc.last.passed ? 'PASS' : 'FAIL';
+  if (etDayOf(sc.last.at) !== etDayOf(now.toISOString())) {
+    result.detail = `no smoke call today; the last one, ${etTimeOf(sc.last.at)}, was a ${verdict}: ${sc.last.summary}`;
+    return result;
+  }
+  result.status = sc.last.passed ? 'pass' : 'fail';
+  result.detail = `${etTimeOf(sc.last.at)} call, reported by the server: ${sc.last.summary}`;
   return result;
 }
 
@@ -447,7 +516,7 @@ function statusLabel(status) {
 }
 
 async function sendReport(checks, allGood) {
-  const result = { sent: false, detail: '' };
+  const result = { sent: false, skipped: false, detail: '' };
   try {
     if (!process.env.SENDGRID_API_KEY) {
       result.detail = 'Missing SENDGRID_API_KEY';
@@ -457,15 +526,27 @@ async function sendReport(checks, allGood) {
       result.detail = 'Missing EMAIL_FROM';
       return result;
     }
+    // Checked after the credentials above on purpose: a backup runner with a
+    // missing SendGrid secret must still fail on a healthy day, not only on the
+    // day the email is needed.
+    if (allGood && EMAIL_ONLY_ON_FAILURE) {
+      result.skipped = true;
+      result.detail = 'skipped: all checks passed and MONITOR_EMAIL_ONLY_ON_FAILURE is set';
+      return result;
+    }
 
-    const subject = allGood
-      ? 'RSE Ava daily check: ALL GOOD'
-      : 'RSE Ava daily check: ATTENTION NEEDED';
+    const now = new Date();
+    const localTime = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, timeStyle: 'short' }).format(now);
+    const localDate = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, dateStyle: 'medium', timeStyle: 'short' }).format(now);
+    const zone = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, timeZoneName: 'short' })
+      .formatToParts(now).find((p) => p.type === 'timeZoneName').value;
 
-    const now = new Date().toISOString();
+    // Keep the "RSE Ava daily check" prefix: mailbox filters key on it.
+    const subject = `RSE Ava daily check: ${allGood ? 'ALL GOOD' : 'ATTENTION NEEDED'} (${localTime} ${zone})`;
+
     const lines = [
       'RSE Ava — Daily Health Check',
-      `Run at: ${now}`,
+      `Run at: ${localDate} ${zone} (${now.toISOString()})`,
       '',
       ...checks.map((c) => `[${statusLabel(c.status)}] ${c.name}: ${c.detail}`),
       '',
@@ -473,6 +554,7 @@ async function sendReport(checks, allGood) {
     ];
 
     sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+    sgMail.setTimeout(30000);
     const [response] = await sgMail.send({
       from: process.env.EMAIL_FROM,
       to: MONITOR_EMAIL_TO,
@@ -491,24 +573,41 @@ async function sendReport(checks, allGood) {
 // ============================================================================
 // MAIN
 // ============================================================================
-async function main() {
+/**
+ * @param {object} [opts]
+ * @param {string} [opts.healthUrl]
+ * @param {Array<() => Promise<{name: string, status: string, detail: string}>>} [opts.extraChecks]
+ *   Checks only the server can run, appended after the built-in ones: today
+ *   the daily smoke call (src/monitor/smoke-call.js). Each gets its own line
+ *   in the report; one that throws becomes a FAIL line.
+ */
+async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) {
   console.log('🔍 Running RSE Ava daily health check...');
 
   // Run each check; each one handles its own errors and resolves a result object.
   const checks = [];
   checks.push(await checkAnthropic());
   checks.push(await checkOpenAIRealtime());
-  // Twilio check runs only where credentials are provided. They are deliberately
-  // NOT provided on GitHub-hosted runners: those call Twilio from a different
-  // Azure IP/country every day, which Twilio's fraud detection treats as a stolen
-  // Auth Token and locks the account (Sep 7 and Sep 28 2026).
-  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+  if (TWILIO_BALANCE_ENABLED) {
     checks.push(await checkTwilioBalance());
   }
   checks.push(await checkGoogleSheets());
   checks.push(await checkEmailToPresence());
   checks.push(await checkTransferNumber());
-  checks.push(await checkServerHealth());
+  const health = await checkServerHealth(healthUrl);
+  checks.push(health);
+  // The smoke call line: live when this run places the call (extraChecks),
+  // otherwise relayed from what the server reports on /health.
+  if (extraChecks.length === 0 && health.json) {
+    checks.push(smokeCallRelayCheck(health.json));
+  }
+  for (const extra of extraChecks) {
+    try {
+      checks.push(await extra());
+    } catch (err) {
+      checks.push({ name: 'Extra check', status: 'fail', detail: `threw — ${err && err.message ? err.message : String(err)}` });
+    }
+  }
 
   for (const c of checks) {
     console.log(`[${statusLabel(c.status)}] ${c.name}: ${c.detail}`);
@@ -521,18 +620,28 @@ async function main() {
   const email = await sendReport(checks, allGood);
   if (email.sent) {
     console.log(`📧 Report emailed to ${MONITOR_EMAIL_TO}: ${email.detail}`);
+  } else if (email.skipped) {
+    console.log(`📧 Report email ${email.detail}`);
   } else {
     console.error(`❌ Report email NOT sent: ${email.detail}`);
   }
 
-  // Exit non-zero if any check failed/warned OR the email could not be sent, so
-  // the scheduler surfaces the problem.
-  const ok = allGood && email.sent;
-  process.exit(ok ? 0 : 1);
+  // Not ok if any check failed/warned OR the email could not be sent, so
+  // whoever runs us can surface the problem.
+  const ok = allGood && (email.sent || email.skipped);
+  return { checks, allGood, email, ok };
 }
 
-main().catch((err) => {
-  // Last-resort guard: main() should never throw, but if it does, fail loudly.
-  console.error('❌ Fatal error in daily-check:', err);
-  process.exit(1);
-});
+module.exports = { runDailyCheck, smokeCallRelayCheck };
+
+// One-shot mode (GitHub Actions backup / `node src/monitor/daily-check.js`).
+// When required by the server nothing runs until the schedule fires.
+if (require.main === module) {
+  runDailyCheck()
+    .then((result) => process.exit(result.ok ? 0 : 1))
+    .catch((err) => {
+      // Last-resort guard: runDailyCheck() should never throw, but if it does, fail loudly.
+      console.error('❌ Fatal error in daily-check:', err);
+      process.exit(1);
+    });
+}

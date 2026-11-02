@@ -27,6 +27,10 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
+const { saveCall: saveCallToDb, createTranscriptRecorder } = require('./utils/call-db');
+const { startDailyCheckSchedule, parseTimes, defaultHealthUrl } = require('./monitor/schedule');
+const { runDailyCheck } = require('./monitor/daily-check');
+const smokeCall = require('./monitor/smoke-call');
 
 // ============================================================================
 // CONFIGURATION
@@ -73,7 +77,10 @@ app.get("/health", (req, res) => {
     status: "healthy", 
     service: "RSE Voice Gateway",
     voice: OPENAI_VOICE_PRIMARY,
-    fallback_voice: OPENAI_VOICE_FALLBACK
+    fallback_voice: OPENAI_VOICE_FALLBACK,
+    // Last daily smoke call (src/monitor/smoke-call.js): read by the GitHub
+    // Actions backup of the daily check, which relays it in its email.
+    smoke_call: smokeCall.healthSummary()
   });
 });
 
@@ -128,6 +135,14 @@ app.post("/twilio/transfer", twilioWebhookGuard, (req, res) => {
 // WEBSOCKET HANDLER - MAIN CALL LOGIC
 // ============================================================================
 wss.on("connection", (twilioWs, req) => {
+  // The daily smoke call's own stream (src/monitor/smoke-call.js): Twilio
+  // sends us what Ava says on a call this server placed to her number.
+  // Handled apart from the call logic below, which is untouched.
+  if (smokeCall.isSmokeStreamRequest(req)) {
+    console.log(`📞 New connection on ${smokeCall.STREAM_PATH} (daily smoke call)`);
+    smokeCall.handleStream(twilioWs, req);
+    return;
+  }
   console.log("📞 New connection");
   
   // ============================================================================
@@ -136,6 +151,8 @@ wss.on("connection", (twilioWs, req) => {
   let streamSid = null;
   let callSid = null;  // Store call SID for transfers
   let callerNumber = null;  // Store caller number for logging
+  const transcriptRecorder = createTranscriptRecorder();  // Ordered caller/Ava turns, saved to the DB at hang-up
+  let dbSaveStarted = false;  // cleanup() can run twice (stop + close); write the DB row once
   let openaiWs = null;
   let transferRequested = false;  // Track if transfer has been requested
   let baseUrl = BASE_URL || null;  // Store base URL for transfers (from config/baseUrl.js)
@@ -983,6 +1000,7 @@ wss.on("connection", (twilioWs, req) => {
             } else {
               // Transcript matches or is acceptable - this is what was actually spoken
               console.log(`📜 AI generated transcript: "${event.transcript}"`);
+              transcriptRecorder.add('ava', event.transcript);
               if (hallucinationCount > 0) {
                 console.log(`✅ Response matched expected - resetting hallucination counter`);
                 hallucinationCount = 0;
@@ -992,6 +1010,7 @@ wss.on("connection", (twilioWs, req) => {
           } else {
             // No expected transcript to compare - log as spoken
             console.log(`📜 AI generated transcript: "${event.transcript}"`);
+            transcriptRecorder.add('ava', event.transcript);
           }
         } else {
           console.log(`⚠️ No transcript in audio_transcript.done event`);
@@ -1561,6 +1580,10 @@ wss.on("connection", (twilioWs, req) => {
             clearWatchdog();
             break;
           }
+
+          // Everything the caller actually said goes into the saved transcript,
+          // including turns the guards below decide not to act on.
+          transcriptRecorder.add('caller', transcript);
 
           const inGreeting = stateMachine.getState() === STATES.GREETING;
           const currentStateForTranscript = stateMachine.getState();
@@ -2757,6 +2780,25 @@ Keep it SHORT.`;
       console.error('❌ Failed to log to Google Sheets:', err.message);
     });
 
+    // Save the call and its transcript to Neon (non-blocking, written
+    // alongside the Sheet row; saveCall never throws and we do not await it).
+    if (!dbSaveStarted) {
+      dbSaveStarted = true;
+      const endedAt = Date.now();
+      saveCallToDb(data, currentState, {
+        callId: streamSid || `CALL-${endedAt}`,
+        twilioCallSid: callSid,
+        callerNumber: callerNumber,
+        wasTransferred: transferRequested,
+        startedAt: callConnectedTime || endedAt,
+        endedAt,
+        environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || 'local',
+        transcript: transcriptRecorder.turns()
+      }).catch(err => {
+        console.error('❌ Call DB save rejected unexpectedly:', err.message);
+      });
+    }
+
     // Send post-call email summary (awaited so it completes before cleanup exits)
     try {
       await sendCallSummaryEmail(data, currentState, {
@@ -2803,6 +2845,61 @@ server.listen(PORT, () => {
   console.log(`🎧 Waiting for calls...`);
   console.log();
 });
+
+// ============================================================================
+// DAILY HEALTH CHECK (8 AM and 4 PM Eastern, runs here on Railway)
+// ============================================================================
+// Enabled automatically in Railway's "production" environment only. Railway
+// injects the environment name; the "staging" environment (deployed from the
+// staging branch) has the same credentials and would otherwise email a second
+// report every morning. DAILY_CHECK_SCHEDULE=on|off forces it either way, e.g.
+// off while debugging production, or on for a local dry run.
+// See src/monitor/schedule.js for why this moved off GitHub Actions.
+const RAILWAY_ENV = process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || '';
+const DAILY_CHECK_FLAG = (process.env.DAILY_CHECK_SCHEDULE || '').trim().toLowerCase();
+let DAILY_CHECK_ENABLED = RAILWAY_ENV === 'production';
+if (['on', 'true', '1', 'yes'].includes(DAILY_CHECK_FLAG)) {
+  DAILY_CHECK_ENABLED = true;
+} else if (['off', 'false', '0', 'no'].includes(DAILY_CHECK_FLAG)) {
+  DAILY_CHECK_ENABLED = false;
+} else if (DAILY_CHECK_FLAG) {
+  console.warn(`⚠️ Ignoring DAILY_CHECK_SCHEDULE="${DAILY_CHECK_FLAG}" (expected on or off); using the environment rule`);
+}
+// Local times in America/New_York, comma separated.
+const DAILY_CHECK_TIMES = process.env.DAILY_CHECK_TIMES || '08:00,16:00';
+// Daily smoke call (src/monitor/smoke-call.js): with DAILY_SMOKE_CALL=on the
+// daily check also phones Ava's number from a test number and checks that
+// she answers with her greeting. It runs inside the daily check, so it is
+// subject to the same production-only rule and never runs on GitHub Actions.
+const SMOKE_CALL = smokeCall.smokeCallConfig();
+const extraChecks = [];
+if (SMOKE_CALL.enabled && SMOKE_CALL.problems.length) {
+  console.warn(`⚠️ DAILY_SMOKE_CALL is on but no call can be placed: ${SMOKE_CALL.problems.join('; ')}`);
+} else if (SMOKE_CALL.enabled) {
+  extraChecks.push(() => smokeCall.smokeCheck({ twilioClient }));
+  console.log(`📞 Daily smoke call on: ${SMOKE_CALL.from} → ${SMOKE_CALL.to}, stream ${SMOKE_CALL.streamUrl}, placed by the daily check${DAILY_CHECK_ENABLED ? '' : ' (which is off here, so no call will be placed)'}`);
+} else {
+  console.log('📞 Daily smoke call off (set DAILY_SMOKE_CALL=on to phone Ava once a day)');
+}
+// After a restart, /health reports the newest stored smoke call until the next one runs.
+smokeCall.loadLastResultFromDb().catch(() => {});
+
+if (DAILY_CHECK_ENABLED) {
+  try {
+    startDailyCheckSchedule({
+      times: parseTimes(DAILY_CHECK_TIMES),
+      run: () => runDailyCheck({ healthUrl: defaultHealthUrl(), extraChecks }),
+    });
+    if ((process.env.MONITOR_TWILIO_BALANCE || '').toLowerCase() !== 'on') {
+      console.log('ℹ️ Twilio balance check is off (set MONITOR_TWILIO_BALANCE=on here, in production only, to warn on low balance)');
+    }
+  } catch (err) {
+    console.error(`❌ Daily check schedule NOT started: ${err.message} (DAILY_CHECK_TIMES="${DAILY_CHECK_TIMES}")`);
+  }
+} else {
+  const where = RAILWAY_ENV ? `Railway environment "${RAILWAY_ENV}"` : 'not on Railway';
+  console.log(`🗓️ Daily check schedule off (${where}; set DAILY_CHECK_SCHEDULE=on to force)`);
+}
 
 // ============================================================================
 // PROCESS-LEVEL ERROR HANDLING
