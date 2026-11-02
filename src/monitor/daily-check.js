@@ -444,6 +444,7 @@ async function checkServerHealth(healthUrl) {
       return result;
     }
 
+    result.json = json; // for smokeCallRelayCheck; not printed
     if (json && json.status === 'healthy') {
       result.status = 'pass';
       result.detail = `HTTP 200, status "healthy"`;
@@ -459,6 +460,49 @@ async function checkServerHealth(healthUrl) {
     const message = nested || (err && err.message ? err.message : String(err));
     result.detail = `Health check error — ${message} (${healthUrl})`;
   }
+  return result;
+}
+
+// ============================================================================
+// CHECK 8: DAILY SMOKE CALL, AS REPORTED BY THE SERVER
+// ============================================================================
+// The server places the call itself (src/monitor/smoke-call.js) and shows the
+// newest result on /health. A run of this script that did not place the call
+// (the GitHub Actions backup, or a server with the smoke call off) relays
+// that result here, so the email always carries the line. Nothing here
+// touches Twilio.
+function etDayOf(iso) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: REPORT_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso));
+}
+
+function etTimeOf(iso) {
+  return new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso));
+}
+
+function smokeCallRelayCheck(healthJson, now = new Date()) {
+  const result = { name: 'Ava answers the phone', status: 'fail', detail: '' };
+  const sc = healthJson && healthJson.smoke_call;
+  if (!sc) {
+    result.status = 'warning';
+    result.detail = 'the server does not report the daily smoke call (build without it?)';
+    return result;
+  }
+  if (!sc.enabled) {
+    result.status = 'warning';
+    result.detail = 'daily smoke call is off on the server (set DAILY_SMOKE_CALL=on in Railway production)';
+    return result;
+  }
+  if (!sc.last) {
+    result.detail = `no smoke call result yet (server up since ${etTimeOf(sc.server_started_at)})`;
+    return result;
+  }
+  const verdict = sc.last.passed ? 'PASS' : 'FAIL';
+  if (etDayOf(sc.last.at) !== etDayOf(now.toISOString())) {
+    result.detail = `no smoke call today; the last one, ${etTimeOf(sc.last.at)}, was a ${verdict}: ${sc.last.summary}`;
+    return result;
+  }
+  result.status = sc.last.passed ? 'pass' : 'fail';
+  result.detail = `${etTimeOf(sc.last.at)} call, reported by the server: ${sc.last.summary}`;
   return result;
 }
 
@@ -550,7 +594,13 @@ async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) 
   checks.push(await checkGoogleSheets());
   checks.push(await checkEmailToPresence());
   checks.push(await checkTransferNumber());
-  checks.push(await checkServerHealth(healthUrl));
+  const health = await checkServerHealth(healthUrl);
+  checks.push(health);
+  // The smoke call line: live when this run places the call (extraChecks),
+  // otherwise relayed from what the server reports on /health.
+  if (extraChecks.length === 0 && health.json) {
+    checks.push(smokeCallRelayCheck(health.json));
+  }
   for (const extra of extraChecks) {
     try {
       checks.push(await extra());
@@ -582,7 +632,7 @@ async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) 
   return { checks, allGood, email, ok };
 }
 
-module.exports = { runDailyCheck };
+module.exports = { runDailyCheck, smokeCallRelayCheck };
 
 // One-shot mode (GitHub Actions backup / `node src/monitor/daily-check.js`).
 // When required by the server nothing runs until the schedule fires.

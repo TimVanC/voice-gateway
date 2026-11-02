@@ -651,6 +651,48 @@ function describe(result, store) {
 // the afternoon check.
 let lastPass = null;
 
+// The newest result, whatever it was, for /health. The GitHub Actions backup
+// of the daily check reads it there and relays it in its email, since it
+// must never place the call itself. Memory only; after a restart
+// loadLastResultFromDb() takes the newest stored run from Neon.
+const serverStartedAt = Date.now();
+let lastResult = null; // { at: ISO string, passed, summary, source: 'live' | 'db' }
+
+/** What /health reports: pass/fail, when, one line. No call SIDs or numbers. */
+function healthSummary(config = smokeCallConfig()) {
+  return {
+    enabled: config.enabled && config.problems.length === 0,
+    last: lastResult ? { at: lastResult.at, passed: lastResult.passed, summary: lastResult.summary } : null,
+    server_started_at: new Date(serverStartedAt).toISOString(),
+  };
+}
+
+function getLastResult() {
+  return lastResult;
+}
+
+async function loadLastResultFromDb({ log = console } = {}) {
+  const pool = callDb.getPool();
+  if (!pool || lastResult) return lastResult;
+  try {
+    const res = await pool.query(
+      'SELECT passed, created_at, report FROM test_runs WHERE scenario = $1 ORDER BY created_at DESC LIMIT 1',
+      [SCENARIO]
+    );
+    if (!res.rows.length || lastResult) return lastResult;
+    const row = res.rows[0];
+    const report = row.report || {};
+    const summary = row.passed
+      ? `answered ${seconds((report.timings && report.timings.firstAudioMs) || 0)} after the stream started and said her greeting`
+      : (report.reason || 'failed');
+    lastResult = { at: new Date(report.dialedAt || row.created_at).toISOString(), passed: Boolean(row.passed), summary, source: 'db' };
+    log.log(`📞 Daily smoke call: last stored result ${etDay(Date.parse(lastResult.at))} ${etTime(Date.parse(lastResult.at))}: ${lastResult.passed ? 'PASS' : 'FAIL'}`);
+  } catch (err) {
+    log.warn(`⚠️ Daily smoke call: could not read the last result from Neon: ${err.message}`);
+  }
+  return lastResult;
+}
+
 /**
  * The check the daily check runs: places the call (once a day when it
  * passes), stores the result, returns { name, status, detail }.
@@ -666,8 +708,10 @@ async function smokeCheck({ twilioClient = null, log = console } = {}) {
     const store = await storeSmokeRun(result, { log });
     const detail = describe(result, store);
     if (result.passed) lastPass = { day: today, time: etTime(result.dialedAt), detail };
+    lastResult = { at: new Date(result.dialedAt || Date.now()).toISOString(), passed: result.passed, summary: detail, source: 'live' };
     return { name, status: result.passed ? 'pass' : 'fail', detail };
   } catch (err) {
+    lastResult = { at: new Date().toISOString(), passed: false, summary: `smoke call error — ${err.message}`, source: 'live' };
     return { name, status: 'fail', detail: `smoke call error — ${err.message}` };
   }
 }
@@ -682,6 +726,9 @@ module.exports = {
   runSmokeCall,
   storeSmokeRun,
   smokeCheck,
+  healthSummary,
+  getLastResult,
+  loadLastResultFromDb,
   greetingMatch,
   isSilentFrame,
   frameRms,

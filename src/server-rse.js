@@ -77,7 +77,10 @@ app.get("/health", (req, res) => {
     status: "healthy", 
     service: "RSE Voice Gateway",
     voice: OPENAI_VOICE_PRIMARY,
-    fallback_voice: OPENAI_VOICE_FALLBACK
+    fallback_voice: OPENAI_VOICE_FALLBACK,
+    // Last daily smoke call (src/monitor/smoke-call.js): read by the GitHub
+    // Actions backup of the daily check, which relays it in its email.
+    smoke_call: smokeCall.healthSummary()
   });
 });
 
@@ -2878,6 +2881,8 @@ if (SMOKE_CALL.enabled && SMOKE_CALL.problems.length) {
 } else {
   console.log('📞 Daily smoke call off (set DAILY_SMOKE_CALL=on to phone Ava once a day)');
 }
+// After a restart, /health reports the newest stored smoke call until the next one runs.
+smokeCall.loadLastResultFromDb().catch(() => {});
 
 if (DAILY_CHECK_ENABLED) {
   try {

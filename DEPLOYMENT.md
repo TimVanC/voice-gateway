@@ -267,6 +267,14 @@ media stream, OpenAI Realtime and Ava's greeting.
 - **Never from GitHub Actions.** Twilio locked the account twice for API calls
   from Actions runners. The one-shot `node src/monitor/daily-check.js` never
   places the call, and `smoke-call.js` refuses when `GITHUB_ACTIONS` is set.
+- **How the GitHub email still gets the line:** the server shows its newest
+  result on `/health` (`smoke_call: { enabled, last: { at, passed, summary } }`,
+  reloaded from Neon after a restart). Any daily-check run that did not place
+  the call itself, which is the GitHub Actions backup and any server with the
+  smoke call off, reads that and adds the `Ava answers the phone` line from
+  it: PASS/FAIL for today's call, FAIL when there was no call today, WARNING
+  when the smoke call is off. GitHub's run starts hours after 8 AM, so by
+  then the day's call has happened.
 - **Cost:** about 30 s of Twilio outbound + inbound legs and two media
   streams (roughly 3 to 5 cents), one 15 s transcription (well under a cent)
   and Ava's own Realtime session for the greeting (a few cents). Budget
