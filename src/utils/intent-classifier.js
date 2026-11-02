@@ -15,6 +15,12 @@ const { INTENT_TYPES } = require('../scripts/rse-script');
 // "my AC" / "AC unit" in lowercased input; "a/c" covers the slash spelling.
 const AC_VARIANTS = 'ac|a\\/c|air condition\\w*|central air';
 
+// Membership / maintenance-plan phrasing. The installation branch excludes it
+// so "what does your maintenance membership plan cost" is membership, not an
+// installation estimate: price/cost/quote words are how callers ask about
+// plans too.
+const MEMBERSHIP_PATTERN = /\b(membership|member|maintenance plan|maintenance membership|home comfort plan|service plan|annual coverage|monthly coverage|tune up plan|tune-up plan)\b/;
+
 function classifyIntent(text) {
   // Normalize ASR artifacts so accented pronunciations still classify correctly.
   // Example: "geneartor"/"genarator"/"generater" should map to generator intent.
@@ -90,8 +96,11 @@ function classifyIntent(text) {
   }
 
   // Installation/upgrade keywords - CHECK BEFORE service keywords
-  // "new", "install", "replace" indicate installation, not service
-  if (/\b(new|install|installation|replace|replacement|upgrade|estimate|quote|cost|price|proposal)\b/.test(text)) {
+  // "new", "install", "replace" indicate installation, not service.
+  // Membership phrasing is excluded: "cost"/"price" of a plan is a membership
+  // question, handled below (after the service checks, as before).
+  if (/\b(new|install|installation|replace|replacement|upgrade|estimate|quote|cost|price|proposal)\b/.test(text) &&
+      !MEMBERSHIP_PATTERN.test(text)) {
     console.log('📋 Detected installation/upgrade keywords');
     return INTENT_TYPES.HVAC_INSTALLATION;
   }
@@ -118,7 +127,7 @@ function classifyIntent(text) {
   }
 
   // Membership keywords - HIGH CONFIDENCE patterns
-  if (/\b(membership|member|maintenance plan|home comfort plan|service plan|annual coverage|monthly coverage|tune up plan)\b/.test(text)) {
+  if (MEMBERSHIP_PATTERN.test(text)) {
     return INTENT_TYPES.MEMBERSHIP;
   }
 
