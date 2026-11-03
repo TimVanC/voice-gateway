@@ -27,7 +27,16 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
-const { saveCall: saveCallToDb, createTranscriptRecorder, isTestCallerNumber } = require('./utils/call-db');
+const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder, isTestCallerNumber } = require('./utils/call-db');
+const { TrackRecorder } = require('./utils/track-recorder');
+
+// Call recording (CALL_RECORDING=on): both sides of every call are kept in
+// memory as the mu-law frames pass through and stored on the call's Neon row
+// at hang-up (src/utils/call-db.js saveRecording), where the web app plays
+// them. Nothing is said to the caller. Recordings older than
+// CALL_RECORDING_KEEP_DAYS (default 30) are deleted by the daily check.
+const CALL_RECORDING = (process.env.CALL_RECORDING || '').toLowerCase() === 'on';
+const CALL_RECORDING_KEEP_DAYS = Number(process.env.CALL_RECORDING_KEEP_DAYS || 30);
 const { startDailyCheckSchedule, parseTimes, defaultHealthUrl } = require('./monitor/schedule');
 const { runDailyCheck } = require('./monitor/daily-check');
 const smokeCall = require('./monitor/smoke-call');
@@ -152,6 +161,8 @@ wss.on("connection", (twilioWs, req) => {
   let callSid = null;  // Store call SID for transfers
   let callerNumber = null;  // Store caller number for logging
   const transcriptRecorder = createTranscriptRecorder();  // Ordered caller/Ava turns, saved to the DB at hang-up
+  const callRecorder = CALL_RECORDING && process.env.DATABASE_URL ? new TrackRecorder() : null;  // Both sides' audio, stored at hang-up
+  let recordingStartedAt = null;  // Time base for the recording (the stream's start event)
   let dbSaveStarted = false;  // cleanup() can run twice (stop + close); write the DB row once
   let openaiWs = null;
   let transferRequested = false;  // Track if transfer has been requested
@@ -500,6 +511,9 @@ wss.on("connection", (twilioWs, req) => {
           streamSid,
           media: { payload: frame.toString("base64") }
         }));
+        // Copied: `frame` is a slice of the play buffer, which would otherwise
+        // be kept alive for the whole call.
+        if (callRecorder && recordingStartedAt) callRecorder.add('ava', Date.now() - recordingStartedAt, Buffer.from(frame));
         // Update last audio playback time when we actually send audio to Twilio
         // Only update if this is not a silence frame (silence frames are 0xFF)
         if (frame[0] !== 0xFF || frame.some(b => b !== 0xFF)) {
@@ -2702,6 +2716,7 @@ Keep it SHORT.`;
           streamSid = msg.start.streamSid;
           callSid = msg.start.callSid;  // Store call SID for transfers
           callConnectedTime = Date.now();  // Track call start for phantom speech protection
+          recordingStartedAt = callConnectedTime;
           console.log(`📞 Stream started: ${streamSid}`);
           console.log(`📞 Call SID: ${callSid}`);
           console.log(`📞 Stream config received - caller: ${msg.start.customParameters?.callerNumber || 'unknown'}`);
@@ -2735,6 +2750,7 @@ Keep it SHORT.`;
           break;
           
         case "media":
+          if (callRecorder && recordingStartedAt) callRecorder.add('caller', Date.now() - recordingStartedAt, Buffer.from(msg.media.payload, 'base64'));
           // Forward audio to OpenAI
           if (openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
@@ -2825,6 +2841,9 @@ Keep it SHORT.`;
         endedAt,
         environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || 'local',
         transcript: transcriptRecorder.turns()
+      }).then((saved) => {
+        if (callRecorder && saved && saved.id) return saveRecording(saved.id, callRecorder, 'server');
+        return null;
       }).catch(err => {
         console.error('❌ Call DB save rejected unexpectedly:', err.message);
       });
@@ -2915,11 +2934,23 @@ if (SMOKE_CALL.enabled && SMOKE_CALL.problems.length) {
 // After a restart, /health reports the newest stored smoke call until the next one runs.
 smokeCall.loadLastResultFromDb().catch(() => {});
 
+if (CALL_RECORDING && !process.env.DATABASE_URL) {
+  console.warn('⚠️ CALL_RECORDING is on but DATABASE_URL is not set: nothing will be recorded');
+} else if (CALL_RECORDING) {
+  console.log(`🎙️ Call recording on: both sides of every call are stored in Neon at hang-up and kept ${CALL_RECORDING_KEEP_DAYS} days`);
+} else {
+  console.log('🎙️ Call recording off (set CALL_RECORDING=on to store both sides of every call in Neon)');
+}
+
 if (DAILY_CHECK_ENABLED) {
   try {
     startDailyCheckSchedule({
       times: parseTimes(DAILY_CHECK_TIMES),
-      run: () => runDailyCheck({ healthUrl: defaultHealthUrl(), extraChecks }),
+      run: async () => {
+        const result = await runDailyCheck({ healthUrl: defaultHealthUrl(), extraChecks });
+        await pruneOldRecordings(CALL_RECORDING_KEEP_DAYS);
+        return result;
+      },
     });
     if ((process.env.MONITOR_TWILIO_BALANCE || '').toLowerCase() !== 'on') {
       console.log('ℹ️ Twilio balance check is off (set MONITOR_TWILIO_BALANCE=on here, in production only, to warn on low balance)');

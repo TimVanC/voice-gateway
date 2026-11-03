@@ -141,6 +141,29 @@ server has since written live) are skipped. Options:
   (Apr 16 – Jun 2, 2026). Their phone column is RSE's own number unless the
   caller stated one, so they are not treated as test calls by number.
 
+### Recordings of every call (`CALL_RECORDING=on`)
+
+Off by default. With `CALL_RECORDING=on` the server keeps both sides of every
+call it answers (the caller's frames from Twilio, Ava's frames to Twilio) in
+memory as they pass and stores them on the call's row at hang-up
+(`recordings` table, raw mu-law, the same format the test caller writes), so
+the call page in the web app plays them back with the transcript. Nothing is
+said to the caller; whether to add a recording notice is RSE's call (New
+Jersey is one-party consent; callers from two-party states are safest with
+one). The write never blocks the call and logs-and-continues on failure.
+
+| Variable | Value |
+|---|---|
+| `CALL_RECORDING` | `on` to record; anything else is off |
+| `CALL_RECORDING_KEEP_DAYS` | days to keep recordings, default 30; the daily check deletes older ones (calls and transcripts stay). `0` keeps them forever. |
+
+Size: about 1 MB per call-minute (0.8 MB/min measured), so ~2.6 MB for an
+average 3-minute call. At RSE's volume (about 90 real calls a month plus the
+daily smoke call) 30 days of recordings is roughly 300 MB, which fits Neon's
+free tier (0.5 GB) with little to spare; a longer window needs Neon's Launch
+plan (10 GB). The `002` migration that creates the table is already applied
+to the current database.
+
 ## 🖥️ Call Log Web App (`web/`, Vercel)
 
 A small Next.js app that shows the calls table: paginated list with search,
