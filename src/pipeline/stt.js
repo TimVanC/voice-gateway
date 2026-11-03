@@ -358,7 +358,7 @@ function createStt({ provider, env = process.env } = {}) {
       eotThreshold: Number(env.DEEPGRAM_EOT_THRESHOLD || 0.7),
       eagerEotThreshold: Number(env.DEEPGRAM_EAGER_EOT_THRESHOLD || 0.5),
       eotTimeoutMs: Number(env.DEEPGRAM_EOT_TIMEOUT_MS || 3000),
-      keyterms: String(env.DEEPGRAM_KEYTERMS || 'RSE Energy,HVAC,Generac,Cummins,furnace,mini split').split(',').map((s) => s.trim()).filter(Boolean),
+      keyterms: String(env.DEEPGRAM_KEYTERMS || 'Ava,RSE Energy,HVAC,Generac,Cummins,furnace,mini split').split(',').map((s) => s.trim()).filter(Boolean),
     });
   }
   return new OpenAiStt({
