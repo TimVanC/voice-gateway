@@ -121,7 +121,7 @@ console.log('\n🧪 Safety check: a yes is an emergency, a backchannel is asked 
     const r = sm.processInput(t);
     check(`"${t}" -> emergency response`, [r.nextState, r.prompt, sm.getData().isSafetyRisk], [STATES.ENDED, SAFETY.emergency_response, true]);
   }
-  for (const t of ['Mhm.', 'Okay.', 'Sure, go ahead.', 'Sorry, what was that?']) {
+  for (const t of ['Mhm.', 'Okay.', 'Sure, go ahead.', 'Sorry, what was that?', 'Yes, go ahead.', 'Yeah, ask away.', 'Yes?']) {
     const sm = at();
     const r = sm.processInput(t);
     check(`"${t}" -> safety question asked again`, [r.nextState, r.prompt], [STATES.SAFETY_CHECK, SAFETY.check]);

@@ -2525,13 +2525,19 @@ function createCallStateMachine() {
   function isSafetyYes(text) {
     const t = String(text || '').toLowerCase().replace(/[‘’]/g, "'").trim();
     if (/\b(no|not|nothing|none|nope|nah|never|don'?t|doesn'?t|isn'?t)\b/.test(t)) return false;
+    // "Yes, go ahead" / "yeah, ask away" / "yes?" answer "may I ask", not the question itself.
+    if (/\b(go ahead|ask|shoot|go on|what|sorry|repeat|listening)\b/.test(t) || /\?\s*$/.test(t)) return false;
     return /^(yes|yeah|yep|yup|yea|i do|there is|there's|i think so|i believe so|actually yes|correct)\b/.test(t);
   }
 
   /** Backchannels, go-aheads and repeat requests: not an answer to the safety question. */
   function isSafetyUnclear(text) {
-    const t = String(text || '').toLowerCase().replace(/[^a-z' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const raw = String(text || '').toLowerCase().trim();
+    const t = raw.replace(/[^a-z' ]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (!t) return true;
+    const negated = /\b(no|not|nothing|none|nope|nah)\b/.test(t);
+    if (!negated && /\?\s*$/.test(raw)) return true; // "Yes?" "Sorry?"
+    if (!negated && /^(yes|yeah|yep|yup|sure|okay|ok)\b.*\b(go ahead|ask|shoot|go on)\b/.test(t)) return true;
     if (/^(m+ ?h+m+|mm hmm|mm hm|uh huh|hmm+|um+|uh+|okay|ok|sure|right|alright|all right|go ahead|sure go ahead|okay go ahead|ok go ahead|yes go ahead|i'?m ready|ready|go on)$/.test(t)) return true;
     return isConfusedOrAsking(t) && !/\b(no|not|nothing|none|nope)\b/.test(t);
   }
