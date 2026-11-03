@@ -276,6 +276,33 @@ wss.on("connection", (twilioWs, req) => {
   let deadAirRecoveries = 0;
   let recoveryPromptInFlight = false;    // The watchdog's re-ask is being spoken; a transcript landing now cuts it off
   let supersededRecoveryResponseId = null;  // Re-ask cut off by a transcript: its response.done is stale, ignore it
+  let recoveryCutPending = null;         // Answer held until the re-ask's response.created arrives (then it is cancelled and the answer acted on)
+  let recoveryCutTimer = null;           // Bound on that hold, in case response.created never comes
+  const RECOVERY_CUT_HOLD_MS = 2000;
+
+  function clearRecoveryCutHold() {
+    if (recoveryCutTimer) { clearTimeout(recoveryCutTimer); recoveryCutTimer = null; }
+    const held = recoveryCutPending;
+    recoveryCutPending = null;
+    return held;
+  }
+
+  // Cancel the watchdog re-ask (created or being created) because the caller
+  // answered it: its late response.done / transcript.done are then ignored.
+  function cutRecoveryPrompt(responseId, why) {
+    recoveryPromptInFlight = false;
+    supersededRecoveryResponseId = responseId || null;
+    cancelResponseAudio("recovery_superseded_by_transcript", responseId, {
+      sendCancelToOpenAI: true,
+      stopTwilioPlayback: true
+    });
+    stateMachine.intakeLog('state_event', { event: 'recovery_prompt_superseded', why, response_id: responseId || null });
+    currentResponseId = null;
+    currentPromptText = null;
+    expectedTranscript = null;
+    actualTranscript = null;
+    audioDoneReceived = false;
+  }
 
   function clearWatchdog() {
     if (watchdogTimer) {
@@ -792,6 +819,15 @@ wss.on("connection", (twilioWs, req) => {
             stopTwilioPlayback: true
           });
           console.log(`⏭️ Suppressed auto-response while waiting for transcript (id: ${nextResponseId || "unknown"})`);
+          break;
+        }
+        if (recoveryCutPending) {
+          // The watchdog re-ask, created after the caller already answered it.
+          const held = clearRecoveryCutHold();
+          console.log(`✂️ Watchdog re-ask created after its answer landed - cancelling it (id: ${nextResponseId || "unknown"}) and answering`);
+          clearAudioCompletionTimeout();
+          cutRecoveryPrompt(nextResponseId, 'created_after_answer');
+          processUserInput(held);
           break;
         }
         clearWatchdog();
@@ -1683,25 +1719,34 @@ wss.on("connection", (twilioWs, req) => {
           // transcript is the caller's answer to it. Cut the re-ask off and act
           // on the answer now rather than queuing it behind the re-ask (the
           // caller would hear the question again and answer it a second time).
-          if (transcriptSupersedesRecovery({
+          const cut = transcriptSupersedesRecovery({
             recoveryPromptInFlight,
-            hasActiveOutput: hasActiveAssistantOutput(),
+            responseCreated: Boolean(currentResponseId),
             callCompleted: _callCompleted,
             inEndedState: stateMachine.getState() === STATES.ENDED,
-          })) {
+          });
+          if (cut === 'cut_now') {
             console.log(`✂️ Transcript landed during the watchdog re-ask - cutting the re-ask off and answering it: "${transcript.substring(0, 40)}..."`);
-            stateMachine.intakeLog('state_event', { event: 'recovery_prompt_superseded', transcript: transcript.substring(0, 40) });
+            cutRecoveryPrompt(currentResponseId, 'transcript_during_re_ask');
+          } else if (cut === 'cut_on_create') {
+            // The re-ask's response.create is out but OpenAI has not created it
+            // yet: nothing to cancel, and a second response.create now would be
+            // refused. Hold the answer; response.created cancels the re-ask and
+            // acts on it. Bounded in case that event never comes.
+            console.log(`✂️ Transcript landed before the watchdog re-ask was created - holding it to cut the re-ask on creation: "${transcript.substring(0, 40)}..."`);
             recoveryPromptInFlight = false;
-            supersededRecoveryResponseId = currentResponseId;
-            cancelResponseAudio("recovery_superseded_by_transcript", currentResponseId, {
-              sendCancelToOpenAI: true,
-              stopTwilioPlayback: true
-            });
-            currentResponseId = null;
-            currentPromptText = null;
-            expectedTranscript = null;
-            actualTranscript = null;
-            audioDoneReceived = false;
+            recoveryCutPending = mergePendingTranscript(recoveryCutPending, transcript);
+            if (!recoveryCutTimer) {
+              recoveryCutTimer = setTimeout(() => {
+                recoveryCutTimer = null;
+                const held = clearRecoveryCutHold();
+                if (held && !_callCompleted) {
+                  console.log(`⚠️ Watchdog re-ask never created within ${RECOVERY_CUT_HOLD_MS}ms - acting on the held answer`);
+                  processUserInput(held);
+                }
+              }, RECOVERY_CUT_HOLD_MS);
+            }
+            break;
           }
 
           if (tts_active) {

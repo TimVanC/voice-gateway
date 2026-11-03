@@ -305,15 +305,17 @@ console.log('\n🧪 Dead-air watchdog holds while the caller\'s transcript is st
   }
   check('three slow-transcript turns in one call: no recoveries counted, no transfer', [recoveries, transfers], [0, []]);
 
-  // A late transcript that lands while the re-ask is playing cuts it off.
-  check('transcript during the re-ask supersedes it',
-    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, hasActiveOutput: true, callCompleted: false, inEndedState: false }), true);
+  // A late transcript that lands while the re-ask is in flight cuts it off.
+  check('transcript during the re-ask -> cut it now by id',
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, responseCreated: true, callCompleted: false, inEndedState: false }), 'cut_now');
+  check('transcript before OpenAI created the re-ask -> hold, cut on creation (run 7: "already has an active response")',
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, responseCreated: false, callCompleted: false, inEndedState: false }), 'cut_on_create');
   check('no re-ask in flight -> nothing to cut',
-    transcriptSupersedesRecovery({ recoveryPromptInFlight: false, hasActiveOutput: true, callCompleted: false, inEndedState: false }), false);
-  check('re-ask already finished playing -> nothing to cut',
-    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, hasActiveOutput: false, callCompleted: false, inEndedState: false }), false);
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: false, responseCreated: true, callCompleted: false, inEndedState: false }), 'none');
   check('never cut the goodbye',
-    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, hasActiveOutput: true, callCompleted: false, inEndedState: true }), false);
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, responseCreated: true, callCompleted: false, inEndedState: true }), 'none');
+  check('nothing to cut once the call completed',
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, responseCreated: true, callCompleted: true, inEndedState: false }), 'none');
 }
 
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);

@@ -62,13 +62,21 @@ function decideWatchdogAction(s) {
 }
 
 /**
- * A transcript that lands while the watchdog's re-ask is still playing is
- * the answer to that very question: cut the re-ask off and act on the answer
+ * A transcript that lands while the watchdog's re-ask is in flight is the
+ * answer to that very question: cut the re-ask off and act on the answer
  * instead of queuing it behind the re-ask (which made the caller hear the
  * question again and answer it twice).
+ *
+ * - 'cut_now': the re-ask's response exists (response.created arrived), cancel it by id.
+ * - 'cut_on_create': its response.create was sent but OpenAI has not answered
+ *   with response.created yet, so there is no id to cancel and a second
+ *   response.create now would be refused ("already has an active response").
+ *   Hold the answer; cancel the re-ask the moment it is created, then act.
+ * - 'none': nothing to cut.
  */
-function transcriptSupersedesRecovery({ recoveryPromptInFlight, hasActiveOutput, callCompleted, inEndedState }) {
-  return Boolean(recoveryPromptInFlight && hasActiveOutput && !callCompleted && !inEndedState);
+function transcriptSupersedesRecovery({ recoveryPromptInFlight, responseCreated, callCompleted, inEndedState }) {
+  if (!recoveryPromptInFlight || callCompleted || inEndedState) return 'none';
+  return responseCreated ? 'cut_now' : 'cut_on_create';
 }
 
 module.exports = {
