@@ -143,6 +143,16 @@ console.log('\n🧪 Safety check: a yes is an emergency, a backchannel is asked 
   check('"Sure, go ahead." is not a name', [r.nextState, sm.getData().firstName || null], [STATES.NAME, null]);
 }
 
+console.log('\n🧪 House numbers written as words become digits (else the Sheet saves no address)');
+{
+  const { normalizeHouseNumber } = require('./utils/data-cleanup');
+  for (const [said, want] of [['Fourteen Elm Street', '14 Elm Street'], ['Eighty-Eight Ridge Road', '88 Ridge Road'],
+                              ['One twenty three Main St', '123 Main St'], ['Two hundred fifteen Oak Ave', '215 Oak Ave'],
+                              ['14 Elm Street', '14 Elm Street'], ['Elm Street', 'Elm Street'], ['Fourteen', 'Fourteen']]) {
+    check(`"${said}" -> "${want}"`, normalizeHouseNumber(said), want);
+  }
+}
+
 console.log('\n🧪 "Thanks" in ADDRESS is not a goodbye');
 {
   const sm = createCallStateMachine();
