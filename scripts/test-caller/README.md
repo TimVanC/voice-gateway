@@ -54,7 +54,10 @@ environment so test calls never land in the real Sheet or email the office
 involved in local mode, so the Twilio signature check is never exercised here.
 
 Scenarios: `no-heat`, `generator-install`, `membership-pricing`,
-`solar-out-of-scope`, `asks-for-person`. Run them all:
+`solar-out-of-scope`, `asks-for-person`, and `no-heat-over-greeting` (the
+no-heat caller starts answering 7.4 s into the 8.9 s greeting, so the call
+opens with a barge-in on the greeting's tail; the smoke checker's "first words
+were the greeting" test fails for it by design). Run them all:
 
 ```bash
 for s in no-heat generator-install membership-pricing solar-out-of-scope asks-for-person; do node scripts/test-caller/run.js --scenario $s --spawn || echo "FAILED: $s"; done
