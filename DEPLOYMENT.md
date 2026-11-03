@@ -229,6 +229,33 @@ answers with her opening greeting (`src/monitor/smoke-call.js`). It is the one
 check that proves the whole path a customer takes: Twilio, the webhook, the
 media stream, OpenAI Realtime and Ava's greeting.
 
+**Full call (default since Nov 2026, `SMOKE_CALL_MODE=full`).** Instead of
+listening to the greeting only, the call runs a whole intake with the test
+harness's scripted caller (`src/monitor/smoke-full-call.js`, scenario
+`SMOKE_CALL_SCENARIO`, default `no-heat`: furnace out, safety check, name,
+phone, email, details, address, availability, recap, goodbye).
+
+- **PASS** = Ava's first words are her greeting, her saved intake (her Neon
+  calls row) has every required field and reached the recap, she ended the
+  call herself, and no silence on the line was longer than
+  `SMOKE_CALL_MAX_GAP_MS` (default 8000). Reply time (median, 90th
+  percentile) and the longest silence are reported on every run.
+- **Stays out of RSE's Sheet and inbox:** while the call runs (and two
+  minutes after), Ava skips the Google Sheets row and the summary email for
+  calls from `SMOKE_CALL_FROM`; calls from that number at other times log as
+  usual. If Ava tries to transfer the smoke call she ends it instead of
+  ringing the live line, and the check fails with that reason.
+- **Where it shows:** the daily check line `Ava handles a full call`, the
+  server log (`✅ Daily full smoke call PASS` / `❌ ... FAIL` plus the
+  transcript), and the web app's Test calls tab (scenario `daily-full-call`,
+  with both sides of the recording).
+- **Cost:** about 3.5 minutes of two Twilio legs plus two Realtime sessions
+  (Ava's and the caller's): roughly $1 a day, about $30 a month.
+- **Local run, no phone call:** `node scripts/test-caller/smoke-full-local.js`
+  runs the same code against a local Ava with a fake Twilio joining the legs.
+
+`SMOKE_CALL_MODE=greeting` brings back the greeting-only check below.
+
 - **What happens:** at the 8:00 AM daily check the server calls `TWILIO_NUMBER`
   from `SMOKE_CALL_FROM` with TwiML that streams the call back to the server
   at `wss://<PUBLIC_BASE_URL host>/smoke/stream`. The server stays silent,
@@ -253,6 +280,9 @@ media stream, OpenAI Realtime and Ava's greeting.
   | Variable | Value |
   |---|---|
   | `DAILY_SMOKE_CALL` | `on` to enable. Unset or anything else: no call is ever placed. |
+  | `SMOKE_CALL_MODE` | `full` (default): whole intake call. `greeting`: greeting only. |
+  | `SMOKE_CALL_SCENARIO` | full mode: test-caller scenario, default `no-heat` (`scripts/test-caller/scenarios/`). |
+  | `SMOKE_CALL_MAX_GAP_MS` | full mode: longest silence allowed, default `8000`. |
   | `SMOKE_CALL_FROM` | the Twilio number to call from, E.164. Default: the first number in `TEST_CALLER_NUMBERS` (today the backup (973) number). Must be a number on the account and must differ from `TWILIO_NUMBER`. |
 
   It also needs `TWILIO_NUMBER`, `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`,

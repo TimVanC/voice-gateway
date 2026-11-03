@@ -931,13 +931,22 @@ function createCallStateMachine() {
         };
         
       case STATES.SAFETY_CHECK:
-        if (detectSafetyEmergency(lowerTranscript)) {
+        if (detectSafetyEmergency(lowerTranscript) || isSafetyYes(lowerTranscript)) {
+          // "Yes" / "yeah, there is" to "any smoke, gas smell, or sparks?" is
+          // a yes; it used to pass as all clear because it names no hazard.
           data.isSafetyRisk = true;
           return {
             nextState: transitionTo(STATES.ENDED),
             prompt: SAFETY.emergency_response,
             action: 'end_call'
           };
+        }
+        // "Mhm", "okay", "go ahead", "what was that?": not an answer. Ask once
+        // more; a second unclear reply moves on as before.
+        if (isSafetyUnclear(lowerTranscript) && !data._safetyReasked) {
+          data._safetyReasked = true;
+          intakeLog('field_parse', { field: 'safety', raw: transcript.substring(0, 60), reason: 'unclear_answer_reasked' });
+          return { nextState: currentState, prompt: SAFETY.check, action: 'ask' };
         }
         return {
           nextState: transitionTo(STATES.NAME),
@@ -2512,6 +2521,21 @@ function createCallStateMachine() {
   /**
    * Check if text looks like an actual name (not a phrase/question/number)
    */
+  /** A plain yes to the safety question (no negation anywhere). */
+  function isSafetyYes(text) {
+    const t = String(text || '').toLowerCase().replace(/[‘’]/g, "'").trim();
+    if (/\b(no|not|nothing|none|nope|nah|never|don'?t|doesn'?t|isn'?t)\b/.test(t)) return false;
+    return /^(yes|yeah|yep|yup|yea|i do|there is|there's|i think so|i believe so|actually yes|correct)\b/.test(t);
+  }
+
+  /** Backchannels, go-aheads and repeat requests: not an answer to the safety question. */
+  function isSafetyUnclear(text) {
+    const t = String(text || '').toLowerCase().replace(/[^a-z' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!t) return true;
+    if (/^(m+ ?h+m+|mm hmm|mm hm|uh huh|hmm+|um+|uh+|okay|ok|sure|right|alright|all right|go ahead|sure go ahead|okay go ahead|ok go ahead|yes go ahead|i'?m ready|ready|go on)$/.test(t)) return true;
+    return isConfusedOrAsking(t) && !/\b(no|not|nothing|none|nope)\b/.test(t);
+  }
+
   // Everyday words that are never part of a person's name. Kept clear of words
   // that are also names or name particles (Will, Hope, Rose, de, la, van, da...).
   const NON_NAME_WORDS = new Set([
@@ -2521,7 +2545,8 @@ function createCallStateMachine() {
     'sparks', 'gas', 'fine', 'sure', 'it', 'its', "it's", 'is', 'was', 'are', 'be', 'been', 'have', 'has',
     'had', 'do', 'does', 'did', 'you', 'your', 'me', 'my', 'we', 'our', 'of', 'to', 'for', 'with', 'but',
     'or', 'all', 'any', 'correct', 'wrong', 'um', 'uh', 'hmm', 'hello', 'bye', 'goodbye', 'name', 'number',
-    'phone', 'email', 'address', 'calling', 'because', 'about'
+    'phone', 'email', 'address', 'calling', 'because', 'about', 'go', 'ahead', 'ready', 'safety', 'check',
+    'question', 'again', 'repeat', 'wait', 'hold'
   ]);
   /** The first word, or most of the words, are everyday words: a phrase, not a name. */
   function looksLikeNonNamePhrase(...parts) {
