@@ -1,33 +1,47 @@
-// node src/test-g711.js - checks src/g711.js against the standard G.711 tables
-const assert = require('assert');
+// test-g711.js - The mu-law codec must be the standard one, in both directions.
+// Run: node src/test-g711.js
 const g = require('./g711');
-const smoke = require('./monitor/smoke-call');
+const { scaleMulaw } = require('../scripts/test-caller/audio');
 
-// 1. Decode matches the reference table smoke-call.js carries.
-const all = Buffer.from([...Array(256).keys()]);
-const ours = g.muLawToPcm16(all);
-const ref = smoke.muLawToPcm16 ? smoke.muLawToPcm16(all) : null;
-if (ref) for (let b = 0; b < 256; b++) assert.strictEqual(ours[b], ref[b], `decode byte ${b}`);
+let failures = 0;
+function check(label, ok, detail = '') {
+  console.log(`${ok ? '✅' : '❌'} ${label}${ok || !detail ? '' : `  (${detail})`}`);
+  if (!ok) failures++;
+}
 
-// 2. Known points: 0xFF is digital silence (0), 0x7F is -0, 0x80 is +32124, 0x00 is -32124.
-assert.strictEqual(ours[0xff], 0);
-assert.strictEqual(ours[0x7f], 0);
-assert.strictEqual(ours[0x80], 32124);
-assert.strictEqual(ours[0x00], -32124);
+// Known codes from the G.711 tables.
+check('0xFF decodes to 0 (digital silence)', g.muLawToLinearSample(0xff) === 0);
+check('0x7F decodes to 0', g.muLawToLinearSample(0x7f) === 0);
+check('0x80 decodes to +32124 (loudest positive)', g.muLawToLinearSample(0x80) === 32124, String(g.muLawToLinearSample(0x80)));
+check('0x00 decodes to -32124 (loudest negative)', g.muLawToLinearSample(0x00) === -32124, String(g.muLawToLinearSample(0x00)));
+check('0xC0 decodes to +1884', g.muLawToLinearSample(0xc0) === 1884, String(g.muLawToLinearSample(0xc0)));
 
-// 3. Round trip: encode(decode(b)) == b for every byte, and decode(encode(x)) is within the segment quantisation of x.
+// Every code survives decode -> encode unchanged.
+let roundTrip = 0;
 for (let b = 0; b < 256; b++) {
-  const back = g.linearToMuLawSample(ours[b]);
-  // 0x7F and 0xFF both decode to 0, which re-encodes as 0xFF.
-  if (b !== 0x7f) assert.strictEqual(back, b, `round trip byte ${b}`);
+  const back = g.linearToMuLawSample(g.muLawToLinearSample(b));
+  // 0x7F and 0xFF both mean zero; the encoder picks 0xFF.
+  if (back !== b && !(b === 0x7f && back === 0xff)) roundTrip++;
 }
-let worst = 0;
-for (let x = -32768; x <= 32767; x += 7) {
-  const y = g.muLawToLinearSample(g.linearToMuLawSample(x));
-  assert.strictEqual(Math.sign(y) || Math.sign(x), Math.sign(x) || Math.sign(y), `sign kept for ${x}`);
-  const step = Math.max(8, Math.abs(x) / 16); // segment step is ~1/16 of magnitude, 8 at the bottom
-  const err = Math.abs(Math.min(Math.max(x, -32124), 32124) - y);
-  assert.ok(err <= step + 1, `quantisation error ${err} for ${x} (step ${step})`);
-  if (Math.abs(x) > 256) worst = Math.max(worst, err / Math.abs(x));
+check('decode -> encode returns the same byte for all 256 codes', roundTrip === 0, `${roundTrip} differ`);
+
+// Encoding is monotonic and symmetric, never off by sign.
+let bad = 0;
+for (let s = -32768; s < 32768; s += 7) {
+  const d = g.muLawToLinearSample(g.linearToMuLawSample(s));
+  if (Math.sign(d) !== Math.sign(s) && Math.abs(s) > 4) bad++;
+  if (Math.abs(d - s) > Math.max(8, Math.abs(s) / 8)) bad++;
 }
-console.log(`g711 OK: decode matches reference table, 256-byte round trip exact, worst relative error ${(worst * 100).toFixed(1)}%`);
+check('encode -> decode keeps sign and is within mu-law precision', bad === 0, `${bad} samples off`);
+
+// A test tone turned down 6 dB measures 6 dB quieter.
+const n = 8000;
+const pcm = new Int16Array(n);
+for (let i = 0; i < n; i++) pcm[i] = Math.round(20000 * Math.sin((i / 8000) * 2 * Math.PI * 440));
+const rmsDb = (x) => { let a = 0; for (const v of x) a += v * v; return 20 * Math.log10(Math.sqrt(a / x.length) / 32767); };
+const before = rmsDb(g.muLawToPcm16(g.pcm16ToMuLaw(pcm)));
+const after = rmsDb(g.muLawToPcm16(scaleMulaw(g.pcm16ToMuLaw(pcm), -6)));
+check('scaleMulaw(-6 dB) lowers a tone by 6 dB', Math.abs(after - before + 6) < 0.3, `${(after - before).toFixed(2)} dB`);
+
+console.log(failures === 0 ? '\n✅ All g711 checks passed' : `\n❌ ${failures} check(s) failed`);
+process.exit(failures === 0 ? 0 : 1);

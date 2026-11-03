@@ -44,7 +44,7 @@ export default async function TestsPage() {
     <>
       <TopBar />
       <main>
-        <h1>Test calls</h1>
+        <h1>Test runs</h1>
         <p className="muted small" style={{ marginTop: -8 }}>
           Calls placed to Ava by scripts, never by customers; the main Calls list hides them. <strong>Daily smoke call</strong>: once a
           day the server phones Ava&apos;s number from a test number, listens to her opening greeting and checks it (scenario{" "}

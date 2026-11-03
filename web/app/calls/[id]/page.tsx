@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import TopBar from "@/components/TopBar";
+import { getCallReview } from "@/lib/tickets";
 import { FlagBadges, StatusBadge } from "@/components/Badges";
 import { requireSession } from "@/lib/auth";
 import { formatDateTime, formatDuration, formatIntent, formatPhone, formatTime, fullName } from "@/lib/format";
@@ -29,6 +30,8 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
   const result = await getCall(numericId);
   if (!result) notFound();
   const { call, turns, recording, testRuns } = result;
+  const { review, tickets } = await getCallReview(call.id);
+  const ticketFor = (f: { category: string; key: string }) => tickets.find((t) => t.fingerprint === `${f.category}:${f.key}`);
   const name = fullName(call.first_name, call.last_name);
   const ms = (v: number | null | undefined) => (v === null || v === undefined ? null : `${v} ms`);
 
@@ -217,6 +220,55 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
               </section>
             ))}
           </>
+        )}
+
+        <h2>Review</h2>
+        {review && review.verdict !== "skipped" && review.verdict !== "error" ? (
+          <section className="card review">
+            <p style={{ marginTop: 0 }}>
+              <span className={`badge ${review.verdict === "clean" ? "status-completed" : "sev-medium"}`}>
+                {review.verdict === "clean" ? "CLEAN" : `${review.findings.length} FINDING${review.findings.length === 1 ? "" : "S"}`}
+              </span>
+              <span className="muted small">
+                reviewed {formatDateTime(review.created_at)} by {review.model}
+              </span>
+            </p>
+            {review.summary && <p>{review.summary}</p>}
+            {review.findings.length > 0 && (
+              <ol className="findings">
+                {review.findings.map((f, i) => {
+                  const t = ticketFor(f);
+                  return (
+                    <li key={i}>
+                      <span className={`badge sev-${f.severity}`}>{f.severity}</span>
+                      <strong>{f.title}</strong>
+                      {t && (
+                        <>
+                          {" "}
+                          <Link href={`/tickets/${t.id}`}>ticket #{t.id}</Link>
+                          {t.status !== "open" ? <span className="muted small"> ({t.status})</span> : null}
+                        </>
+                      )}
+                      <div className="small">{f.what_happened}</div>
+                      <div className="muted small">
+                        Expected: {f.expected}
+                        {f.turns?.length ? ` · turns ${f.turns.join(", ")}` : ""}
+                        {f.fix_area ? ` · ${f.fix_area}` : ""}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </section>
+        ) : (
+          <div className="card empty">
+            {review?.verdict === "error"
+              ? `The review failed: ${review.summary ?? "unknown error"}`
+              : review?.verdict === "skipped"
+                ? review.summary ?? "Not reviewed."
+                : "Not reviewed. The reviewer needs CALL_REVIEW=on on the server, or run node scripts/review-calls.js --call " + call.id + "."}
+          </div>
         )}
 
         <h2>Transcript</h2>

@@ -104,7 +104,7 @@ after it, never blocks the call, and logs-and-continues on any failure. With
    | Variable | Value |
    |---|---|
    | `DATABASE_URL` | the Neon connection string from step 1 |
-   | `TEST_CALLER_NUMBERS` | optional, comma-separated numbers whose calls are flagged `is_test` (RSE's own and Tim's phones); `TWILIO_NUMBER` is always included |
+   | `TEST_CALLER_NUMBERS` | optional, comma-separated numbers whose calls are flagged `is_test` (RSE's own and Tim's phones); `TWILIO_NUMBER` is always included. Since Nov 3 2026 calls from these numbers also skip the Google Sheet and the summary email (they still go to Neon). |
 
    Staging and production write to the same database; the `environment`
    column records which one wrote each row, and the web app shows it on the
@@ -140,6 +140,56 @@ server has since written live) are skipped. Options:
 - `pre_caller_id_fix`: imported rows from before caller ID was passed through
   (Apr 16 – Jun 2, 2026). Their phone column is RSE's own number unless the
   caller stated one, so they are not treated as test calls by number.
+
+### Recordings of every call (`CALL_RECORDING=on`)
+
+Off by default. With `CALL_RECORDING=on` the server keeps both sides of every
+call it answers (the caller's frames from Twilio, Ava's frames to Twilio) in
+memory as they pass and stores them on the call's row at hang-up
+(`recordings` table, raw mu-law, the same format the test caller writes), so
+the call page in the web app plays them back with the transcript. Nothing is
+said to the caller; whether to add a recording notice is RSE's call (New
+Jersey is one-party consent; callers from two-party states are safest with
+one). The write never blocks the call and logs-and-continues on failure.
+
+| Variable | Value |
+|---|---|
+| `CALL_RECORDING` | `on` to record; anything else is off |
+| `CALL_RECORDING_KEEP_DAYS` | days to keep recordings, default 30; the daily check deletes older ones (calls and transcripts stay). `0` keeps them forever. |
+
+Size: about 1 MB per call-minute (0.8 MB/min measured), so ~2.6 MB for an
+average 3-minute call. At RSE's volume (about 90 real calls a month plus the
+daily smoke call) 30 days of recordings is roughly 300 MB, which fits Neon's
+free tier (0.5 GB) with little to spare; a longer window needs Neon's Launch
+plan (10 GB). The `002` migration that creates the table is already applied
+to the current database.
+
+### Call review and tickets (`CALL_REVIEW=on`)
+
+Off by default. With `CALL_REVIEW=on` every call, once saved to Neon, is read
+by Claude (`src/review/call-reviewer.js`): the transcript and the saved intake
+row are compared with the script, and each discrepancy (a field saved wrong, an
+answer ignored, a question repeated, an improvised line, a premature end, dead
+air, a mishandled safety check or transfer) is reported with the turn numbers
+as evidence. Findings are filed as tickets keyed by a fingerprint
+(`category:key`), so one bug seen on ten calls is one ticket with ten
+occurrences; marking a ticket fixed and seeing it again reopens it. The web app
+lists them at `/tickets` and shows each call's review on its call page. The
+daily check gets a line, `Call review tickets`, that is a WARNING on any day
+with new tickets, so the 8 AM email says what needs looking at.
+
+| Variable | Value |
+|---|---|
+| `CALL_REVIEW` | `on` to review every saved call |
+| `CALL_REVIEW_MODEL` | optional, default `claude-sonnet-5-5` |
+| `CALL_LOG_URL` | optional, the web app's address for links in the email, default `https://rse-ava-calls.vercel.app` |
+| `CALL_REVIEW_BACKFILL_DAYS` | optional; with a number, 20 s after boot the server reviews the real calls of the last N days that have no review yet (up to `CALL_REVIEW_BACKFILL_LIMIT`, default 50). Reviewed calls are skipped, so leaving it set is harmless. |
+
+Cost: one model call per phone call, a few thousand input tokens and a few
+hundred out, a few cents. Schema: `db/migrations/003_call_reviews_and_tickets.sql`
+(`node scripts/db-migrate.js`). To review calls stored before the switch was
+on, or after a prompt change: `node scripts/review-calls.js --days 30 --limit 50`
+(`--include-tests`, `--force`, `--call <id>`, `--show <id>` prints the prompt).
 
 ## 🖥️ Call Log Web App (`web/`, Vercel)
 
@@ -229,6 +279,36 @@ answers with her opening greeting (`src/monitor/smoke-call.js`). It is the one
 check that proves the whole path a customer takes: Twilio, the webhook, the
 media stream, OpenAI Realtime and Ava's greeting.
 
+**Full call (default since Nov 2026, `SMOKE_CALL_MODE=full`).** Instead of
+listening to the greeting only, the call runs a whole intake with the test
+harness's scripted caller (`src/monitor/smoke-full-call.js`, scenario
+`SMOKE_CALL_SCENARIO`, default `no-heat`: furnace out, safety check, name,
+phone, email, details, address, availability, recap, goodbye).
+
+- **PASS** = Ava's first words are her greeting, her saved intake (her Neon
+  calls row) has every required field and reached the recap, she ended the
+  call herself, and no silence on the line was longer than
+  `SMOKE_CALL_MAX_GAP_MS` (default 8000). Reply time (median, 90th
+  percentile) and the longest silence are reported on every run.
+- **Stays out of RSE's Sheet and inbox:** Ava skips the Google Sheets row
+  and the summary email for any call from `SMOKE_CALL_FROM` or a number in
+  `TEST_CALLER_NUMBERS`, and for every call to an Ava that is
+  not running on Railway (no `RAILWAY_ENVIRONMENT_NAME`: a laptop, the test
+  harness) unless that copy is started with `LOCAL_SIDE_EFFECTS=on`. Those
+  calls still go to Neon, flagged as tests. If Ava tries to transfer the
+  smoke call she ends it instead of ringing the live line, and the check
+  fails with that reason.
+- **Where it shows:** the daily check line `Ava handles a full call`, the
+  server log (`✅ Daily full smoke call PASS` / `❌ ... FAIL` plus the
+  transcript), and the web app's Test calls tab (scenario `daily-full-call`,
+  with both sides of the recording).
+- **Cost:** about 3.5 minutes of two Twilio legs plus two Realtime sessions
+  (Ava's and the caller's): roughly $1 a day, about $30 a month.
+- **Local run, no phone call:** `node scripts/test-caller/smoke-full-local.js`
+  runs the same code against a local Ava with a fake Twilio joining the legs.
+
+`SMOKE_CALL_MODE=greeting` brings back the greeting-only check below.
+
 - **What happens:** at the 8:00 AM daily check the server calls `TWILIO_NUMBER`
   from `SMOKE_CALL_FROM` with TwiML that streams the call back to the server
   at `wss://<PUBLIC_BASE_URL host>/smoke/stream`. The server stays silent,
@@ -253,6 +333,9 @@ media stream, OpenAI Realtime and Ava's greeting.
   | Variable | Value |
   |---|---|
   | `DAILY_SMOKE_CALL` | `on` to enable. Unset or anything else: no call is ever placed. |
+  | `SMOKE_CALL_MODE` | `full` (default): whole intake call. `greeting`: greeting only. |
+  | `SMOKE_CALL_SCENARIO` | full mode: test-caller scenario, default `no-heat` (`scripts/test-caller/scenarios/`). |
+  | `SMOKE_CALL_MAX_GAP_MS` | full mode: longest silence allowed, default `8000`. |
   | `SMOKE_CALL_FROM` | the Twilio number to call from, E.164. Default: the first number in `TEST_CALLER_NUMBERS` (today the backup (973) number). Must be a number on the account and must differ from `TWILIO_NUMBER`. |
 
   It also needs `TWILIO_NUMBER`, `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`,

@@ -11,7 +11,10 @@ export default function TopBar() {
         <span className="muted small">RSE Energy Group</span>
         <nav className="topnav">
           <Link href="/">Calls</Link>
-          <Link href="/tests">Test calls</Link>
+          <Link href="/test-calls">Test calls</Link>
+          <Link href="/tests">Test runs</Link>
+          <Link href="/history">History</Link>
+          <Link href="/tickets">Tickets</Link>
         </nav>
         <span className="spacer" />
         <form action={logout}>

@@ -83,6 +83,18 @@ function isOwnNumber(phone, env = process.env) {
   return Boolean(digits) && ownNumberDigits(env).has(digits);
 }
 
+/**
+ * The test caller's numbers only (TEST_CALLER_NUMBERS), without
+ * TWILIO_NUMBER: calls from these never reach the Sheet or the inbox.
+ * TWILIO_NUMBER is left out on purpose, because a caller-ID hiccup that
+ * showed every caller as RSE's own number must not silence real calls.
+ */
+function isTestCallerNumber(phone, env = process.env) {
+  const digits = lastTenDigits(phone);
+  if (!digits) return false;
+  return String(env.TEST_CALLER_NUMBERS || '').split(',').map(lastTenDigits).includes(digits);
+}
+
 // ---------------------------------------------------------------------------
 // Transcript accumulation (one recorder per call)
 // ---------------------------------------------------------------------------
@@ -142,6 +154,10 @@ function buildCallRow(callData, currentState, metadata) {
   const endedAt = metadata.endedAt ? new Date(metadata.endedAt) : new Date();
   const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
   const testByNumber = isOwnNumber(metadata.callerNumber);
+  // A call to an Ava that is not running on Railway (a laptop, the test
+  // harness's spawned copy) is a test by definition, whoever the caller was.
+  const localRun = !metadata.environment || metadata.environment === 'local';
+  const testReason = testByNumber ? 'caller is an RSE number' : localRun ? 'local run' : null;
 
   return {
     call_id: metadata.callId,
@@ -149,8 +165,8 @@ function buildCallRow(callData, currentState, metadata) {
     source: 'server',
     environment: metadata.environment || null,
     sheet_row_number: null,
-    is_test: testByNumber,
-    test_reason: testByNumber ? 'caller is an RSE number' : null,
+    is_test: testByNumber || localRun,
+    test_reason: testReason,
     pre_caller_id_fix: false,
     direction: 'inbound',
     caller_number: toText(metadata.callerNumber),
@@ -282,6 +298,67 @@ async function saveCall(callData, currentState, metadata = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Recordings (CALL_RECORDING=on): both sides of the call, raw mu-law
+// ---------------------------------------------------------------------------
+
+/**
+ * Store a finished call's two tracks on its calls row. Never throws, never
+ * overwrites: the test caller's own recording of the same call (written
+ * with ON CONFLICT ... UPDATE) wins if both exist.
+ *
+ * @param {number} callRowId   calls.id returned by saveCall()
+ * @param {TrackRecorder} recorder  src/utils/track-recorder.js
+ * @param {string} [source]    'server' (default)
+ */
+async function saveRecording(callRowId, recorder, source = 'server') {
+  const pool = getPool();
+  if (!pool || !callRowId || !recorder) return { success: false, skipped: true };
+  try {
+    const totalSamples = Math.ceil((recorder.durationMs() / 1000) * 8000);
+    if (totalSamples <= 0) return { success: false, skipped: true, reason: 'no audio' };
+    const caller = recorder.renderMulaw('caller', totalSamples);
+    const ava = recorder.renderMulaw('ava', totalSamples);
+    const res = await pool.query(
+      `INSERT INTO recordings (call_id, source, codec, sample_rate, duration_seconds, caller_audio, ava_audio)
+       VALUES ($1, $2, 'pcmu', 8000, $3, $4, $5)
+       ON CONFLICT (call_id) DO NOTHING RETURNING id`,
+      [callRowId, source, (totalSamples / 8000).toFixed(1), caller, ava]
+    );
+    const seconds = Math.round(totalSamples / 8000);
+    if (res.rows.length === 0) {
+      console.log(`⏭️  Recording for call ${callRowId} already stored`);
+      return { success: true, skipped: true, reason: 'exists' };
+    }
+    console.log(`🎙️  Recording saved (call ${callRowId}, ${seconds} s, ${((caller.length + ava.length) / 1024 / 1024).toFixed(1)} MB)`);
+    return { success: true, id: res.rows[0].id, seconds };
+  } catch (err) {
+    console.error(`❌ Recording save failed for call ${callRowId} (call row unaffected): ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Delete recordings older than `keepDays` (the calls and transcripts stay).
+ * Run once a day by the daily check. Never throws.
+ */
+async function pruneOldRecordings(keepDays) {
+  const pool = getPool();
+  const days = Number(keepDays);
+  if (!pool || !Number.isFinite(days) || days <= 0) return { success: false, skipped: true };
+  try {
+    const res = await pool.query(
+      `DELETE FROM recordings WHERE created_at < now() - make_interval(days => $1::int) RETURNING id`,
+      [Math.round(days)]
+    );
+    if (res.rowCount > 0) console.log(`🧹 Deleted ${res.rowCount} recording(s) older than ${days} days`);
+    return { success: true, deleted: res.rowCount };
+  } catch (err) {
+    console.error(`❌ Recording prune failed: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
 /** Close the pool (scripts only; the server never calls this). */
 async function closePool() {
   if (pool) {
@@ -293,8 +370,11 @@ async function closePool() {
 
 module.exports = {
   saveCall,
+  saveRecording,
+  pruneOldRecordings,
   createTranscriptRecorder,
   isOwnNumber,
+  isTestCallerNumber,
   lastTenDigits,
   ownNumberDigits,
   insertCall,

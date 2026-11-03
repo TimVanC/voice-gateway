@@ -1,53 +1,47 @@
-// g711.js - G.711 mu-law encoding/decoding (ITU-T G.711, as used by Twilio PCMU)
+// g711.js - G.711 mu-law (PCMU) encoding/decoding, the codec Twilio media
+// streams carry: 8 kHz, one byte per sample, 0xFF = digital silence.
 //
-// History: the encoder used to drop the sign bit (~(sign & uval)) so every
-// negative sample came out as a positive one, and the decoder shifted by
-// exponent + 2 instead of exponent (4x too hot, wrapping above ~8000).
-// server-rse.js never decodes (mu-law goes straight to OpenAI) so production
-// calls were unaffected; the test-caller WAVs, RMS numbers and anything that
-// mixes audio locally (server-pipeline.js) go through this file.
+// Both directions are table-driven and are exact inverses of each other for
+// every one of the 256 codes. Until Nov 2026 the decoder shifted by two bits
+// too many (4x too loud, wrapping at Int16 on anything above about -12 dBFS),
+// which garbled every recording played back through it; src/server-rse.js
+// hands mu-law straight to OpenAI and never decodes, so calls were unaffected.
 const BIAS = 0x84; // 132
 const CLIP = 32635;
 
 /**
- * Convert a single PCM16 sample to a mu-law byte.
+ * Convert a single PCM16 sample to a mu-law byte
  */
 function linearToMuLawSample(sample) {
-  // Clamp to valid range
+  let sign = 0;
+  if (sample < 0) {
+    sign = 0x80;
+    sample = -sample;
+  }
   if (sample > CLIP) sample = CLIP;
-  else if (sample < -CLIP) sample = -CLIP;
-
-  // Negative samples invert the low seven bits only; positive ones all eight.
-  const mask = (sample < 0) ? 0x7F : 0xFF;
-  if (sample < 0) sample = -sample;
-  sample = sample + BIAS;
+  sample += BIAS;
 
   let exponent = 7;
   for (let expMask = 0x4000; (sample & expMask) === 0 && exponent > 0; expMask >>= 1) {
     exponent--;
   }
-
   const mantissa = (sample >> (exponent + 3)) & 0x0F;
-  const uval = (exponent << 4) | mantissa;
-  return (uval ^ mask) & 0xFF;
+  return ~(sign | (exponent << 4) | mantissa) & 0xFF;
 }
 
 /**
- * Convert a mu-law byte to a PCM16 sample.
+ * Convert a mu-law byte to a PCM16 sample
  */
 function muLawToLinearSample(mulaw) {
-  mulaw = ~mulaw & 0xFF;
-  const sign = (mulaw & 0x80) ? -1 : 1;
-  const exponent = (mulaw >> 4) & 0x07;
-  const mantissa = mulaw & 0x0F;
-  let sample = ((mantissa << 3) + BIAS) << exponent;
-  sample = sample - BIAS;
-  return sign * sample;
+  const u = ~mulaw & 0xFF;
+  const exponent = (u >> 4) & 0x07;
+  const mantissa = u & 0x0F;
+  const magnitude = (((mantissa << 3) + BIAS) << exponent) - BIAS;
+  return (u & 0x80) ? -magnitude : magnitude;
 }
 
-// Decode table: 256 entries, so hot paths (frame mixing, RMS) avoid the arithmetic.
 const DECODE_TABLE = new Int16Array(256);
-for (let b = 0; b < 256; b++) DECODE_TABLE[b] = muLawToLinearSample(b);
+for (let byte = 0; byte < 256; byte++) DECODE_TABLE[byte] = muLawToLinearSample(byte);
 
 /**
  * Convert PCM16 Int16Array to mu-law Buffer
@@ -99,5 +93,6 @@ module.exports = {
   pcm16leBufferToInt16,
   int16ToPcm16leBuffer,
   linearToMuLawSample,
-  muLawToLinearSample
+  muLawToLinearSample,
+  DECODE_TABLE,
 };
