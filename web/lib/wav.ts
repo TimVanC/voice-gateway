@@ -1,19 +1,19 @@
 /**
  * Turn the two stored mu-law tracks of a call into a stereo 16-bit WAV
  * (caller left, Ava right) that any browser's <audio> element plays.
- * G.711 mu-law decode, same table the voice server uses (src/g711.js).
+ * Standard G.711 mu-law decode, the same table as src/g711.js. (Until Nov
+ * 2026 both shifted two bits too far, which made loud passages wrap around
+ * and crackle on playback.)
  */
 
 const BIAS = 0x84;
 
 function muLawToLinear(mulaw: number): number {
-  mulaw = ~mulaw;
-  const sign = mulaw & 0x80 ? -1 : 1;
-  const exponent = (mulaw >> 4) & 0x07;
-  const mantissa = mulaw & 0x0f;
-  let sample = ((mantissa << 3) + BIAS) << (exponent === 0 ? 0 : exponent + 2);
-  sample -= BIAS;
-  return sign * sample;
+  const u = ~mulaw & 0xff;
+  const exponent = (u >> 4) & 0x07;
+  const mantissa = u & 0x0f;
+  const magnitude = (((mantissa << 3) + BIAS) << exponent) - BIAS;
+  return u & 0x80 ? -magnitude : magnitude;
 }
 
 const TABLE: Int16Array = (() => {
