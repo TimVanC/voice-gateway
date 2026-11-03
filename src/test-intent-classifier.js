@@ -51,6 +51,20 @@ check('generator maintenance plan stays generator',
   intent('Do you have a maintenance plan for my generator?'),
   INTENT_TYPES.GENERATOR);
 
+console.log('\n🧪 "installed" and "like to get" mean a new install (harness generator-install scenario)');
+check('like to get a standby generator installed',
+  intent("Hi, I'd like to get a whole-house standby generator installed at my home."),
+  { intent: INTENT_TYPES.GENERATOR, isNew: true });
+check('looking to have a generator put in', intent("I'm looking to have a generator put in"), { intent: INTENT_TYPES.GENERATOR, isNew: true });
+check('thinking about getting a generator', intent('Thinking about getting a Generac for the house'), { intent: INTENT_TYPES.GENERATOR, isNew: true });
+check('heat pump installed', intent("I'd like a heat pump installed"), INTENT_TYPES.HVAC_INSTALLATION);
+check('installed generator that will not start stays service',
+  intent("The generator you installed last year won't start"), INTENT_TYPES.GENERATOR);
+check('looking to get my generator serviced stays service',
+  intent("I'm looking to get my generator serviced"), INTENT_TYPES.GENERATOR);
+check('furnace you installed is not working stays service',
+  intent('The furnace you installed is not working'), INTENT_TYPES.HVAC_SERVICE);
+
 console.log('\n🧪 Service and out-of-scope unchanged');
 check('no heat', intent('I have no heat since this morning'), INTENT_TYPES.HVAC_SERVICE);
 check('AC not working', intent('My AC is not working'), INTENT_TYPES.HVAC_SERVICE);
