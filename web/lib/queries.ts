@@ -2,13 +2,19 @@ import { query } from "./db";
 
 export const PAGE_SIZE = 50;
 
-export type TestFilter = "hide" | "only" | "all";
+/**
+ * Which calls a list shows. Every row is in exactly one scope:
+ *   live:    written by the server for a real caller (the main page)
+ *   test:    flagged is_test (RSE's own numbers, the smoke call, the bot caller)
+ *   history: imported from the Google Sheet (source = 'sheets'), test or not
+ */
+export type CallScope = "live" | "test" | "history";
 
 export interface CallFilters {
   q: string;
   from: string; // YYYY-MM-DD (Eastern) or ""
   to: string; // YYYY-MM-DD (Eastern) or ""
-  test: TestFilter;
+  scope: CallScope;
   page: number;
 }
 
@@ -124,25 +130,31 @@ export interface TranscriptTurn {
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
-export function parseFilters(params: Record<string, string | string[] | undefined>): CallFilters {
+export function parseFilters(params: Record<string, string | string[] | undefined>, scope: CallScope): CallFilters {
   const one = (k: string) => {
     const v = params[k];
     return (Array.isArray(v) ? v[0] : v) ?? "";
   };
-  const test = one("test");
   const page = Math.max(1, Number.parseInt(one("page") || "1", 10) || 1);
   return {
     q: one("q").trim().slice(0, 100),
     from: ISO_DATE.test(one("from")) ? one("from") : "",
     to: ISO_DATE.test(one("to")) ? one("to") : "",
-    test: test === "only" || test === "all" ? test : "hide",
+    scope,
     page,
   };
 }
 
+/** SQL for one scope; the three are disjoint and together cover every row. */
+const SCOPE_SQL: Record<CallScope, string> = {
+  live: "source <> 'sheets' AND NOT is_test",
+  test: "source <> 'sheets' AND is_test",
+  history: "source = 'sheets'",
+};
+
 function whereClause(f: CallFilters): { sql: string; params: unknown[] } {
   const digits = f.q.replace(/\D/g, "");
-  const params: unknown[] = [f.q, digits.length >= 3 ? digits : "", f.from || null, f.to || null, f.test];
+  const params: unknown[] = [f.q, digits.length >= 3 ? digits : "", f.from || null, f.to || null];
   const sql = `
     WHERE ($1 = '' OR concat_ws(' ', first_name, last_name, phone_number, caller_number, email,
                                  call_summary, service_address, availability_notes, primary_intent, call_id)
@@ -151,7 +163,7 @@ function whereClause(f: CallFilters): { sql: string; params: unknown[] } {
                           OR regexp_replace(coalesce(caller_number, ''), '\\D', '', 'g') LIKE '%' || $2 || '%')))
       AND ($3::date IS NULL OR started_at >= ($3::date)::timestamp AT TIME ZONE 'America/New_York')
       AND ($4::date IS NULL OR started_at < ($4::date + 1)::timestamp AT TIME ZONE 'America/New_York')
-      AND (CASE $5 WHEN 'hide' THEN NOT is_test WHEN 'only' THEN is_test ELSE TRUE END)
+      AND (${SCOPE_SQL[f.scope]})
   `;
   return { sql, params };
 }
@@ -167,7 +179,7 @@ export async function listCalls(f: CallFilters): Promise<{ rows: CallRow[]; tota
               EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id) AS has_recording
          FROM calls ${sql}
         ORDER BY started_at DESC, id DESC
-        LIMIT ${PAGE_SIZE} OFFSET $6`,
+        LIMIT ${PAGE_SIZE} OFFSET $5`,
       [...params, offset],
     ),
     query<{ n: number }>(`SELECT count(*)::int AS n FROM calls ${sql}`, params),
@@ -224,14 +236,15 @@ export async function getRecordingAudio(callId: number): Promise<RecordingAudio 
   return rows[0];
 }
 
-export async function countSummary(): Promise<{ total: number; real: number; test: number; withTranscript: number }> {
-  const rows = await query<{ total: number; real: number; test: number; with_transcript: number }>(`
+export async function countSummary(): Promise<{ total: number; live: number; test: number; history: number; withTranscript: number }> {
+  const rows = await query<{ total: number; live: number; test: number; history: number; with_transcript: number }>(`
     SELECT count(*)::int AS total,
-           count(*) FILTER (WHERE NOT is_test)::int AS real,
-           count(*) FILTER (WHERE is_test)::int AS test,
+           count(*) FILTER (WHERE ${SCOPE_SQL.live})::int AS live,
+           count(*) FILTER (WHERE ${SCOPE_SQL.test})::int AS test,
+           count(*) FILTER (WHERE ${SCOPE_SQL.history})::int AS history,
            count(*) FILTER (WHERE EXISTS (SELECT 1 FROM transcript_turns t WHERE t.call_id = calls.id))::int AS with_transcript
       FROM calls
   `);
   const r = rows[0];
-  return { total: r.total, real: r.real, test: r.test, withTranscript: r.with_transcript };
+  return { total: r.total, live: r.live, test: r.test, history: r.history, withTranscript: r.with_transcript };
 }

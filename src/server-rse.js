@@ -2955,6 +2955,18 @@ if (callReviewer.enabled && (!process.env.DATABASE_URL || !process.env.ANTHROPIC
 } else if (callReviewer.enabled) {
   extraChecks.push(() => callReviewer.ticketsCheck());
   console.log(`🔎 Call review on: every saved call is reviewed by ${callReviewer.model}; findings become tickets at ${callReviewer.CALL_LOG_URL}/tickets`);
+  // CALL_REVIEW_BACKFILL_DAYS=N: shortly after boot, review the real calls of
+  // the last N days that have no review yet (calls saved before the switch
+  // was on). Reviewed calls are skipped, so leaving the variable set is
+  // harmless; it only costs anything the first time.
+  const backfillDays = Number(process.env.CALL_REVIEW_BACKFILL_DAYS || 0);
+  if (backfillDays > 0) {
+    const t = setTimeout(() => {
+      callReviewer.backfill({ days: backfillDays, limit: Number(process.env.CALL_REVIEW_BACKFILL_LIMIT || 50) }).catch(() => {});
+    }, 20_000);
+    if (typeof t.unref === 'function') t.unref();
+    console.log(`🔎 Call review backfill: unreviewed real calls of the last ${backfillDays} days will be reviewed 20 s after boot`);
+  }
 } else {
   console.log('🔎 Call review off (set CALL_REVIEW=on to have every call reviewed and tickets filed)');
 }
