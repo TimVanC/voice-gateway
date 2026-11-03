@@ -258,5 +258,63 @@ console.log('\n🧪 At the recap, a goodbye ends the call instead of re-asking "
   }
 }
 
+console.log('\n🧪 Dead-air watchdog holds while the caller\'s transcript is still pending (PR #17 run 3)');
+{
+  const { decideWatchdogAction, transcriptSupersedesRecovery, TRANSCRIPT_WAIT_CEILING_MS } = require('./utils/dead-air-watchdog');
+  const base = {
+    callCompleted: false, responseInProgress: false, speechActive: false,
+    waitingForTranscription: false, transcriptWaitedMs: 0,
+    isDeadAirRecovery: true, deadAirRecoveries: 0, maxDeadAirRecoveries: 3,
+  };
+  const decide = (o) => decideWatchdogAction({ ...base, ...o });
+
+  // The 4 s "response_cancelled" recovery fires while transcription (median
+  // 3.8 s, up to 4.1 s) is still running: hold for the rest of the ceiling.
+  check('transcript pending 4 s after speech end -> hold, not a re-ask',
+    decide({ waitingForTranscription: true, transcriptWaitedMs: 4000 }),
+    { action: 'hold', reason: 'transcript_pending', holdMs: TRANSCRIPT_WAIT_CEILING_MS - 4000 });
+  check('hold does not count as a recovery (no cap, even at the cap)',
+    decide({ waitingForTranscription: true, transcriptWaitedMs: 4100, deadAirRecoveries: 3 }).action, 'hold');
+  check('the ceiling is well above the 4 s recovery delay', TRANSCRIPT_WAIT_CEILING_MS >= 8000, true);
+
+  // A transcript that never arrives still recovers once the ceiling passes.
+  check('transcript still missing at the ceiling -> fallback, transcript abandoned',
+    decide({ waitingForTranscription: true, transcriptWaitedMs: TRANSCRIPT_WAIT_CEILING_MS }),
+    { action: 'fallback', reason: 'transcript_never_arrived', transcriptAbandoned: true });
+  check('past the ceiling at the cap -> live-agent offer',
+    decide({ waitingForTranscription: true, transcriptWaitedMs: TRANSCRIPT_WAIT_CEILING_MS + 1, deadAirRecoveries: 3 }).action, 'offer_transfer');
+
+  // Behaviour without a pending transcript is unchanged.
+  check('no transcript pending -> fallback as before',
+    decide({}), { action: 'fallback', reason: 'dead_air', transcriptAbandoned: false });
+  check('cap reached, nothing pending -> live-agent offer',
+    decide({ deadAirRecoveries: 3 }).action, 'offer_transfer');
+  check('speech_end watchdog (not a recovery) never offers a transfer',
+    decide({ isDeadAirRecovery: false, deadAirRecoveries: 5 }).action, 'fallback');
+  check('something already speaking -> skip', decide({ responseInProgress: true, waitingForTranscription: true }).action, 'skip');
+  check('caller mid-speech -> skip', decide({ speechActive: true }).action, 'skip');
+  check('call completed -> skip', decide({ callCompleted: true }).action, 'skip');
+
+  // Run 3 as a sequence: three slow transcripts, each answered in 4.1 s.
+  let recoveries = 0;
+  const transfers = [];
+  for (let turn = 0; turn < 3; turn++) {
+    const d = decide({ waitingForTranscription: true, transcriptWaitedMs: 4000, deadAirRecoveries: recoveries });
+    if (d.action === 'fallback') recoveries++;
+    if (d.action === 'offer_transfer') transfers.push(turn);
+  }
+  check('three slow-transcript turns in one call: no recoveries counted, no transfer', [recoveries, transfers], [0, []]);
+
+  // A late transcript that lands while the re-ask is playing cuts it off.
+  check('transcript during the re-ask supersedes it',
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, hasActiveOutput: true, callCompleted: false, inEndedState: false }), true);
+  check('no re-ask in flight -> nothing to cut',
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: false, hasActiveOutput: true, callCompleted: false, inEndedState: false }), false);
+  check('re-ask already finished playing -> nothing to cut',
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, hasActiveOutput: false, callCompleted: false, inEndedState: false }), false);
+  check('never cut the goodbye',
+    transcriptSupersedesRecovery({ recoveryPromptInFlight: true, hasActiveOutput: true, callCompleted: false, inEndedState: true }), false);
+}
+
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
