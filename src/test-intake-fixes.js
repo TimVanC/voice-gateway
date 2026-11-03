@@ -184,5 +184,79 @@ console.log("\n🧪 Test-caller numbers never reach the Sheet; RSE's own number 
   check('no number, no match', isTestCallerNumber(null, env), false);
 }
 
+// Nov 3 2026, Neon call 2593: at the recap the model said "Is there anything
+// else I can help with today?" instead of the read-back, the server accepted
+// it, the caller answered "No, that's it. Thank you." and CONFIRMATION took
+// that as a correction. The call never reached CLOSE and Ava never hung up.
+console.log('\n🧪 Off-script lines at the recap and the close are rejected');
+{
+  const { transcriptMatchesExpected } = require('./utils/transcript-filters');
+  const { CLOSE, CONFIRMATION } = require('./scripts/rse-script');
+  const recap = "Let me read that back. Name: Maria Lopez. Phone: 973-555-0142. Email: maria at example dot com. Address: 14 Elm Street, Montclair, New Jersey. System: furnace. Issue: It's completely out. Availability: Weekday mornings are best for me.. Is everything correct?";
+  check('"anything else?" is not the recap', transcriptMatchesExpected(recap, CLOSE.anything_else), false);
+  check('the recap read back as written passes', transcriptMatchesExpected(recap, recap), true);
+  check('the recap read back with the email and phone reworded passes',
+    transcriptMatchesExpected(recap, 'Let me read that back. Name: Maria Lopez. Phone: 9735550142. Email: maria@example.com. Address: 14 Elm Street, Montclair, New Jersey. System: furnace. Issue: It\'s completely out. Availability: Weekday mornings are best for me. Is everything correct?'), true);
+  check('an improvised wrap-up is not the recap',
+    transcriptMatchesExpected(recap, "You're welcome. If anything else comes up, feel free to reach out. Have a great day!"), false);
+  check('"Goodbye! Take care." is not "anything else?"', transcriptMatchesExpected(CLOSE.anything_else, 'Goodbye! Take care.'), false);
+  check('"anything else?" said as written passes', transcriptMatchesExpected(CLOSE.anything_else, CLOSE.anything_else), true);
+  check('"What needs to be corrected?" said as written passes', transcriptMatchesExpected('What needs to be corrected?', 'What needs to be corrected?'), true);
+  check('"Is everything correct?" said as written passes', transcriptMatchesExpected(CONFIRMATION.verify, CONFIRMATION.verify), true);
+}
+
+console.log('\n🧪 At the recap, "No, that\'s it, thank you" means nothing to add: on to CLOSE');
+{
+  const { CLOSE } = require('./scripts/rse-script');
+  const { isNothingElse } = require('./state/call-state-machine');
+  const atRecap = () => {
+    const sm = createCallStateMachine();
+    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+    sm.updateData('firstName', 'Maria'); sm.updateData('lastName', 'Lopez'); sm.updateData('_nameLocked', true);
+    sm.updateData('phone', '9735550142');
+    sm.updateData('address', '14 Elm Street');
+    sm.transitionTo(STATES.CONFIRMATION);
+    return sm;
+  };
+  for (const t of ["No, that's it. Thank you.", "No, that's all.", "Nope, that's everything, thanks.", "No, we're all set.", "No, I'm good, thank you.", "No, nothing else."]) {
+    const sm = atRecap();
+    const r = sm.processInput(t);
+    check(`"${t}" -> CLOSE, asks anything else`, [r.nextState, r.prompt], [STATES.CLOSE, CLOSE.anything_else]);
+  }
+  for (const t of ["No.", "No, that's not right.", "No, the phone number is wrong.", "No, that's wrong, thanks.", "No, it's 973-555-0199, thanks.", "No, that's it, the address is wrong."]) {
+    const sm = atRecap();
+    const r = sm.processInput(t);
+    check(`"${t}" -> stays at the recap and asks what to fix`, [r.nextState, r.prompt], [STATES.CONFIRMATION, 'What needs to be corrected?']);
+    check(`  isNothingElse("${t}") is false`, isNothingElse(t), false);
+  }
+  {
+    // A correction that names the field is applied and the recap re-read (existing behaviour).
+    const r = atRecap().processInput('Actually, the email is wrong.');
+    check('"Actually, the email is wrong." stays at the recap', [r.nextState, isNothingElse('Actually, the email is wrong.')], [STATES.CONFIRMATION, false]);
+  }
+  check('a plain yes still confirms', atRecap().processInput("Yes, that's all correct.").nextState, STATES.CLOSE);
+  check('isNothingElse ignores empty input', isNothingElse(''), false);
+
+  // Then CLOSE: the same words end the call, and Ava says goodbye.
+  const sm = atRecap();
+  sm.processInput("No, that's it. Thank you.");
+  const r = sm.processInput("No, that's it, thank you.");
+  check('in CLOSE, "No, that\'s it, thank you" -> ENDED with the goodbye', [r.nextState, r.prompt, r.action], [STATES.ENDED, CLOSE.goodbye, 'end_call']);
+}
+
+console.log('\n🧪 At the recap, a goodbye ends the call instead of re-asking "Is everything correct?"');
+{
+  const { CLOSE } = require('./scripts/rse-script');
+  for (const t of ['Thanks, bye.', 'Okay, goodbye.', 'Bye.']) {
+    const sm = createCallStateMachine();
+    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+    sm.updateData('firstName', 'Maria'); sm.updateData('lastName', 'Lopez'); sm.updateData('_nameLocked', true);
+    sm.updateData('phone', '9735550142');
+    sm.transitionTo(STATES.CONFIRMATION);
+    const r = sm.processInput(t);
+    check(`"${t}" -> ENDED with the goodbye`, [r.nextState, sm.getState(), r.prompt, r.action], [STATES.ENDED, STATES.ENDED, CLOSE.goodbye, 'end_call']);
+  }
+}
+
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

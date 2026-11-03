@@ -22,7 +22,7 @@ const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = re
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
-const { isLikelySilenceHallucination, isClearYesOrNo } = require('./utils/transcript-filters');
+const { isLikelySilenceHallucination, isClearYesOrNo, transcriptMatchesExpected } = require('./utils/transcript-filters');
 const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
@@ -527,6 +527,17 @@ wss.on("connection", (twilioWs, req) => {
           }
         }
         
+        // Goodbye fully played out: hang up after the short buffer. Checked
+        // on its own because response.done has usually already reset
+        // responseInProgress by the time the buffer drains, so the branch
+        // below never saw it and the call only ended at the 15 s fail-safe.
+        if (goodbyeCompletedWaitingForBuffer && playBuffer.length === 0) {
+          goodbyeCompletedWaitingForBuffer = false;
+          stateMachine.intakeLog('state_event', { event: 'goodbye_buffer_emptied', hangup_in_ms: endingDisconnectDelayMs });
+          console.log(`📞 Goodbye buffer emptied - disconnecting in ${endingDisconnectDelayMs}ms`);
+          scheduleEndingDisconnect('goodbye_buffer_emptied', endingDisconnectDelayMs);
+        }
+
         // If buffer just emptied and we're waiting for it to finish (audioDoneReceived=true but responseInProgress=true),
         // reset responseInProgress and tts_active now that all audio has been sent
         if (playBuffer.length === 0 && audioDoneReceived && responseInProgress) {
@@ -709,52 +720,11 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   // HANDLE OPENAI EVENTS
   // ============================================================================
-  function hasExpectedDomainKeyword(expected, actual) {
-    const expectedLower = String(expected || "").toLowerCase();
-    const actualLower = String(actual || "").toLowerCase();
-    const keywordGroups = [
-      {
-        trigger: ["phone", "number", "reach"],
-        required: ["phone", "number", "reach", "call"]
-      },
-      {
-        trigger: ["email", "@", " at ", " dot "],
-        required: ["email", "@", " at ", " dot ", "gmail", "yahoo", "outlook"]
-      },
-      {
-        trigger: ["days", "times", "availability", "work best"],
-        required: ["day", "days", "time", "times", "availability", "work", "best"]
-      },
-      {
-        trigger: ["address", "street", "city", "zip"],
-        required: ["address", "street", "road", "avenue", "city", "zip"]
-      }
-    ];
-    for (const group of keywordGroups) {
-      const expectedHasTrigger = group.trigger.some((kw) => expectedLower.includes(kw));
-      if (!expectedHasTrigger) continue;
-      const actualHasKeyword = group.required.some((kw) => actualLower.includes(kw));
-      if (!actualHasKeyword) return false;
-    }
-    return true;
-  }
+  // transcriptMatchesExpected (on-script check) lives in utils/transcript-filters.js
 
-  function transcriptMatchesExpected(expectedTranscriptText, actualTranscriptText) {
-    if (!expectedTranscriptText || !actualTranscriptText) return true;
-    const expected = expectedTranscriptText.toLowerCase();
-    const actual = actualTranscriptText.toLowerCase();
-    const expectedWords = expected
-      .split(/\s+/)
-      .map((w) => w.replace(/[^a-z0-9@]/g, ""))
-      .filter((w) => w.length > 3);
-    if (expectedWords.length === 0) return true;
-    const matchingWords = expectedWords.filter((w) => actual.includes(w));
-    const matchRatio = matchingWords.length / expectedWords.length;
-    const minMatches = expectedWords.length >= 6 ? 3 : 2;
-    const ratioOk = matchRatio >= (expectedWords.length >= 6 ? 0.5 : 0.4);
-    const keywordOk = hasExpectedDomainKeyword(expectedTranscriptText, actualTranscriptText);
-    return ratioOk && matchingWords.length >= minMatches && keywordOk;
-  }
+  // Response the transcript.done guard rejected as off-script. response.done
+  // for it must not count as "prompt delivered" (recap/anything-else flags).
+  let offScriptResponseId = null;
 
   function handleOpenAIEvent(event) {
     lastActivityTime = Date.now();
@@ -917,10 +887,20 @@ wss.on("connection", (twilioWs, req) => {
             const isValidPrefix = normalizedExpected.startsWith(normalizedActual);
 
             const currentState = stateMachine.getState();
-            const skipHallucinationCheck = currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE;
+            // The guard runs in CONFIRMATION and CLOSE too. It used to be
+            // skipped there (the recap is assembled from caller data), but
+            // the match is word-overlap against the prompt actually sent, so
+            // a read-back of the recap passes while a different line fails.
+            // Observed Nov 3 2026 (Neon call 2593): the model answered the
+            // caller's earlier "Yes, that's all correct." with "Is there
+            // anything else I can help with today?" instead of the recap, the
+            // server accepted it, and the call never closed. Only the goodbye
+            // (ENDED) is exempt: whatever is said there, we hang up.
+            const skipHallucinationCheck = currentState === STATES.ENDED || _callCompleted;
             if (!skipHallucinationCheck && audioDoneReceived && !isValidPrefix && !transcriptMatchesExpected(expectedTranscript, actualTranscript) && actualTranscript.length > 20) {
               // Less than 30% match on key words - likely hallucination (fabricated line). Do NOT treat as spoken.
               console.log(`📜 AI said (rejected - not script): "${event.transcript}"`);
+              offScriptResponseId = currentResponseId;
               // Track hallucination count for this prompt
               if (lastHallucinationPrompt === expectedTranscript) {
                 hallucinationCount++;
@@ -1053,8 +1033,12 @@ wss.on("connection", (twilioWs, req) => {
           actualTranscript.trim().length > 0 &&
           !completedPrompt.toLowerCase().trim().startsWith(actualTranscript.toLowerCase().trim()) &&
           !transcriptMatchesExpected(completedPrompt, actualTranscript) &&
-          ![STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED].includes(currentState)
+          currentState !== STATES.ENDED
         );
+        // The transcript.done guard already rejected this response and is
+        // re-sending the prompt: not a delivered recap / anything-else.
+        const wasRejected = Boolean(offScriptResponseId && event.response?.id === offScriptResponseId);
+        if (wasRejected) offScriptResponseId = null;
 
         // Clear response ID when response is done
         if (event.response?.id === currentResponseId) {
@@ -1348,10 +1332,12 @@ wss.on("connection", (twilioWs, req) => {
             console.error(`⚠️ Response complete but NO TRANSCRIPT received! (${audioSeconds.toFixed(1)}s of audio played)`);
             console.error(`   Expected: "${expectedTranscript || 'unknown'}"`);
           }
-          console.log(`✅ Response complete (state: ${currentState})`);
+          console.log(`✅ Response complete (state: ${currentState}${wasRejected ? ', rejected as off-script' : ''})`);
           const generatedSeconds = totalAudioBytesSent / 8000;
           const playedSeconds = playedAudioBytesSent / 8000;
-          if (generatedSeconds > 0 && playedSeconds + 0.15 < generatedSeconds) {
+          // Only a barge-in if the unplayed part is gone from the buffer; at
+          // response.done the buffer is usually still playing out normally.
+          if (generatedSeconds > 0 && playedSeconds + 0.15 < generatedSeconds && playBuffer.length === 0) {
             console.log(`🎤 Caller barged in: played ~${playedSeconds.toFixed(1)}s of ~${generatedSeconds.toFixed(1)}s before interruption`);
           }
           assistantTurnCount++;  // Track for filler spacing
@@ -1369,11 +1355,11 @@ wss.on("connection", (twilioWs, req) => {
           }
           
           // If confirmation prompt was delivered and completed, mark it
-          if (currentState === STATES.CONFIRMATION) {
+          if (currentState === STATES.CONFIRMATION && !wasRejected) {
             stateMachine.updateData('_confirmationDelivered', true);
           }
           // If close state reached, mark it
-          if (currentState === STATES.CLOSE) {
+          if (currentState === STATES.CLOSE && !wasRejected) {
             stateMachine.updateData('_closeStateReached', true);
           }
           
@@ -1381,9 +1367,14 @@ wss.on("connection", (twilioWs, req) => {
           if (currentState === STATES.ENDED) {
             _callCompleted = true;  // Ensure no further prompts can fire
             stateMachine.updateData('_closeStateReached', true);
-            goodbyeCompletedWaitingForBuffer = true;
             stateMachine.intakeLog('state_event', { event: 'goodbye_tts_complete', buffer_seconds: (playBuffer.length / 8000).toFixed(1) });
-            console.log(`📞 Goodbye TTS complete - will disconnect after buffer empties + ${endingDisconnectDelayMs}ms`);
+            if (playBuffer.length === 0) {
+              console.log(`📞 Goodbye TTS complete, buffer empty - disconnecting in ${endingDisconnectDelayMs}ms`);
+              scheduleEndingDisconnect('goodbye_complete_buffer_empty', endingDisconnectDelayMs);
+            } else {
+              goodbyeCompletedWaitingForBuffer = true;  // the audio pump hangs up once it drains
+              console.log(`📞 Goodbye TTS complete - will disconnect after buffer empties + ${endingDisconnectDelayMs}ms`);
+            }
           }
         }
         responseInProgress = false;
@@ -2529,9 +2520,11 @@ STRICT RULES:
 - DO NOT add commentary, thanks, or additional questions
 - DO NOT say "Great, I've got that" or "We'll be in touch" - that comes AFTER confirmation
 - DO NOT continue beyond this prompt
-- After saying the text, STOP and wait for user confirmation
-- If user says YES: Immediately proceed to "Is there anything else I can help with today?"
-- If user says NO: Ask what needs correction
+- After saying the text, STOP and wait for the caller
+- Ignore anything the caller said earlier in this conversation (a "yes" to a
+  previous question is NOT an answer to this one). Never skip ahead to
+  "Is there anything else I can help with today?" and never ask what needs
+  correcting: the next line is always given to you separately.
 
 DO NOT DEVIATE FROM THE SCRIPT.`;
       maxTokens = 1200; // More tokens for long confirmation recap
