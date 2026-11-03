@@ -54,6 +54,7 @@ const { createTts, resolveTtsProvider } = require('./pipeline/tts');
 const { createLlm, resolveLlmProvider } = require('./pipeline/llm');
 const { PromptCache, collectFixedPrompts } = require('./pipeline/prompt-cache');
 const { RoomTone } = require('./pipeline/ambience');
+const { normalizeSpokenNumbers } = require('./pipeline/numbers');
 
 // ============================================================================
 // CONFIGURATION
@@ -64,6 +65,14 @@ const STT_PROVIDER = resolveSttProvider();
 const TTS_PROVIDER = resolveTtsProvider();
 const LLM_PROVIDER = resolveLlmProvider();
 const AMBIENCE = (process.env.AMBIENCE || '').trim().toLowerCase(); // 'office' enables the room-tone bed
+// Second TTS for when the first returns no audio (ElevenLabs answers an
+// exhausted quota with an empty context, which was 30 s of dead air). Off with TTS_FALLBACK=off.
+const TTS_FALLBACK = (() => {
+  const v = (process.env.TTS_FALLBACK || '').trim().toLowerCase();
+  if (v === 'off' || v === 'none') return null;
+  if (v) return v;
+  return process.env.OPENAI_API_KEY ? 'openai' : null;
+})();
 const AMBIENCE_LEVEL_DB = Number(process.env.AMBIENCE_LEVEL_DB || -50);
 
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
@@ -94,6 +103,7 @@ const SAME_PROMPT_LIMIT = 3;           // same prompt this many times in one sta
 const PRICE = {
   deepgramPerMin: Number(process.env.PRICE_DEEPGRAM_PER_MIN || 0.0048),
   openaiSttPerMin: Number(process.env.PRICE_OPENAI_STT_PER_MIN || 0.006),   // gpt-4o-mini-transcribe via Realtime, audio in
+  openaiTtsPerMin: Number(process.env.PRICE_OPENAI_TTS_PER_MIN || 0.015),   // gpt-4o-mini-tts audio out
   elevenlabsPer1kChars: Number(process.env.PRICE_ELEVENLABS_PER_1K || 0.05), // Flash v2.5, API pricing
   cartesiaPer1kChars: Number(process.env.PRICE_CARTESIA_PER_1K || 0.039),
   llmInPerM: Number(process.env.PRICE_LLM_IN_PER_M || (LLM_PROVIDER === 'anthropic' ? 2 : 0.15)),
@@ -104,6 +114,10 @@ const PRICE = {
 // SHARED RESOURCES
 // ============================================================================
 let cacheTts = null;        // one TTS socket for the prompt cache (cache is shared by all calls)
+// Set when the primary TTS could not render most of the script at start-up
+// (quota used up, outage): the cache is then rendered with the fallback voice
+// and every call uses the fallback from the start, so the voice is consistent.
+let processTtsDegraded = false;
 const promptCache = new PromptCache({ tts: null });
 let llm = null;
 try { llm = createLlm(); } catch (err) { console.error(`⚠️ LLM unavailable (${err.message}); free-form replies will use scripted fallbacks`); }
@@ -115,7 +129,19 @@ async function warmPromptCache() {
     promptCache.tts = cacheTts;
     promptCache.diskKey = cacheTts.cacheKey;
     await cacheTts.open();
-    await promptCache.warm(collectFixedPrompts([TRANSFER_OFFER_PROMPT]), { concurrency: Number(process.env.PROMPT_CACHE_CONCURRENCY || 2) });
+    const prompts = collectFixedPrompts([TRANSFER_OFFER_PROMPT]);
+    const concurrency = Number(process.env.PROMPT_CACHE_CONCURRENCY || 2);
+    await promptCache.warm(prompts, { concurrency });
+    if (promptCache.failed > prompts.length / 2 && TTS_FALLBACK) {
+      console.warn(`⚠️ Primary TTS ${cacheTts.name} could not render ${promptCache.failed}/${prompts.length} prompts; this process now speaks with the fallback ${TTS_FALLBACK}`);
+      processTtsDegraded = true;
+      const fb = createTts({ provider: TTS_FALLBACK });
+      await fb.open();
+      promptCache.reset();
+      promptCache.tts = fb;
+      promptCache.diskKey = fb.cacheKey;
+      await promptCache.warm(prompts, { concurrency });
+    }
   } catch (err) {
     console.error(`⚠️ Prompt cache warm-up failed: ${err.message} (prompts will be synthesised live)`);
   }
@@ -137,6 +163,8 @@ app.get('/health', (req, res) => {
     pipeline: {
       stt: STT_PROVIDER, tts: TTS_PROVIDER, llm: llm ? llm.name : 'none',
       ambience: AMBIENCE || 'off',
+      tts_fallback: TTS_FALLBACK || 'off',
+      tts_degraded: processTtsDegraded,
       prompt_cache: promptCache.summary(),
       active_calls: activeCalls.size,
     },
@@ -222,7 +250,9 @@ class CallSession {
     this.deadAirRecoveries = 0;
 
     // Measurements
-    this.stats = { turns: 0, firstAudioMs: [], ttsLiveChars: 0, ttsCachedChars: 0, cacheHits: 0, bargeIns: 0, ignoredBackchannels: 0 };
+    this.stats = { turns: 0, firstAudioMs: [], ttsLiveChars: 0, ttsCachedChars: 0, cacheHits: 0, bargeIns: 0, ignoredBackchannels: 0, ttsFallbacks: 0, fallbackSeconds: 0, liveSeconds: 0 };
+    this.fallbackTts = null;   // used when the primary TTS returns no audio (quota, outage)
+    this.ttsDegraded = processTtsDegraded;  // once the primary has failed, the rest of the call stays on the fallback
 
     twilioWs.on('message', (data) => this.onTwilioMessage(data));
     twilioWs.on('close', (code) => { console.log(`🔌 Twilio disconnected (code: ${code})`); this.cleanup().catch((e) => console.error('❌ Cleanup error:', e)); });
@@ -288,6 +318,9 @@ class CallSession {
 
     this.tts = createTts();
     this.tts.on('error', (err) => console.error(`❌ TTS (${this.tts.name}): ${err.message}`));
+    if (TTS_FALLBACK && TTS_FALLBACK !== TTS_PROVIDER) {
+      try { this.fallbackTts = createTts({ provider: TTS_FALLBACK }); } catch (err) { console.error(`⚠️ TTS fallback unavailable: ${err.message}`); }
+    }
     this.tts.open().then(() => console.log(`🗣️ TTS ready: ${this.tts.name} (${Date.now() - t0} ms)`)).catch((err) => console.error(`❌ TTS failed to open: ${err.message}`));
 
     console.log('👋 Sending greeting');
@@ -367,25 +400,9 @@ class CallSession {
       return rec;
     }
 
-    if (!this.tts) return null;
-    const utt = this.tts.speak();
-    rec.utt = utt;
-    const chunks = [];
-    utt.on('audio', (buf) => {
-      if (this.current !== rec) return;
-      chunks.push(buf);
-      this.playBuffer = Buffer.concat([this.playBuffer, buf]);
-    });
-    utt.on('end', () => {
-      if (this.current !== rec) return;
-      rec.synthDone = true;
-      if (utt.firstAudioAt) console.log(`🗣️ TTS first byte ${utt.firstAudioAt - utt.startedAt} ms, ${(utt.bytes / 8000).toFixed(1)} s for ${utt.chars} chars`);
-      if (typeof text === 'string' && !utt.cancelled && kind === 'prompt') promptCache.remember(text, Buffer.concat(chunks));
-    });
-    utt.on('error', (err) => {
-      console.error(`❌ TTS utterance failed: ${err.message}`);
-      if (this.current === rec) rec.synthDone = true;
-    });
+    const engine = this.ttsDegraded && this.fallbackTts ? this.fallbackTts : this.tts;
+    if (!engine) return null;
+    const utt = this.startLive(rec, engine, typeof text === 'string' ? text : null);
     if (typeof text === 'string') {
       this.stats.ttsLiveChars += text.length;
       this.transcriptRecorder.add('ava', text);
@@ -404,6 +421,41 @@ class CallSession {
       });
     }
     return rec;
+  }
+
+  /** One live utterance on `engine`, wired to `rec`; a string prompt that gets no audio is retried on the fallback. */
+  startLive(rec, engine, text) {
+    const utt = engine.speak();
+    rec.utt = utt;
+    const chunks = [];
+    utt.on('audio', (buf) => {
+      if (this.current !== rec) return;
+      chunks.push(buf);
+      this.playBuffer = Buffer.concat([this.playBuffer, buf]);
+    });
+    utt.on('end', () => {
+      if (this.current !== rec) return;
+      rec.synthDone = true;
+      const seconds = utt.bytes / 8000;
+      if (engine === this.fallbackTts) this.stats.fallbackSeconds += seconds; else this.stats.liveSeconds += seconds;
+      if (utt.firstAudioAt) console.log(`🗣️ TTS ${engine.name} first byte ${utt.firstAudioAt - utt.startedAt} ms, ${seconds.toFixed(1)} s for ${utt.chars} chars`);
+      if (text && !utt.cancelled && rec.kind === 'prompt' && engine === this.tts) promptCache.remember(text, Buffer.concat(chunks));
+    });
+    utt.on('error', (err) => {
+      console.error(`❌ TTS utterance failed (${engine.name}): ${err.message}`);
+      if (this.current !== rec) return;
+      if (text && utt.bytes === 0 && engine !== this.fallbackTts && this.fallbackTts) {
+        this.ttsDegraded = true;
+        this.stats.ttsFallbacks++;
+        console.warn(`🔁 Re-speaking on fallback TTS ${this.fallbackTts.name} (primary stays off for the rest of the call)`);
+        const retry = this.startLive(rec, this.fallbackTts, text);
+        retry.append(text);
+        retry.end();
+        return;
+      }
+      rec.synthDone = true;
+    });
+    return utt;
   }
 
   onPlaybackDone() {
@@ -490,7 +542,7 @@ class CallSession {
   }
 
   onCallerTranscript({ text, durationMs, endedAt }) {
-    const transcript = String(text || '').trim();
+    let transcript = String(text || '').trim();
     this.clearWatchdog();
     this.callerSpeaking = false;
     this.lastCallerStopAt = endedAt || Date.now();
@@ -504,6 +556,15 @@ class CallSession {
     }
     this.transcriptRecorder.add('caller', transcript);
     if (this.callCompleted) { console.log('⏭️ Call completed - ignoring input'); return; }
+
+    // Spoken numbers to digits (Flux writes "nine seven three ..."); the
+    // phone, address and zip parsers in the state machine read digits.
+    const stateNow = this.stateMachine.getState();
+    const normalized = normalizeSpokenNumbers(transcript, { cardinals: stateNow === STATES.PHONE || stateNow === STATES.ADDRESS });
+    if (normalized !== transcript) {
+      console.log(`🔢 Numbers normalised: "${normalized}"`);
+      transcript = normalized;
+    }
 
     // "mm-hm" / "uh-huh" on its own is listening, not an answer, unless Ava
     // just asked a yes/no question (a read-back), where it means yes.
@@ -589,6 +650,7 @@ class CallSession {
       if (/\b(no|nope|nah|not now|don't|do not|keep going|continue|that's okay|thats okay)\b/i.test(lower)) {
         console.log('↩️ Caller declined live-agent transfer offer, continuing intake');
         this.transferOfferPending = false;
+        this.promptCounts = { state: null, counts: new Map() }; // they want to keep going: do not offer again at once
         const resume = sm.getNextPrompt();
         if (resume) this.speakPrompt(resume);
         return;
@@ -889,14 +951,17 @@ class CallSession {
     const min = durationS / 60;
     const s = this.stats;
     const sttCost = STT_PROVIDER === 'deepgram' ? min * PRICE.deepgramPerMin : min * PRICE.openaiSttPerMin;
-    const ttsCost = (s.ttsLiveChars / 1000) * (TTS_PROVIDER === 'cartesia' ? PRICE.cartesiaPer1kChars : PRICE.elevenlabsPer1kChars);
+    const primaryCost = TTS_PROVIDER === 'openai'
+      ? (s.liveSeconds / 60) * PRICE.openaiTtsPerMin
+      : (s.ttsLiveChars / 1000) * (TTS_PROVIDER === 'cartesia' ? PRICE.cartesiaPer1kChars : PRICE.elevenlabsPer1kChars);
+    const ttsCost = primaryCost + (s.fallbackSeconds / 60) * PRICE.openaiTtsPerMin;
     const u = llm ? llm.usage : { input: 0, output: 0, calls: 0 };
     const llmCost = (u.input / 1e6) * PRICE.llmInPerM + (u.output / 1e6) * PRICE.llmOutPerM;
     const total = sttCost + ttsCost + llmCost;
     const sorted = [...s.firstAudioMs].sort((a, b) => a - b);
     const pct = (p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] : null);
     console.log(`⏱️ Turn latency (caller stopped -> first audio): n=${sorted.length} p50=${pct(0.5)} p90=${pct(0.9)} max=${sorted[sorted.length - 1] ?? null} ms | barge-ins ${s.bargeIns}, backchannels ignored ${s.ignoredBackchannels}`);
-    console.log(`💵 Pipeline cost estimate | ${durationS}s | stt ${STT_PROVIDER} $${sttCost.toFixed(4)} | tts ${TTS_PROVIDER} ${s.ttsLiveChars} live chars $${ttsCost.toFixed(4)} (+${s.ttsCachedChars} chars from cache, ${s.cacheHits} hits, ${promptCache.composed} composed) | llm ${u.calls} calls ${u.input}/${u.output} tokens $${llmCost.toFixed(4)} | total $${total.toFixed(4)} = $${min > 0 ? (total / min).toFixed(4) : '0'}/min`);
+    console.log(`💵 Pipeline cost estimate | ${durationS}s | stt ${STT_PROVIDER} $${sttCost.toFixed(4)} | tts ${TTS_PROVIDER} ${s.ttsLiveChars} live chars $${ttsCost.toFixed(4)} (+${s.ttsCachedChars} chars from cache, ${s.cacheHits} hits, ${promptCache.composed} composed${s.ttsFallbacks ? `; fallback ${TTS_FALLBACK} ${s.fallbackSeconds.toFixed(0)} s` : ''}) | llm ${u.calls} calls ${u.input}/${u.output} tokens $${llmCost.toFixed(4)} | total $${total.toFixed(4)} = $${min > 0 ? (total / min).toFixed(4) : '0'}/min`);
   }
 }
 
@@ -911,7 +976,13 @@ wss.on('connection', (twilioWs, req) => {
 server.listen(PORT, () => {
   console.log('🚀 RSE Voice Gateway (pipeline prototype) initializing...');
   console.log(`🎧 STT: ${STT_PROVIDER}${STT_PROVIDER === 'deepgram' ? ` (${process.env.DEEPGRAM_MODEL || 'nova-3'})` : ' (Realtime VAD + gpt-4o-mini-transcribe; set DEEPGRAM_API_KEY for Nova-3)'}`);
-  console.log(`🗣️ TTS: ${TTS_PROVIDER}${TTS_PROVIDER === 'elevenlabs' ? ` (${process.env.ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5'}, voice ${process.env.ELEVENLABS_VOICE_ID})` : ` (${process.env.CARTESIA_MODEL_ID || 'sonic-3'})`}`);
+  console.log(`🔁 TTS fallback: ${TTS_FALLBACK || 'off'}`);
+  const ttsDetail = {
+    elevenlabs: `${process.env.ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5'}, voice ${process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'}`,
+    cartesia: `${process.env.CARTESIA_MODEL_ID || 'sonic-3'}, voice ${process.env.CARTESIA_VOICE_ID}`,
+    openai: `${process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts'}, voice ${process.env.OPENAI_TTS_VOICE || 'sage'}`,
+  }[TTS_PROVIDER];
+  console.log(`🗣️ TTS: ${TTS_PROVIDER} (${ttsDetail})`);
   console.log(`💬 LLM: ${llm ? llm.name : 'none'} (free-form parts only)`);
   console.log(`🎚️ Ambience: ${AMBIENCE === 'office' ? `office room tone at ${AMBIENCE_LEVEL_DB} dBFS` : 'off (AMBIENCE=office to enable)'}`);
   console.log(`⏱️ Barge-in grace ${BARGE_GRACE_MS} ms (${BARGE_GRACE_CONFIRM_MS} ms during the recap), watchdog ${WATCHDOG_MS} ms, re-prompt ${REPROMPT_MS} ms`);

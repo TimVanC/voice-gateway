@@ -141,7 +141,9 @@ ${text}`).digest('hex');
           else this.failed++;
         } catch (err) {
           this.failed++;
-          log(`⚠️ Prompt cache: could not render "${text.slice(0, 40)}...": ${err.message}`);
+          // One line for the first two, then only the summary: a dead provider
+          // fails all 58 the same way.
+          if (this.failed <= 2) log(`⚠️ Prompt cache: could not render "${text.slice(0, 40)}...": ${err.message}`);
         }
       }
     };
@@ -149,6 +151,16 @@ ${text}`).digest('hex');
     this.ready = true;
     log(`🗂️ Prompt cache ready: ${this.fixed.size}/${prompts.length} prompts, ${this.seconds.toFixed(1)} s of audio, ${this.fromDisk} from disk, ${((Date.now() - t0) / 1000).toFixed(1)} s${this.failed ? `, ${this.failed} failed` : ''}`);
     return this;
+  }
+
+  /** Forget everything (used when switching the whole process to another voice). */
+  reset() {
+    this.fixed.clear();
+    this.dynamic.clear();
+    this.ready = false;
+    this.failed = 0;
+    this.seconds = 0;
+    this.fromDisk = 0;
   }
 
   summary() {

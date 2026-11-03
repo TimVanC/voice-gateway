@@ -180,7 +180,17 @@ class DeepgramStt extends BaseStt {
       ws.on('close', (code, reason) => {
         if (this.keepAlive) clearInterval(this.keepAlive);
         this.ready = false;
-        if (!this.closed) this.emit('error', new Error(`Deepgram socket closed (${code} ${String(reason || '')})`));
+        if (this.closed) return;
+        // Unexpected close mid-call: reconnect, buffering audio meanwhile
+        // (sendAudio keeps up to 3 s while not ready), at most once a second.
+        this.emit('error', new Error(`Deepgram socket closed (${code} ${String(reason || '')}); reconnecting`));
+        const wait = Math.max(0, 1000 - (Date.now() - (this.lastReconnectAt || 0)));
+        setTimeout(() => {
+          if (this.closed) return;
+          this.lastReconnectAt = Date.now();
+          this.finalParts = [];
+          this.start().catch((err) => this.emit('error', new Error(`Deepgram reconnect failed: ${err.message}`)));
+        }, wait);
       });
     });
   }

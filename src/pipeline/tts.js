@@ -23,6 +23,7 @@
 
 const { EventEmitter } = require('events');
 const WebSocket = require('ws');
+const { pcm16ToMuLaw } = require('../g711');
 
 class Utterance extends EventEmitter {
   constructor(id) {
@@ -179,7 +180,7 @@ class ElevenLabsTts extends BaseTts {
         if (msg.isFinal) {
           // A context that ends with no audio at all is the free-tier "library
           // voice" case: ElevenLabs sends isFinal and nothing else.
-          if (u.bytes === 0 && !u.cancelled) u._error(new Error(`ElevenLabs returned no audio for voice ${this.voiceId} (a library voice needs a paid plan; use a premade voice id such as Sarah EXAVITQu4vr4xnSDxMaL)`));
+          if (u.bytes === 0 && !u.cancelled) u._error(new Error(`ElevenLabs returned no audio for voice ${this.voiceId} (monthly character quota used up, or a library voice on the free plan)`));
           else u._end();
         }
       });
@@ -268,16 +269,179 @@ class CartesiaTts extends BaseTts {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI (gpt-4o-mini-tts over HTTP, one request per sentence)
+// ---------------------------------------------------------------------------
+//
+// Not a streaming-input socket like the two above, so each appended sentence
+// is its own request, run in order. It returns 24 kHz PCM16, which is low-pass
+// filtered and decimated to 8 kHz here and mu-law encoded. Useful as a
+// fallback that needs no extra account (OPENAI_API_KEY), and its "sage" voice
+// is the one production Ava uses on Realtime, which makes a fair A/B of the
+// pipeline itself.
+
+// 31-tap windowed-sinc low-pass at 3.4 kHz for 24 kHz input (Hamming window).
+const FIR_24K = (() => {
+  const N = 31;
+  const fc = 3400 / 24000;
+  const h = [];
+  let sum = 0;
+  for (let n = 0; n < N; n++) {
+    const m = n - (N - 1) / 2;
+    const sinc = m === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * m) / (Math.PI * m);
+    const w = 0.54 - 0.46 * Math.cos((2 * Math.PI * n) / (N - 1));
+    h.push(sinc * w);
+    sum += sinc * w;
+  }
+  return h.map((x) => x / sum);
+})();
+
+class Downsampler24to8 {
+  constructor() {
+    this.hist = new Float32Array(FIR_24K.length - 1);
+    this.phase = 0;
+    this.carry = Buffer.alloc(0);
+  }
+  /** PCM16LE bytes at 24 kHz in, Int16Array at 8 kHz out. */
+  push(chunk) {
+    const buf = this.carry.length ? Buffer.concat([this.carry, chunk]) : chunk;
+    const n = Math.floor(buf.length / 2);
+    this.carry = Buffer.from(buf.subarray(n * 2));
+    const h = this.hist.length;
+    const x = new Float32Array(h + n);
+    x.set(this.hist, 0);
+    for (let i = 0; i < n; i++) x[h + i] = buf.readInt16LE(i * 2);
+    const out = [];
+    for (let i = h; i < x.length; i++) {
+      if (this.phase === 0) {
+        let acc = 0;
+        for (let k = 0; k < FIR_24K.length; k++) acc += FIR_24K[k] * x[i - k];
+        out.push(acc > 32767 ? 32767 : acc < -32768 ? -32768 : Math.round(acc));
+      }
+      this.phase = (this.phase + 1) % 3;
+    }
+    this.hist = x.slice(x.length - h);
+    return Int16Array.from(out);
+  }
+}
+
+class OpenAiTts extends EventEmitter {
+  constructor({ apiKey, model = 'gpt-4o-mini-tts', voice = 'sage', instructions } = {}) {
+    super();
+    if (!apiKey) throw new Error('OPENAI_API_KEY is not set');
+    this.apiKey = apiKey;
+    this.model = model;
+    this.voice = voice;
+    this.instructions = instructions;
+    this.utterances = new Set();
+    this.seq = 0;
+  }
+
+  get name() { return `openai:${this.model}:${this.voice}`; }
+  get cacheKey() { return `openai:${this.model}:${this.voice}:${this.instructions || ''}`; }
+
+  open() { return Promise.resolve(); }
+
+  speak() {
+    const u = new Utterance(`o${++this.seq}`);
+    u.controllers = [];
+    this.utterances.add(u);
+    u.done.then(() => this.utterances.delete(u));
+    const queue = [];
+    let running = false;
+    let endRequested = false;
+    const pump = async () => {
+      if (running) return;
+      running = true;
+      try {
+        while (queue.length && !u.cancelled) await this._synth(u, queue.shift());
+      } catch (err) {
+        running = false;
+        if (!u.cancelled) u._error(err);
+        return;
+      }
+      running = false;
+      if (u.cancelled) return;
+      if (queue.length) { pump(); return; }
+      if (endRequested) {
+        if (u.bytes === 0) u._error(new Error('OpenAI TTS returned no audio'));
+        else u._end();
+      }
+    };
+    u.append = (text) => {
+      const t = String(text || '');
+      if (!t.trim() || u.cancelled) return;
+      u.chars += t.length;
+      queue.push(t.trim());
+      pump();
+    };
+    u.end = () => { endRequested = true; pump(); };
+    u.cancel = () => {
+      if (u.cancelled) return;
+      u.cancelled = true;
+      for (const c of u.controllers) { try { c.abort(); } catch (_) { /* done */ } }
+      u._end();
+    };
+    return u;
+  }
+
+  async _synth(u, text) {
+    const ctrl = new AbortController();
+    u.controllers.push(ctrl);
+    const body = { model: this.model, voice: this.voice, input: text, response_format: 'pcm' };
+    if (this.instructions) body.instructions = this.instructions;
+    const res = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`OpenAI TTS ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const ds = new Downsampler24to8();
+    for await (const chunk of res.body) {
+      if (u.cancelled) break;
+      const pcm = ds.push(Buffer.from(chunk));
+      if (pcm.length) u._audio(pcm16ToMuLaw(pcm));
+    }
+  }
+
+  async render(text) {
+    const u = this.speak();
+    const chunks = [];
+    u.on('audio', (b) => chunks.push(b));
+    const failed = new Promise((_, reject) => u.on('error', reject));
+    u.append(text);
+    u.end();
+    await Promise.race([u.done, failed]);
+    return Buffer.concat(chunks);
+  }
+
+  close() {
+    for (const u of this.utterances) u.cancel();
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 function resolveTtsProvider(env = process.env) {
   const want = (env.TTS_PROVIDER || '').trim().toLowerCase();
+  if (want === 'openai') return 'openai';
   if (want === 'cartesia' || (!want && !env.ELEVENLABS_API_KEY && env.CARTESIA_API_KEY)) return 'cartesia';
   if (want === 'elevenlabs' || !want) return 'elevenlabs';
-  throw new Error(`Unknown TTS_PROVIDER "${want}" (elevenlabs | cartesia)`);
+  throw new Error(`Unknown TTS_PROVIDER "${want}" (elevenlabs | cartesia | openai)`);
 }
 
+// No default style instructions: with them gpt-4o-mini-tts took ~1.1 s to the
+// first byte instead of ~0.6 s, and spoke no faster.
 function createTts({ provider, env = process.env } = {}) {
   const p = provider || resolveTtsProvider(env);
+  if (p === 'openai') {
+    return new OpenAiTts({
+      apiKey: env.OPENAI_API_KEY,
+      model: env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
+      voice: env.OPENAI_TTS_VOICE || 'sage',
+      instructions: env.OPENAI_TTS_INSTRUCTIONS || undefined,
+    });
+  }
   if (p === 'cartesia') {
     return new CartesiaTts({
       apiKey: env.CARTESIA_API_KEY,
@@ -299,4 +463,4 @@ function createTts({ provider, env = process.env } = {}) {
   });
 }
 
-module.exports = { createTts, resolveTtsProvider, ElevenLabsTts, CartesiaTts };
+module.exports = { createTts, resolveTtsProvider, ElevenLabsTts, CartesiaTts, OpenAiTts, Downsampler24to8 };
