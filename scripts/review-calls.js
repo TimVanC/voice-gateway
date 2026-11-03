@@ -51,7 +51,7 @@ async function main() {
       `SELECT c.id FROM calls c
        WHERE c.started_at > now() - make_interval(days => $1::int)
          AND ($2::boolean OR NOT c.is_test)
-         AND ($3::boolean OR NOT EXISTS (SELECT 1 FROM call_reviews r WHERE r.call_id = c.id))
+         AND ($3::boolean OR NOT EXISTS (SELECT 1 FROM call_reviews r WHERE r.call_id = c.id AND r.verdict <> 'error'))
          AND EXISTS (SELECT 1 FROM transcript_turns t WHERE t.call_id = c.id)
        ORDER BY c.started_at DESC LIMIT $4`,
       [days, includeTests, force, limit]

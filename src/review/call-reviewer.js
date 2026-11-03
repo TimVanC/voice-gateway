@@ -20,7 +20,8 @@ const ENABLED = (process.env.CALL_REVIEW || '').toLowerCase() === 'on';
 const MODEL = process.env.CALL_REVIEW_MODEL || 'claude-sonnet-5-5';
 const CALL_LOG_URL = (process.env.CALL_LOG_URL || 'https://rse-ava-calls.vercel.app').replace(/\/$/, '');
 const MIN_TURNS = 2;            // fewer: nothing happened worth a review
-const MAX_TOKENS = 2500;
+const MAX_TOKENS = 6000;        // the findings run long; a cut-off answer is unparseable
+const OPEN_TICKETS_IN_PROMPT = 60; // existing tickets the model is asked to reuse the keys of
 const SEVERITY_RANK = { high: 3, medium: 2, low: 1 };
 
 const CATEGORIES = [
@@ -68,7 +69,7 @@ function scriptSummary() {
     `6. Email: "${script.CALLER_INFO.email.primary}", optional ("${script.CALLER_INFO.email.optional}")`,
     '7. Details for the branch:',
     ...detailLines,
-    `8. Service address: "${script.ADDRESS.ask}" (street and town; Ava may spell the street or town back once)`,
+    `8. Service address: "${script.ADDRESS.ask}" (street and town; Ava may spell the street or town back once, and may ask once for the state and zip code when the address lacks them: "Could you also provide the state and zip code?")`,
     `9. Availability: "${script.AVAILABILITY.ask}"`,
     `10. Recap: "${script.CONFIRMATION.intro}" then every captured field, then "${script.CONFIRMATION.verify}". A correction is applied and read back again. If a field such as the name is still missing at the recap Ava asks for it once and returns to the recap.`,
     `11. Close, exact: "${script.CLOSE.goodbye}" (out of scope: "${script.CLOSE.out_of_scope_close}"). Then Ava hangs up.`,
@@ -90,8 +91,9 @@ const SYSTEM_PROMPT = [
   '- Do not flag: a single re-ask after an unclear or partial answer; Ava spelling a name or street back once; the caller\'s own fillers, typos or accents in the transcript; speech-to-text variants of a name that the saved row got right; the caller hanging up on their own after the close; a test caller being a bot (review Ava\'s behaviour the same way).',
   '- The saved intake row is the truth about what RSE will see. A field that the caller stated clearly and the row has wrong, missing or garbled is always a finding (wrong_field), even if the transcript shows Ava read it back right.',
   '- Severity: high = wrong or missing data in the saved row, the caller was lost, the safety check or a transfer was mishandled; medium = a question repeated, an improvised line that changed the meaning, a premature end, long dead air; low = wording or flow blemishes with no effect on the outcome.',
-  '- key: a short stable snake_case identifier for the underlying bug, the same for the same bug on any call (describe the bug, never this caller), e.g. name_particle_dropped, safety_backchannel_taken_as_answer, recap_repeated_after_yes.',
+  '- key: a short stable snake_case identifier for the underlying bug, the same for the same bug on any call (describe the bug, never this caller), e.g. name_particle_dropped, safety_backchannel_taken_as_answer, recap_repeated_after_yes. The user message may list existing tickets as "category:key — title": when a finding is the same underlying bug as one of them, use that category and key exactly, so the finding joins that ticket instead of opening a new one.',
   '- title: one line, generic, under 80 characters, describing the bug (not this caller).',
+  '- what_happened and expected: at most two sentences each. Keep the whole answer compact.',
   '- fix_area: where in Ava this most likely lives, e.g. "state machine: NAME", "data cleanup: address", "Realtime: barge-in", "intent classifier", "scripted prompt text".',
   '',
   `Categories: ${CATEGORIES.join(', ')}.`,
@@ -127,8 +129,8 @@ function fmtClock(s) {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
-/** The user message: the saved row, then the numbered transcript. */
-function buildUserPrompt(call, turns) {
+/** The user message: the saved row, the numbered transcript, and the open tickets to reuse. */
+function buildUserPrompt(call, turns, openTickets = []) {
   const row = {
     started_at: call.started_at,
     duration_seconds: call.duration_seconds,
@@ -151,27 +153,64 @@ function buildUserPrompt(call, turns) {
     const s = secondsInto(call, t.at);
     return `${String(t.sequence).padStart(3, ' ')} [${fmtClock(s)}] ${t.speaker === 'ava' ? 'AVA   ' : 'CALLER'}: ${t.text}`;
   });
+  const ticketLines = openTickets.length
+    ? ['', 'EXISTING TICKETS (reuse the category and key when a finding is the same bug):',
+      ...openTickets.map((t) => `- ${t.fingerprint} — ${t.title}`)]
+    : [];
   return [
     'SAVED INTAKE ROW (what RSE sees):',
     JSON.stringify(row, null, 2),
     '',
     `TRANSCRIPT (${turns.length} turns; [mm:ss] is time into the call; the caller lines are speech-to-text of what the caller said):`,
     ...lines,
+    ...ticketLines,
   ].join('\n');
+}
+
+async function loadOpenTickets(pool) {
+  const { rows } = await pool.query(
+    `SELECT fingerprint, title FROM tickets WHERE status <> 'ignored' ORDER BY last_seen_at DESC LIMIT $1`,
+    [OPEN_TICKETS_IN_PROMPT]
+  );
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
 // Asking the model
 // ---------------------------------------------------------------------------
 
+/**
+ * The model's answer as an object. Tolerates a code fence, prose before or
+ * after the JSON, and a trailing comma; the first complete top-level object
+ * is taken (brace matching that ignores braces inside strings).
+ */
 function parseJson(text) {
   let t = String(text || '').trim();
-  const fence = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(t);
+  const fence = /```(?:json)?\s*([\s\S]*?)\s*```/.exec(t);
   if (fence) t = fence[1].trim();
   const start = t.indexOf('{');
-  const end = t.lastIndexOf('}');
-  if (start > 0 || (end >= 0 && end < t.length - 1)) t = t.slice(start, end + 1);
-  return JSON.parse(t);
+  if (start < 0) throw new Error('no JSON object in the answer');
+  let depth = 0, inString = false, escaped = false, end = -1;
+  for (let i = start; i < t.length; i++) {
+    const ch = t[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) throw new Error('the answer was cut off before the JSON object closed');
+  const body = t.slice(start, end + 1);
+  try {
+    return JSON.parse(body);
+  } catch (err) {
+    // A trailing comma before ] or } is the usual slip.
+    return JSON.parse(body.replace(/,\s*([\]}])/g, '$1'));
+  }
 }
 
 function cleanFinding(f) {
@@ -202,6 +241,7 @@ async function askModel(userPrompt) {
     messages: [{ role: 'user', content: userPrompt }],
   });
   const text = (response.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+  if (response.stop_reason === 'max_tokens') throw new Error(`the answer hit the ${MAX_TOKENS}-token limit`);
   const parsed = parseJson(text);
   const findings = (Array.isArray(parsed.findings) ? parsed.findings : []).map(cleanFinding).filter(Boolean);
   return {
@@ -286,7 +326,8 @@ async function reviewCall(callRowId, { force = false, log = console } = {}) {
   if (!getClient()) return { skipped: true, reason: 'no ANTHROPIC_API_KEY' };
   try {
     if (!force) {
-      const existing = await pool.query('SELECT verdict FROM call_reviews WHERE call_id = $1', [callRowId]);
+      // A failed review ('error') is tried again; anything else stands.
+      const existing = await pool.query(`SELECT verdict FROM call_reviews WHERE call_id = $1 AND verdict <> 'error'`, [callRowId]);
       if (existing.rows.length) return { skipped: true, reason: `already reviewed (${existing.rows[0].verdict})` };
     }
     const loaded = await loadCall(pool, callRowId);
@@ -297,7 +338,7 @@ async function reviewCall(callRowId, { force = false, log = console } = {}) {
       return { skipped: true, reason: 'too short' };
     }
 
-    const review = await askModel(buildUserPrompt(call, turns));
+    const review = await askModel(buildUserPrompt(call, turns, await loadOpenTickets(pool)));
     await storeReview(pool, callRowId, review);
     const tickets = await upsertTickets(pool, callRowId, review.findings);
     const opened = tickets.filter((t) => t.inserted).length;
@@ -330,7 +371,7 @@ async function backfill({ days = 7, limit = 50, includeTests = false, log = cons
       `SELECT c.id FROM calls c
        WHERE c.started_at > now() - make_interval(days => $1::int)
          AND ($2::boolean OR NOT c.is_test)
-         AND NOT EXISTS (SELECT 1 FROM call_reviews r WHERE r.call_id = c.id)
+         AND NOT EXISTS (SELECT 1 FROM call_reviews r WHERE r.call_id = c.id AND r.verdict <> 'error')
          AND (SELECT count(*) FROM transcript_turns t WHERE t.call_id = c.id) >= $3
        ORDER BY c.started_at DESC LIMIT $4`,
       [days, includeTests, MIN_TURNS, limit]

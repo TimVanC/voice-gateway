@@ -154,6 +154,10 @@ function buildCallRow(callData, currentState, metadata) {
   const endedAt = metadata.endedAt ? new Date(metadata.endedAt) : new Date();
   const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
   const testByNumber = isOwnNumber(metadata.callerNumber);
+  // A call to an Ava that is not running on Railway (a laptop, the test
+  // harness's spawned copy) is a test by definition, whoever the caller was.
+  const localRun = !metadata.environment || metadata.environment === 'local';
+  const testReason = testByNumber ? 'caller is an RSE number' : localRun ? 'local run' : null;
 
   return {
     call_id: metadata.callId,
@@ -161,8 +165,8 @@ function buildCallRow(callData, currentState, metadata) {
     source: 'server',
     environment: metadata.environment || null,
     sheet_row_number: null,
-    is_test: testByNumber,
-    test_reason: testByNumber ? 'caller is an RSE number' : null,
+    is_test: testByNumber || localRun,
+    test_reason: testReason,
     pre_caller_id_fix: false,
     direction: 'inbound',
     caller_number: toText(metadata.callerNumber),
