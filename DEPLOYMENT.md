@@ -310,7 +310,7 @@ DEEPGRAM_API_KEY=...               # default model Flux (flux-general-en); DEEPG
 TTS_PROVIDER=elevenlabs|cartesia|openai   # default: elevenlabs
 ELEVENLABS_API_KEY=... ELEVENLABS_VOICE_ID=EXAVITQu4vr4xnSDxMaL   # a premade voice; library voices need a paid plan
 ELEVENLABS_MODEL_ID=eleven_flash_v2_5
-CARTESIA_API_KEY=... CARTESIA_VOICE_ID=... CARTESIA_MODEL_ID=sonic-3
+CARTESIA_API_KEY=... CARTESIA_VOICE_ID=... CARTESIA_MODEL_ID=sonic-3.6
 OPENAI_TTS_VOICE=sage              # TTS_PROVIDER=openai / the fallback: gpt-4o-mini-tts
 TTS_FALLBACK=openai                # default when OPENAI_API_KEY is set; "off" disables
 LLM_PROVIDER=anthropic|openai      # default: anthropic when ANTHROPIC_API_KEY is set, else openai (gpt-4o-mini)

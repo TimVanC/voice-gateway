@@ -18,7 +18,7 @@
  *   elevenlabs  /v1/text-to-speech/{voice}/multi-stream-input, output ulaw_8000,
  *               model ELEVENLABS_MODEL_ID (default eleven_flash_v2_5).
  *   cartesia    /tts/websocket, output raw pcm_mulaw 8000, model CARTESIA_MODEL_ID
- *               (default sonic-3), voice CARTESIA_VOICE_ID.
+ *               (default sonic-3.6), voice CARTESIA_VOICE_ID.
  */
 
 const { EventEmitter } = require('events');
@@ -211,7 +211,7 @@ class ElevenLabsTts extends BaseTts {
 // ---------------------------------------------------------------------------
 
 class CartesiaTts extends BaseTts {
-  constructor({ apiKey, voiceId, modelId = 'sonic-3', version = '2025-04-16', speed } = {}) {
+  constructor({ apiKey, voiceId, modelId = 'sonic-3.6', version = '2025-04-16', speed } = {}) {
     super();
     if (!apiKey) throw new Error('CARTESIA_API_KEY is not set');
     if (!voiceId) throw new Error('CARTESIA_VOICE_ID is not set');
@@ -446,7 +446,7 @@ function createTts({ provider, env = process.env } = {}) {
     return new CartesiaTts({
       apiKey: env.CARTESIA_API_KEY,
       voiceId: env.CARTESIA_VOICE_ID,
-      modelId: env.CARTESIA_MODEL_ID || 'sonic-3',
+      modelId: env.CARTESIA_MODEL_ID || 'sonic-3.6',
       version: env.CARTESIA_VERSION || '2025-04-16',
       speed: env.CARTESIA_SPEED ? Number(env.CARTESIA_SPEED) : undefined,
     });
