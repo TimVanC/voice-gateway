@@ -2308,7 +2308,23 @@ function createCallStateMachine() {
         // RECAP IS READ-ONLY: Do not parse transcript for any field updates during confirmation.
         // The agent's recap speech must never be treated as user input (would corrupt first_name with "Tim and last name is...").
         // Only respond to yes/no/correction. If user says "no" or "something's wrong", we ask what to correct and handle in a follow-up.
-        if (isConfirmation(lowerTranscript)) {
+        //
+        // The caller is saying goodbye ("Thanks, bye."): they are done, so
+        // close the call instead of asking "Is everything correct?" again.
+        if (/\b(bye|goodbye|take care)\b/.test(lowerTranscript) && !isCorrection(lowerTranscript)) {
+          console.log(`📋 CONFIRMATION → ENDED: caller said goodbye ("${transcript.substring(0, 40)}")`);
+          intakeLog('state_event', { event: 'confirmation_goodbye', transcript: transcript.substring(0, 60) });
+          return {
+            nextState: transitionTo(STATES.ENDED),
+            prompt: CLOSE.goodbye,
+            action: 'end_call'
+          };
+        }
+        // "No, that's it, thank you." is "nothing to add", not "something is
+        // wrong": the caller heard the recap and is wrapping up (Nov 3 2026,
+        // Neon call 2593: this was read as a correction, Ava asked "What
+        // needs to be corrected?" and the call never closed).
+        if (isConfirmation(lowerTranscript) || isNothingElse(lowerTranscript)) {
           if (!hasRequiredName() && canAskNameBeforeRecap()) {
             console.log(`📋 Name required before close - forcing name intake`);
             data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
@@ -3909,11 +3925,31 @@ function isCorrection(text) {
   return /\b(no|nope|nah|not quite|actually|wait|change|wrong|incorrect|that'?s not|fix|update|correction|mistake)\b/.test(normalized);
 }
 
+/**
+ * "No, that's it, thank you." / "Nope, that's all." / "No, we're all set.":
+ * a "no" that means "nothing to add", the answer to "anything else?". At the
+ * recap it is taken as a confirmation, not a correction. Anything that names
+ * a problem ("no, that's wrong", "no, the phone is 973...", "no, not Elm")
+ * is still a correction. Pure — module scope for direct testing.
+ * @param {string} text - transcript (any case)
+ */
+function isNothingElse(text) {
+  if (!text || typeof text !== 'string') return false;
+  const normalized = text.toLowerCase().replace(/[‘’]/g, "'");
+  if (!/\b(no|nope|nah)\b/.test(normalized)) return false;
+  const closing = /\b(that'?s (it|all|everything)|that'?ll (be|do) (it|all)|that will (be|do) (it|all)|nothing else|all set|we'?re (good|set|done)|i'?m (good|set|done|all set)|all good|thank you|thanks)\b/;
+  if (!closing.test(normalized)) return false;
+  // Naming a field, a value or a problem means a correction is coming.
+  const problem = /\b(wrong|incorrect|not (right|correct|quite)|isn'?t|that'?s not|should be|actually|change|fix|update|correction|mistake|spell|phone|number|email|address|street|town|city|zip|name|availability|morning|afternoon|evening)\b|\d|@/;
+  return !problem.test(normalized);
+}
+
 module.exports = {
   createCallStateMachine,
   STATES,
   INTENT_TYPES,
   detectSafetyEmergency,
   isConfirmation,
-  isCorrection
+  isCorrection,
+  isNothingElse
 };

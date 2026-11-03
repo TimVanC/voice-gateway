@@ -65,4 +65,72 @@ function isClearYesOrNo(transcript) {
   return /\b(yes|yeah|yep|yup|correct|that'?s\s+(right|correct)|all\s+correct|no|nope|nah)\b/.test(normalized);
 }
 
-module.exports = { isLikelySilenceHallucination, MAX_HALLUCINATION_SPEECH_MS, isClearYesOrNo };
+/**
+ * When the scripted prompt names a field (phone, email, availability,
+ * address), the model's line must mention it too. Catches a reply that is
+ * fluent but about the wrong thing.
+ */
+function hasExpectedDomainKeyword(expected, actual) {
+  const expectedLower = String(expected || "").toLowerCase();
+  const actualLower = String(actual || "").toLowerCase();
+  const keywordGroups = [
+    {
+      trigger: ["phone", "number", "reach"],
+      required: ["phone", "number", "reach", "call"]
+    },
+    {
+      trigger: ["email", "@", " at ", " dot "],
+      required: ["email", "@", " at ", " dot ", "gmail", "yahoo", "outlook"]
+    },
+    {
+      trigger: ["days", "times", "availability", "work best"],
+      required: ["day", "days", "time", "times", "availability", "work", "best"]
+    },
+    {
+      trigger: ["address", "street", "city", "zip"],
+      required: ["address", "street", "road", "avenue", "city", "zip"]
+    }
+  ];
+  for (const group of keywordGroups) {
+    const expectedHasTrigger = group.trigger.some((kw) => expectedLower.includes(kw));
+    if (!expectedHasTrigger) continue;
+    const actualHasKeyword = group.required.some((kw) => actualLower.includes(kw));
+    if (!actualHasKeyword) return false;
+  }
+  return true;
+}
+
+/**
+ * On-script check for what the Realtime model actually said against the
+ * state prompt the server told it to say. Word-overlap, not exact match, so
+ * a recap assembled from the caller's own data ("Name: Maria Lopez. Phone:
+ * 973-555-0142. ...") still passes when the model reads it back, while a
+ * line about something else ("Is there anything else I can help with
+ * today?") fails. Both arguments empty/null => true (nothing to compare).
+ * @param {string} expectedTranscriptText - the state prompt sent to the model
+ * @param {string} actualTranscriptText - response.output_audio_transcript
+ */
+function transcriptMatchesExpected(expectedTranscriptText, actualTranscriptText) {
+  if (!expectedTranscriptText || !actualTranscriptText) return true;
+  const expected = expectedTranscriptText.toLowerCase();
+  const actual = actualTranscriptText.toLowerCase();
+  const expectedWords = expected
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z0-9@]/g, ""))
+    .filter((w) => w.length > 3);
+  if (expectedWords.length === 0) return true;
+  const matchingWords = expectedWords.filter((w) => actual.includes(w));
+  const matchRatio = matchingWords.length / expectedWords.length;
+  const minMatches = expectedWords.length >= 6 ? 3 : 2;
+  const ratioOk = matchRatio >= (expectedWords.length >= 6 ? 0.5 : 0.4);
+  const keywordOk = hasExpectedDomainKeyword(expectedTranscriptText, actualTranscriptText);
+  return ratioOk && matchingWords.length >= minMatches && keywordOk;
+}
+
+module.exports = {
+  isLikelySilenceHallucination,
+  MAX_HALLUCINATION_SPEECH_MS,
+  isClearYesOrNo,
+  hasExpectedDomainKeyword,
+  transcriptMatchesExpected,
+};
