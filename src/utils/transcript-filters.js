@@ -127,7 +127,20 @@ function transcriptMatchesExpected(expectedTranscriptText, actualTranscriptText)
   return ratioOk && matchingWords.length >= minMatches && keywordOk;
 }
 
+/**
+ * A turn that is nothing but a greeting ("hello?", "hi, hello?", "hey there",
+ * "hi Ava", "hello, anybody?"): the caller did not hear us, repeat the prompt.
+ * A greeting followed by anything else is an answer, not a repeat request:
+ * "Hi. I'm having HVAC issue." (staging call Nov 3 2026) used to get the whole
+ * greeting again because the old test only looked for the word "hi".
+ */
+function isBareHello(transcript) {
+  const lower = String(transcript || '').toLowerCase();
+  return /^\W*(hello|hey|hi|hiya)(\W+(hello|hey|hi|there|ava|anybody|anyone))*\W*$/.test(lower);
+}
+
 module.exports = {
+  isBareHello,
   isLikelySilenceHallucination,
   MAX_HALLUCINATION_SPEECH_MS,
   isClearYesOrNo,

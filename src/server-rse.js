@@ -22,7 +22,7 @@ const { VAD_CONFIG, BACKCHANNEL_CONFIG, LONG_SPEECH_CONFIG, FILLER_CONFIG } = re
 const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
-const { isLikelySilenceHallucination, isClearYesOrNo, transcriptMatchesExpected } = require('./utils/transcript-filters');
+const { isBareHello, isLikelySilenceHallucination, isClearYesOrNo, transcriptMatchesExpected } = require('./utils/transcript-filters');
 const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
@@ -2314,7 +2314,7 @@ STRICT RULES:
     // "Hello?" / "Anybody there?" / "Repeat" - caller didn't hear us, retry last prompt
     const shortUtterance = transcript.trim().length < 35;
     const explicitRepeat = /\b(repeat|say that again|say again|come again|didn\'?t hear|can\'?t hear|anybody there|anyone there)\b/i.test(lowerTranscript);
-    const repeatRequest = (shortUtterance && /\b(hello\??|hey\??|hi\??)\b/i.test(lowerTranscript)) || explicitRepeat;
+    const repeatRequest = (shortUtterance && isBareHello(lowerTranscript)) || explicitRepeat;
     
     // Check for repeat request - use currentPromptText if available, otherwise get prompt from state machine
     if (repeatRequest && ![STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED].includes(currentState)) {
