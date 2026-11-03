@@ -1128,12 +1128,12 @@ wss.on("connection", (twilioWs, req) => {
             
             if (retryCount >= maxRetries) {
               console.error(`🚨 NO AUDIO GENERATED ${retryCount + 1} TIMES - OFFERING LIVE AGENT TRANSFER`);
-              offerTransferForCommunicationIssue('no_audio_retries_exceeded');
               responseInProgress = false;
               tts_active = false;
               currentPromptText = null;
               expectedTranscript = null;
               actualTranscript = null;
+              offerTransferForCommunicationIssue('no_audio_retries_exceeded');
               return;
             }
             
@@ -1287,13 +1287,13 @@ wss.on("connection", (twilioWs, req) => {
             
             if (retryCount >= maxRetries) {
               console.error(`🚨 INCOMPLETE RESPONSE ${retryCount + 1} TIMES - OFFERING LIVE AGENT TRANSFER`);
-              offerTransferForCommunicationIssue('incomplete_response_retries_exceeded');
               responseInProgress = false;
               tts_active = false;
               audioStreamingStarted = false;
               currentPromptText = null;
               expectedTranscript = null;
               actualTranscript = null;
+              offerTransferForCommunicationIssue('incomplete_response_retries_exceeded');
               return;
             }
             
@@ -2190,6 +2190,14 @@ STRICT RULES:
     transferRequested = true;
     console.log("🔄 Transferring call to real person...");
 
+    // The daily smoke call's scripted caller must never ring the live line:
+    // end the call instead (the smoke check reports the attempted transfer).
+    if (smokeCall.isSmokeCaller(callerNumber)) {
+      console.warn('🧪 Daily smoke call: Ava tried to transfer; ending the call instead of ringing the live line');
+      if (twilioWs?.readyState === WebSocket.OPEN) twilioWs.close();
+      return;
+    }
+
     cancelResponseAudio("transfer", currentResponseId, {
       sendCancelToOpenAI: true,
       stopTwilioPlayback: true
@@ -2250,9 +2258,17 @@ STRICT RULES:
       console.log(`⚠️ Transfer offer already pending (reason=${reason})`);
       return;
     }
-    transferOfferPending = true;
     console.warn(`⚠️ Offering live-agent transfer due to communication issue: ${reason}`);
+    // The response that failed is over; without this the offer was skipped
+    // ("response in progress") yet left pending, and the caller's next "yes"
+    // (to a question they had heard) transferred them to a live agent.
+    responseInProgress = false;
+    tts_active = false;
+    audioStreamingStarted = false;
     sendStatePrompt(TRANSFER_OFFER_PROMPT);
+    // Pending only once the offer was actually sent.
+    transferOfferPending = currentPromptText === TRANSFER_OFFER_PROMPT;
+    if (!transferOfferPending) console.warn('⚠️ Transfer offer could not be spoken; continuing without it');
   }
   
   function doProcessUserInput(transcript) {
@@ -2774,14 +2790,21 @@ Keep it SHORT.`;
     console.log("📋 Call data collected:", JSON.stringify(data, null, 2));
     console.log(`📋 Final state: ${currentState}`);
     
+    // The daily smoke call (src/monitor/smoke-call.js) is a scripted test
+    // caller: it goes to Neon as a test call, never to RSE's Sheet or inbox.
+    const isSmokeCall = smokeCall.isSmokeCaller(callerNumber);
+    if (isSmokeCall) console.log('🧪 Daily smoke call: skipping the Google Sheets row and the summary email');
+
     // Log to Google Sheets (non-blocking) - only if confirmation succeeded
-    logCallIntake(data, currentState, {
-      callId: streamSid || `CALL-${Date.now()}`,
-      callerNumber: callerNumber,
-      wasTransferred: transferRequested
-    }).catch(err => {
-      console.error('❌ Failed to log to Google Sheets:', err.message);
-    });
+    if (!isSmokeCall) {
+      logCallIntake(data, currentState, {
+        callId: streamSid || `CALL-${Date.now()}`,
+        callerNumber: callerNumber,
+        wasTransferred: transferRequested
+      }).catch(err => {
+        console.error('❌ Failed to log to Google Sheets:', err.message);
+      });
+    }
 
     // Save the call and its transcript to Neon (non-blocking, written
     // alongside the Sheet row; saveCall never throws and we do not await it).
@@ -2803,7 +2826,7 @@ Keep it SHORT.`;
     }
 
     // Send post-call email summary (awaited so it completes before cleanup exits)
-    try {
+    if (!isSmokeCall) try {
       await sendCallSummaryEmail(data, currentState, {
         callId: streamSid || `CALL-${Date.now()}`,
         callerNumber: callerNumber,

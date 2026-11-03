@@ -1,6 +1,10 @@
 /**
  * Daily smoke call: proves Ava is answering the phone.
  *
+ * Two modes (SMOKE_CALL_MODE). "full" (the default) runs a whole intake call
+ * with the harness's scripted caller: see src/monitor/smoke-full-call.js.
+ * "greeting" is the original check described below.
+ *
  * Once a day the daily check (src/monitor/daily-check.js, started by
  * src/monitor/schedule.js inside the production server) places a real
  * phone call from a test number to Ava's own number. The outbound leg's
@@ -56,6 +60,7 @@ function muLawToPcm16(mulaw) {
 }
 
 const SCENARIO = 'daily-greeting';
+const FULL_SCENARIO = 'daily-full-call';
 const TEST_REASON = 'daily smoke call';
 const STREAM_PATH = '/smoke/stream';
 const TIME_ZONE = 'America/New_York';
@@ -111,7 +116,30 @@ function smokeCallConfig(env = process.env) {
   if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) problems.push('no TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN');
   if (!env.OPENAI_API_KEY) problems.push('no OPENAI_API_KEY (needed to transcribe what Ava said)');
 
-  return { enabled, from, to, streamUrl, problems };
+  // "full": a whole intake call with the harness's scripted caller
+  // (src/monitor/smoke-full-call.js). "greeting": listen to the greeting only.
+  const mode = String(env.SMOKE_CALL_MODE || 'full').trim().toLowerCase() === 'greeting' ? 'greeting' : 'full';
+  const scenario = String(env.SMOKE_CALL_SCENARIO || 'no-heat').trim() || 'no-heat';
+
+  return { enabled, from, to, streamUrl, problems, mode, scenario };
+}
+
+// ---------------------------------------------------------------------------
+// Keeping smoke calls out of the Sheet and the summary email
+// ---------------------------------------------------------------------------
+
+// While a smoke call is running (and briefly after, since Ava writes her logs
+// once her leg closes), calls from its number are ours: server-rse.js skips
+// the Google Sheets row and the summary email for them. Calls from that
+// number at any other time are logged as usual.
+let ourCall = null; // { ten, until }
+
+function markSmokeCall(from, ms) {
+  ourCall = { ten: lastTen(from), until: Date.now() + ms };
+}
+
+function isSmokeCaller(number) {
+  return Boolean(ourCall && ourCall.ten && lastTen(number) === ourCall.ten && Date.now() < ourCall.until);
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +149,17 @@ function smokeCallConfig(env = process.env) {
 // The one call in flight, if any. Twilio's "start" message must carry the
 // token this call put in its TwiML; anything else on /smoke/stream is closed.
 let pending = null;
+
+/** Claim /smoke/stream for one call; false when another is in flight. */
+function registerSession(session) {
+  if (pending) return false;
+  pending = session;
+  return true;
+}
+
+function releaseSession(session) {
+  if (pending === session) pending = null;
+}
 
 function isSmokeStreamRequest(req) {
   const url = String((req && req.url) || '');
@@ -395,6 +434,7 @@ async function runSmokeCall({ twilioClient = null, config = smokeCallConfig(), l
 </Response>`;
 
   pending = session;
+  markSmokeCall(config.from, 5 * 60_000);
   later(STREAM_START_TIMEOUT_MS, () => { if (!streamStartedAt) finish('no_stream'); });
   result.dialedAt = Date.now();
   log.log(`📞 Smoke call: dialling ${config.to} from ${config.from} (stream ${config.streamUrl})`);
@@ -412,6 +452,7 @@ async function runSmokeCall({ twilioClient = null, config = smokeCallConfig(), l
 
   await finished;
   if (pending === session) pending = null;
+  markSmokeCall(config.from, 2 * 60_000);
 
   // Hang up (idempotent: a call that already ended makes Twilio reply 400/404).
   result.hungUpAt = Date.now();
@@ -505,7 +546,7 @@ function buildReport(result) {
  * keyed by HER stream SID, which we never see). Find it by caller number
  * and time instead, retrying for a while.
  */
-async function findAvaRow(pool, result, waitMs) {
+async function findAvaRow(pool, result, waitMs, scenario = SCENARIO) {
   const digits = lastTen(result.from);
   if (!digits || !result.dialedAt) return null;
   const since = new Date(result.dialedAt - 60_000);
@@ -519,7 +560,7 @@ async function findAvaRow(pool, result, waitMs) {
           AND NOT EXISTS (SELECT 1 FROM test_runs t WHERE t.call_id = calls.id AND t.scenario = $3)
         ORDER BY started_at DESC
         LIMIT 1`,
-      [digits, since, SCENARIO]
+      [digits, since, scenario]
     );
     if (res.rows.length) return res.rows[0];
     if (Date.now() >= deadline) return null;
@@ -676,15 +717,17 @@ async function loadLastResultFromDb({ log = console } = {}) {
   if (!pool || lastResult) return lastResult;
   try {
     const res = await pool.query(
-      'SELECT passed, created_at, report FROM test_runs WHERE scenario = $1 ORDER BY created_at DESC LIMIT 1',
-      [SCENARIO]
+      `SELECT passed, created_at, report FROM test_runs
+        WHERE scenario IN ($1, $2) AND mode = 'phone'
+        ORDER BY created_at DESC LIMIT 1`,
+      [SCENARIO, FULL_SCENARIO]
     );
     if (!res.rows.length || lastResult) return lastResult;
     const row = res.rows[0];
     const report = row.report || {};
-    const summary = row.passed
+    const summary = report.summary || (row.passed
       ? `answered ${seconds((report.timings && report.timings.firstAudioMs) || 0)} after the stream started and said her greeting`
-      : (report.reason || 'failed');
+      : (report.reason || 'failed'));
     lastResult = { at: new Date(report.dialedAt || row.created_at).toISOString(), passed: Boolean(row.passed), summary, source: 'db' };
     log.log(`📞 Daily smoke call: last stored result ${etDay(Date.parse(lastResult.at))} ${etTime(Date.parse(lastResult.at))}: ${lastResult.passed ? 'PASS' : 'FAIL'}`);
   } catch (err) {
@@ -697,16 +740,26 @@ async function loadLastResultFromDb({ log = console } = {}) {
  * The check the daily check runs: places the call (once a day when it
  * passes), stores the result, returns { name, status, detail }.
  */
-async function smokeCheck({ twilioClient = null, log = console } = {}) {
-  const name = 'Ava answers the phone';
+async function smokeCheck({ twilioClient = null, log = console, config = smokeCallConfig() } = {}) {
+  const full = config.mode === 'full';
+  const name = full ? 'Ava handles a full call' : 'Ava answers the phone';
   const today = etDay(Date.now());
   if (lastPass && lastPass.day === today) {
     return { name, status: 'pass', detail: `${lastPass.detail} (from the ${lastPass.time} call; one call a day)` };
   }
   try {
-    const result = await runSmokeCall({ twilioClient, log });
-    const store = await storeSmokeRun(result, { log });
-    const detail = describe(result, store);
+    let result;
+    let detail;
+    if (full) {
+      const fullCall = require('./smoke-full-call');
+      result = await fullCall.runFullSmokeCall({ twilioClient, config, log });
+      const store = await fullCall.storeFullRun(result, { log });
+      detail = fullCall.describeFull(result, store);
+    } else {
+      result = await runSmokeCall({ twilioClient, config, log });
+      const store = await storeSmokeRun(result, { log });
+      detail = describe(result, store);
+    }
     if (result.passed) lastPass = { day: today, time: etTime(result.dialedAt), detail };
     lastResult = { at: new Date(result.dialedAt || Date.now()).toISOString(), passed: result.passed, summary: detail, source: 'live' };
     return { name, status: result.passed ? 'pass' : 'fail', detail };
@@ -718,6 +771,18 @@ async function smokeCheck({ twilioClient = null, log = console } = {}) {
 
 module.exports = {
   SCENARIO,
+  FULL_SCENARIO,
+  RING_TIMEOUT_S,
+  STREAM_START_TIMEOUT_MS,
+  registerSession,
+  releaseSession,
+  markSmokeCall,
+  isSmokeCaller,
+  findAvaRow,
+  escapeXml,
+  lastTen,
+  etDay,
+  etTime,
   STREAM_PATH,
   TEST_REASON,
   smokeCallConfig,

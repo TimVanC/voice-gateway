@@ -107,6 +107,42 @@ for (const [said, first, last] of [['Will Rose', 'Will', 'Rose'], ['Grace Hope',
   check(`"${said}" still accepted`, [d.firstName, d.lastName], [first, last]);
 }
 
+console.log('\n🧪 Safety check: a yes is an emergency, a backchannel is asked again');
+{
+  const { SAFETY } = require('./scripts/rse-script');
+  const at = () => {
+    const sm = createCallStateMachine();
+    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+    sm.transitionTo(STATES.SAFETY_CHECK);
+    return sm;
+  };
+  for (const t of ['Yes.', 'Yeah, there is.', 'Yes, I smell something.', 'I think so.']) {
+    const sm = at();
+    const r = sm.processInput(t);
+    check(`"${t}" -> emergency response`, [r.nextState, r.prompt, sm.getData().isSafetyRisk], [STATES.ENDED, SAFETY.emergency_response, true]);
+  }
+  for (const t of ['Mhm.', 'Okay.', 'Sure, go ahead.', 'Sorry, what was that?']) {
+    const sm = at();
+    const r = sm.processInput(t);
+    check(`"${t}" -> safety question asked again`, [r.nextState, r.prompt], [STATES.SAFETY_CHECK, SAFETY.check]);
+    const r2 = sm.processInput('No, nothing like that.');
+    check(`  then "No, nothing like that" -> name`, r2.nextState, STATES.NAME);
+  }
+  {
+    const sm = at();
+    sm.processInput('Mhm.');
+    check('a second unclear reply moves on (asked once only)', sm.processInput('Okay.').nextState, STATES.NAME);
+  }
+  for (const t of ['No, nothing like that.', 'Nope.', 'Just no heat, nothing dangerous.', "No, it's just not heating."]) {
+    check(`"${t}" -> all clear, name`, at().processInput(t).nextState, STATES.NAME);
+  }
+  const sm = createCallStateMachine();
+  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+  sm.transitionTo(STATES.NAME);
+  const r = sm.processInput('Sure, go ahead.');
+  check('"Sure, go ahead." is not a name', [r.nextState, sm.getData().firstName || null], [STATES.NAME, null]);
+}
+
 console.log('\n🧪 "Thanks" in ADDRESS is not a goodbye');
 {
   const sm = createCallStateMachine();
