@@ -86,6 +86,9 @@ const GOODBYE_BUFFER_MS = 1200;        // after the goodbye has fully played
 const CLOSING_FAILSAFE_MS = 15000;
 const TRANSFER_OFFER_PROMPT = "I'm sorry, it sounds like we're having a communication issue. I can transfer you to a live agent if you'd like. Would you like me to transfer you now?";
 const BACKCHANNEL = /^(mm+-?hm+|mhm+|uh-?huh|yeah|yep|ok(ay)?|right|sure|got it|i see|alright|hm+)[.!?,]*$/i;
+const BARE_HELLO = /^(hi|hello|hey|hiya|good (morning|afternoon|evening))( there| ava)?[.!,?]*$/i;
+const HELLO_WAIT_MS = 2500;            // caller said only "hi": give them a moment to say why they called
+const SAME_PROMPT_LIMIT = 3;           // same prompt this many times in one state = stuck; break out
 
 // Published list prices, for the per-call estimate printed at hang-up. Override in env.
 const PRICE = {
@@ -200,6 +203,9 @@ class CallSession {
     this.bargeTimer = null;
     this.bargedIn = false;
     this.lastCallerStopAt = 0;  // for time-to-first-audio
+    this.greetingPlayed = false;
+    this.helloTimer = null;
+    this.promptCounts = { state: null, counts: new Map() }; // loop detection
     this.pendingInput = null;
     this.lastProcessedTranscript = null;
     this.currentPromptText = null;
@@ -405,6 +411,7 @@ class CallSession {
     this.current = null;
     if (!done) return;
     if (VERBOSE_DEBUG) console.log(`✅ Playback done: "${done.text.slice(0, 40)}..."`);
+    if (done.kind === 'greeting') this.greetingPlayed = true;
     if (done.kind === 'goodbye') {
       this.scheduleDisconnect('goodbye_played', GOODBYE_BUFFER_MS);
       return;
@@ -444,6 +451,7 @@ class CallSession {
     this.callerSpeechStartAt = Date.now();
     this.bargedIn = false;
     this.clearReprompt();
+    if (this.helloTimer) { clearTimeout(this.helloTimer); this.helloTimer = null; }
     if (VERBOSE_DEBUG) console.log('🎤 User speaking...');
     if (!this.isSpeaking()) return;
     if (this.inGreetingGuard() || (this.current && this.current.kind === 'goodbye') || this.callCompleted) return;
@@ -472,19 +480,20 @@ class CallSession {
     this.stopPlayback('barge_in');
   }
 
-  onCallerSpeechStopped({ durationMs }) {
+  onCallerSpeechStopped({ durationMs, endedAt }) {
     this.callerSpeaking = false;
-    this.lastCallerStopAt = Date.now();
+    this.lastCallerStopAt = endedAt || Date.now();
     if (this.bargeTimer) { clearTimeout(this.bargeTimer); this.bargeTimer = null; }
     console.log(`🔇 User stopped speaking (${durationMs}ms)`);
     this.stateMachine.intakeLog('speech_end', { duration_ms: durationMs });
     if (!this.callCompleted && !this.isSpeaking()) this.armWatchdog();
   }
 
-  onCallerTranscript({ text, durationMs }) {
+  onCallerTranscript({ text, durationMs, endedAt }) {
     const transcript = String(text || '').trim();
     this.clearWatchdog();
-    if (this.callerSpeaking) { this.callerSpeaking = false; this.lastCallerStopAt = Date.now(); }
+    this.callerSpeaking = false;
+    this.lastCallerStopAt = endedAt || Date.now();
     if (this.bargeTimer) { clearTimeout(this.bargeTimer); this.bargeTimer = null; }
     console.log(`📝 User said: "${transcript}"`);
     this.stateMachine.intakeLog('transcript', { transcript: transcript.substring(0, 100) });
@@ -495,6 +504,14 @@ class CallSession {
     }
     this.transcriptRecorder.add('caller', transcript);
     if (this.callCompleted) { console.log('⏭️ Call completed - ignoring input'); return; }
+
+    // "mm-hm" / "uh-huh" on its own is listening, not an answer, unless Ava
+    // just asked a yes/no question (a read-back), where it means yes.
+    if (BACKCHANNEL.test(transcript) && !/\b(is that (right|correct)|is everything correct)\?\s*$/i.test(this.currentPromptText || '')) {
+      this.stats.ignoredBackchannels++;
+      console.log(`🤫 Backchannel ignored: "${transcript}"`);
+      return;
+    }
 
     if (this.isSpeaking() && !this.bargedIn) {
       // Ava is still talking and the caller did not interrupt her for real.
@@ -540,6 +557,20 @@ class CallSession {
         if (prompt) this.speakPrompt(`Sorry, I didn't catch that. ${prompt}`);
         return;
       }
+    }
+    // "Hi there." on its own after the greeting has played is the caller's
+    // own hello, not a request to hear the greeting again: wait a moment for
+    // the reason they called, then prompt if nothing comes.
+    if (sm.getState() === STATES.GREETING && this.greetingPlayed && BARE_HELLO.test(transcript.trim())) {
+      console.log(`👋 Caller said "${transcript}" - waiting ${HELLO_WAIT_MS} ms for the rest`);
+      if (this.helloTimer) clearTimeout(this.helloTimer);
+      this.helloTimer = setTimeout(() => {
+        this.helloTimer = null;
+        if (!this.callerSpeaking && !this.isSpeaking() && !this.callCompleted && sm.getState() === STATES.GREETING) {
+          this.speakPrompt(GREETING.silence_fallback);
+        }
+      }, HELLO_WAIT_MS);
+      return;
     }
     this.lastProcessedTranscript = transcript;
 
@@ -648,6 +679,26 @@ class CallSession {
   }
 
   speakPrompt(prompt, opts = {}) {
+    // Loop breaker: the same prompt again and again in one state means the
+    // call is stuck (seen: the recap asking for a name the state machine
+    // never accepts in CONFIRMATION). server-rse.js has the same escape after
+    // repeated failed prompts: skip the recap to CLOSE, elsewhere offer a person.
+    const st = this.stateMachine.getState();
+    if (this.promptCounts.state !== st) this.promptCounts = { state: st, counts: new Map() };
+    const seen = (this.promptCounts.counts.get(prompt) || 0) + 1;
+    this.promptCounts.counts.set(prompt, seen);
+    if (seen > SAME_PROMPT_LIMIT && !opts.loopBreak && prompt !== TRANSFER_OFFER_PROMPT) {
+      console.warn(`🔁 Loop detected: "${prompt.slice(0, 50)}" asked ${seen} times in ${st}`);
+      this.stateMachine.intakeLog('state_event', { event: 'loop_break', state: st, prompt: prompt.substring(0, 80) });
+      if (st === STATES.CONFIRMATION) {
+        this.stateMachine.transitionTo(STATES.CLOSE);
+        return this.speakPrompt(CLOSE.anything_else, { ...opts, loopBreak: true });
+      }
+      if (!this.transferOfferPending && !this.transferRequested) {
+        this.transferOfferPending = true;
+        return this.speakPrompt(TRANSFER_OFFER_PROMPT, { ...opts, loopBreak: true });
+      }
+    }
     this.currentPromptText = prompt;
     console.log(`🗣️ State prompt: "${prompt}"`);
     this.stateMachine.intakeLog('prompt', { prompt: prompt.substring(0, 120) });
@@ -785,7 +836,7 @@ class CallSession {
     this.cleanedUp = true;
     activeCalls.delete(this);
     if (this.paceTimer) clearInterval(this.paceTimer);
-    for (const t of ['watchdogTimer', 'repromptTimer', 'bargeTimer', 'failsafeTimer', 'disconnectTimer']) {
+    for (const t of ['watchdogTimer', 'repromptTimer', 'bargeTimer', 'failsafeTimer', 'disconnectTimer', 'helloTimer']) {
       if (this[t]) { clearTimeout(this[t]); this[t] = null; }
     }
     if (this.stt) this.stt.close();

@@ -4,8 +4,13 @@
  *   const stt = createStt({ provider: 'deepgram' | 'openai' });
  *   stt.on('speech_started', () => ...)
  *   stt.on('interim', ({ text }) => ...)            // partial transcript of the current turn (Deepgram only)
- *   stt.on('speech_stopped', ({ durationMs }) => ...)
- *   stt.on('transcript', ({ text, durationMs }) => ...)  // one final transcript per caller turn
+ *   stt.on('speech_stopped', ({ durationMs, endedAt }) => ...)
+ *   stt.on('transcript', ({ text, durationMs, endedAt }) => ...)  // one final transcript per caller turn
+ *
+ * `endedAt` is the wall-clock time of the caller's last voiced 20 ms frame,
+ * measured here from the audio itself (same for every provider), so
+ * "caller stopped -> Ava's first audio" means the same thing whichever STT
+ * decided the turn was over and however long it took to say so.
  *   stt.on('error', err => ...)
  *   await stt.start();  stt.sendAudio(mulaw160);  stt.close();
  *
@@ -23,8 +28,17 @@
 
 const { EventEmitter } = require('events');
 const WebSocket = require('ws');
+const { muLawToPcm16 } = require('../g711');
 
 const PREROLL_FRAMES = 150; // audio kept while the socket is still connecting (3 s)
+const VOICE_RMS_MIN = 300;  // decoded PCM16 RMS; speech on a phone line is 1000+
+
+function frameRms(mulaw) {
+  const pcm = muLawToPcm16(mulaw);
+  let acc = 0;
+  for (let i = 0; i < pcm.length; i++) acc += pcm[i] * pcm[i];
+  return Math.sqrt(acc / (pcm.length || 1));
+}
 
 class BaseStt extends EventEmitter {
   constructor() {
@@ -36,10 +50,17 @@ class BaseStt extends EventEmitter {
     this.speaking = false;
     this.speechStartAt = 0;
     this.connectedAt = 0;
+    this.noiseFloor = 0;    // slow-moving RMS of non-speech frames
+    this.lastVoiceAt = 0;   // wall clock of the last voiced frame
   }
 
   sendAudio(frame) {
     if (this.closed) return;
+    // Track the caller's last voiced frame from the audio itself.
+    const rms = frameRms(frame);
+    const threshold = Math.max(VOICE_RMS_MIN, this.noiseFloor * 3);
+    if (rms > threshold) this.lastVoiceAt = Date.now();
+    else this.noiseFloor = this.noiseFloor ? this.noiseFloor * 0.98 + rms * 0.02 : rms;
     if (!this.ready) {
       this.preroll.push(frame);
       if (this.preroll.length > PREROLL_FRAMES) this.preroll.shift();
@@ -60,11 +81,18 @@ class BaseStt extends EventEmitter {
     this.emit('speech_started');
   }
 
+  /** When the caller actually stopped: last voiced frame if it is recent, else now. */
+  speechEndedAt() {
+    const now = Date.now();
+    return this.lastVoiceAt && now - this.lastVoiceAt < 10000 ? this.lastVoiceAt : now;
+  }
+
   _speechStopped() {
     if (!this.speaking) return 0;
     this.speaking = false;
-    const durationMs = Date.now() - this.speechStartAt;
-    this.emit('speech_stopped', { durationMs });
+    const endedAt = this.speechEndedAt();
+    const durationMs = Math.max(0, endedAt - this.speechStartAt);
+    this.emit('speech_stopped', { durationMs, endedAt });
     return durationMs;
   }
 
@@ -82,7 +110,7 @@ class BaseStt extends EventEmitter {
 // ---------------------------------------------------------------------------
 
 class DeepgramStt extends BaseStt {
-  constructor({ apiKey, model = 'nova-3', endpointingMs = 300, utteranceEndMs = 1000, eotThreshold = 0.7, eagerEotThreshold = 0.5, eotTimeoutMs = 3000, keyterms = [] } = {}) {
+  constructor({ apiKey, model = 'nova-3', endpointingMs = 800, utteranceEndMs = 1500, eotThreshold = 0.7, eagerEotThreshold = 0.5, eotTimeoutMs = 3000, keyterms = [] } = {}) {
     super();
     if (!apiKey) throw new Error('DEEPGRAM_API_KEY is not set');
     this.apiKey = apiKey;
@@ -170,7 +198,7 @@ class DeepgramStt extends BaseStt {
     const clean = String(text || '').trim();
     const durationMs = this._speechStopped();
     if (!clean) return;
-    this.emit('transcript', { text: clean, durationMs });
+    this.emit('transcript', { text: clean, durationMs, endedAt: this.speechEndedAt() });
   }
 
   _onMessage(msg) {
@@ -306,7 +334,7 @@ class OpenAiStt extends BaseStt {
             break;
           case 'conversation.item.input_audio_transcription.completed': {
             const text = String(ev.transcript || '').trim();
-            if (text) this.emit('transcript', { text, durationMs: this.lastDurationMs });
+            if (text) this.emit('transcript', { text, durationMs: this.lastDurationMs, endedAt: this.speechEndedAt() });
             break;
           }
           case 'response.created':
@@ -352,9 +380,17 @@ function createStt({ provider, env = process.env } = {}) {
   if (p === 'deepgram') {
     return new DeepgramStt({
       apiKey: env.DEEPGRAM_API_KEY,
-      model: env.DEEPGRAM_MODEL || 'nova-3',
-      endpointingMs: Number(env.DEEPGRAM_ENDPOINTING_MS || 300),
-      utteranceEndMs: Number(env.DEEPGRAM_UTTERANCE_END_MS || 1000),
+      // Flux decides end of turn with a turn model instead of a fixed silence
+      // window: on a clean test it ended the turn ~470 ms after the last word,
+      // where Nova-3 needs its endpointing silence (800 ms here) plus
+      // finalisation. DEEPGRAM_MODEL=nova-3 switches back.
+      model: env.DEEPGRAM_MODEL || 'flux-general-en',
+      // 800 ms of silence ends a turn: a caller pauses 300-600 ms between
+      // clauses ("Hi there! ... My furnace stopped working, ... and I've had no
+      // heat"), and at 300 ms each clause came through as its own turn.
+      // Realtime's server VAD in server-rse.js waits 1200 ms.
+      endpointingMs: Number(env.DEEPGRAM_ENDPOINTING_MS || 800),
+      utteranceEndMs: Number(env.DEEPGRAM_UTTERANCE_END_MS || 1500),
       eotThreshold: Number(env.DEEPGRAM_EOT_THRESHOLD || 0.7),
       eagerEotThreshold: Number(env.DEEPGRAM_EAGER_EOT_THRESHOLD || 0.5),
       eotTimeoutMs: Number(env.DEEPGRAM_EOT_TIMEOUT_MS || 3000),
