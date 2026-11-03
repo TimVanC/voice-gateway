@@ -16,7 +16,8 @@
  * is bounded by the model's own latency.
  *
  *   elevenlabs  /v1/text-to-speech/{voice}/multi-stream-input, output ulaw_8000,
- *               model ELEVENLABS_MODEL_ID (default eleven_flash_v2_5).
+ *               model ELEVENLABS_MODEL_ID (default eleven_turbo_v2_5; v4 turbo and v3 are
+ *               refused on this socket: "use the text-to-dialogue websocket endpoint").
  *   cartesia    /tts/websocket, output raw pcm_mulaw 8000, model CARTESIA_MODEL_ID
  *               (default sonic-3), voice CARTESIA_VOICE_ID.
  */
@@ -146,7 +147,7 @@ class BaseTts extends EventEmitter {
 // ---------------------------------------------------------------------------
 
 class ElevenLabsTts extends BaseTts {
-  constructor({ apiKey, voiceId, modelId = 'eleven_flash_v2_5', stability = 0.5, similarityBoost = 0.8, speed = 1.0 } = {}) {
+  constructor({ apiKey, voiceId, modelId = 'eleven_turbo_v2_5', stability = 0.5, similarityBoost = 0.8, speed = 1.0 } = {}) {
     super();
     if (!apiKey) throw new Error('ELEVENLABS_API_KEY is not set');
     if (!voiceId) throw new Error('ELEVENLABS_VOICE_ID is not set');
@@ -453,10 +454,14 @@ function createTts({ provider, env = process.env } = {}) {
   }
   return new ElevenLabsTts({
     apiKey: env.ELEVENLABS_API_KEY,
-    // Sarah (premade, "mature, reassuring, confident") by default: premade
-    // voices work on every plan, library voices need a paid one.
-    voiceId: env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL',
-    modelId: env.ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5',
+    // Ava's voice (Tim, Nov 3 2026: the most human-sounding approachable
+    // female voice): "Eryn - Hyper Real, Conversation, Natural", a library
+    // voice trained from a real conversation, on turbo v2.5 (first audio
+    // byte 150-250 ms over this socket; flash is no faster here, and v4
+    // turbo is not accepted on it). Library voices need a paid plan; on the
+    // free plan use a premade one such as Sarah EXAVITQu4vr4xnSDxMaL.
+    voiceId: env.ELEVENLABS_VOICE_ID || 'kdnRe2koJdOK4Ovxn2DI',
+    modelId: env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5',
     stability: env.ELEVENLABS_STABILITY ? Number(env.ELEVENLABS_STABILITY) : 0.5,
     similarityBoost: env.ELEVENLABS_SIMILARITY ? Number(env.ELEVENLABS_SIMILARITY) : 0.8,
     speed: env.ELEVENLABS_SPEED ? Number(env.ELEVENLABS_SPEED) : 1.0,

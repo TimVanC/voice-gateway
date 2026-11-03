@@ -1089,7 +1089,7 @@ server.listen(PORT, () => {
   console.log(`🎧 STT: ${STT_PROVIDER}${STT_PROVIDER === 'deepgram' ? ` (${process.env.DEEPGRAM_MODEL || 'nova-3'})` : ' (Realtime VAD + gpt-4o-mini-transcribe; set DEEPGRAM_API_KEY for Nova-3)'}`);
   console.log(`🔁 TTS fallback: ${TTS_FALLBACK || 'off'}`);
   const ttsDetail = {
-    elevenlabs: `${process.env.ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5'}, voice ${process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'}`,
+    elevenlabs: `${process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5'}, voice ${process.env.ELEVENLABS_VOICE_ID || 'kdnRe2koJdOK4Ovxn2DI'}`,
     cartesia: `${process.env.CARTESIA_MODEL_ID || 'sonic-3'}, voice ${process.env.CARTESIA_VOICE_ID}`,
     openai: `${process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts'}, voice ${process.env.OPENAI_TTS_VOICE || 'sage'}`,
   }[TTS_PROVIDER];

@@ -391,8 +391,8 @@ Providers are picked by environment variables, every key stays in Railway /
 STT_PROVIDER=deepgram|openai       # default: deepgram when DEEPGRAM_API_KEY is set, else openai
 DEEPGRAM_API_KEY=...               # Nova-3 (DEEPGRAM_MODEL=nova-3) or Flux (DEEPGRAM_MODEL=flux-general-en)
 TTS_PROVIDER=elevenlabs|cartesia   # default: elevenlabs
-ELEVENLABS_API_KEY=... ELEVENLABS_VOICE_ID=EXAVITQu4vr4xnSDxMaL   # a premade voice; library voices need a paid plan
-ELEVENLABS_MODEL_ID=eleven_flash_v2_5
+ELEVENLABS_API_KEY=... ELEVENLABS_VOICE_ID=kdnRe2koJdOK4Ovxn2DI   # Eryn (hyper real), a library voice: needs a paid plan (Creator since Nov 2026); free plan: Sarah EXAVITQu4vr4xnSDxMaL
+ELEVENLABS_MODEL_ID=eleven_turbo_v2_5 # v4 turbo / v3 are not served on the streaming TTS socket the pipeline uses
 CARTESIA_API_KEY=... CARTESIA_VOICE_ID=... CARTESIA_MODEL_ID=sonic-3
 LLM_PROVIDER=anthropic|openai      # default: anthropic when ANTHROPIC_API_KEY is set, else openai (gpt-4o-mini)
 LLM_MODEL=claude-sonnet-5-5
