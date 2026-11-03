@@ -18,6 +18,15 @@ const script = require('../scripts/rse-script');
 // tier has a small monthly character budget and every warm-up would eat it.
 const CACHE_DIR = process.env.PROMPT_CACHE_DIR || path.join(__dirname, '..', '..', 'data', 'prompt-cache');
 
+// The state machine prefixes many prompts with one of these (call-state-machine.js
+// getAcknowledgment). They are cached on their own so "Okay. What's the best
+// phone number to reach you?" can be played as two cached pieces.
+const ACKNOWLEDGEMENTS = [
+  'Got it.', 'Okay.', 'Thanks.', 'Thank you.',
+  "I'm sorry to hear that.", "I'm sorry you're dealing with that.", 'Thanks for letting me know.',
+];
+const ACK_GAP = Buffer.alloc(8000 * 0.12, 0xff); // 120 ms pause between acknowledgement and question
+
 /** Every fixed line Ava can say, deduplicated, in the order the script lists them. */
 function collectFixedPrompts(extra = []) {
   const out = [];
@@ -40,9 +49,10 @@ function collectFixedPrompts(extra = []) {
   add(`${script.SAFETY.all_clear} ${script.CALLER_INFO.name}`);
   add(`Sorry, I didn't catch that. ${script.CALLER_INFO.name}`);
   for (const e of extra) add(e);
+  for (const a of ACKNOWLEDGEMENTS) add(a);
   // Prefix fragments ("Did I get your last name right.", "I have") only make
   // sense with the caller's value appended, so they are synthesised live.
-  return out.filter((p) => !/^(Did I get|Did you say|I have)\b/.test(p) && p.length > 8);
+  return out.filter((p) => !/^(Did I get|Did you say|I have)\b/.test(p) && (p.length > 8 || ACKNOWLEDGEMENTS.includes(p)));
 }
 
 class PromptCache {
@@ -58,18 +68,34 @@ class PromptCache {
     this.seconds = 0;
     this.hits = 0;
     this.misses = 0;
+    this.composed = 0; // hits served as acknowledgement + prompt
   }
 
-  get(text) {
-    const key = String(text || '').trim();
+  _lookup(key) {
     let buf = this.fixed.get(key);
     if (!buf && this.dynamic.has(key)) {
       buf = this.dynamic.get(key);
       this.dynamic.delete(key);
       this.dynamic.set(key, buf); // refresh LRU order
     }
-    if (buf) this.hits++; else this.misses++;
     return buf || null;
+  }
+
+  get(text) {
+    const key = String(text || '').trim();
+    let buf = this._lookup(key);
+    if (!buf) {
+      // "Okay. What's the best phone number to reach you?" = cached ack + cached prompt.
+      for (const ack of ACKNOWLEDGEMENTS) {
+        if (!key.startsWith(`${ack} `)) continue;
+        const a = this._lookup(ack);
+        const rest = this._lookup(key.slice(ack.length + 1).trim());
+        if (a && rest) { buf = Buffer.concat([a, ACK_GAP, rest]); this.composed++; }
+        break;
+      }
+    }
+    if (buf) this.hits++; else this.misses++;
+    return buf;
   }
 
   has(text) { const k = String(text || '').trim(); return this.fixed.has(k) || this.dynamic.has(k); }
@@ -126,8 +152,8 @@ ${text}`).digest('hex');
   }
 
   summary() {
-    return { ready: this.ready, fixed: this.fixed.size, dynamic: this.dynamic.size, seconds: Math.round(this.seconds), from_disk: this.fromDisk, hits: this.hits, misses: this.misses, failed: this.failed };
+    return { ready: this.ready, fixed: this.fixed.size, dynamic: this.dynamic.size, seconds: Math.round(this.seconds), from_disk: this.fromDisk, hits: this.hits, composed: this.composed, misses: this.misses, failed: this.failed };
   }
 }
 
-module.exports = { PromptCache, collectFixedPrompts };
+module.exports = { PromptCache, collectFixedPrompts, ACKNOWLEDGEMENTS };

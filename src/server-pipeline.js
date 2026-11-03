@@ -76,6 +76,7 @@ const FRAME_MS = 20;
 const FRAME_BYTES = 160;
 const SILENCE_FRAME = Buffer.alloc(FRAME_BYTES, 0xff);
 const BARGE_GRACE_MS = Number(process.env.BARGE_GRACE_MS || 900);   // caller must keep talking this long to cut Ava off
+const BARGE_GRACE_CONFIRM_MS = Number(process.env.BARGE_GRACE_CONFIRM_MS || 2000); // the recap has pauses; "yes" during one must not cut it
 const BARGE_WORDS = 3;                 // or say this many words (Deepgram interim) within the grace
 const GREETING_GUARD_MS = 5000;        // no barge-in during the first seconds of the greeting (line noise, "hello?")
 const WATCHDOG_MS = 3000;              // caller stopped, no transcript yet: re-prompt after this
@@ -438,17 +439,19 @@ class CallSession {
     if (!this.isSpeaking()) return;
     if (this.inGreetingGuard() || (this.current && this.current.kind === 'goodbye') || this.callCompleted) return;
     // Grace: a backchannel is over before this fires; a real interruption is not.
+    const grace = this.stateMachine.getState() === STATES.CONFIRMATION ? BARGE_GRACE_CONFIRM_MS : BARGE_GRACE_MS;
     if (this.bargeTimer) clearTimeout(this.bargeTimer);
     this.bargeTimer = setTimeout(() => {
       this.bargeTimer = null;
-      if (this.callerSpeaking && this.isSpeaking()) this.bargeIn('kept talking');
-    }, BARGE_GRACE_MS);
+      if (this.callerSpeaking && this.isSpeaking()) this.bargeIn(`kept talking for ${grace} ms`);
+    }, grace);
   }
 
   onCallerInterim({ text }) {
     if (!this.bargeTimer || !this.isSpeaking()) return;
     const words = text.trim().split(/\s+/).filter(Boolean);
-    if (words.length >= BARGE_WORDS && !BACKCHANNEL.test(text.trim())) this.bargeIn(`"${text.slice(0, 30)}"`);
+    const needed = this.stateMachine.getState() === STATES.CONFIRMATION ? BARGE_WORDS + 3 : BARGE_WORDS;
+    if (words.length >= needed && !BACKCHANNEL.test(text.trim())) this.bargeIn(`"${text.slice(0, 30)}"`);
   }
 
   bargeIn(why) {
@@ -833,7 +836,7 @@ class CallSession {
     const sorted = [...s.firstAudioMs].sort((a, b) => a - b);
     const pct = (p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] : null);
     console.log(`⏱️ Turn latency (caller stopped -> first audio): n=${sorted.length} p50=${pct(0.5)} p90=${pct(0.9)} max=${sorted[sorted.length - 1] ?? null} ms | barge-ins ${s.bargeIns}, backchannels ignored ${s.ignoredBackchannels}`);
-    console.log(`💵 Pipeline cost estimate | ${durationS}s | stt ${STT_PROVIDER} $${sttCost.toFixed(4)} | tts ${TTS_PROVIDER} ${s.ttsLiveChars} live chars $${ttsCost.toFixed(4)} (+${s.ttsCachedChars} chars from cache, ${s.cacheHits} hits) | llm ${u.calls} calls ${u.input}/${u.output} tokens $${llmCost.toFixed(4)} | total $${total.toFixed(4)} = $${min > 0 ? (total / min).toFixed(4) : '0'}/min`);
+    console.log(`💵 Pipeline cost estimate | ${durationS}s | stt ${STT_PROVIDER} $${sttCost.toFixed(4)} | tts ${TTS_PROVIDER} ${s.ttsLiveChars} live chars $${ttsCost.toFixed(4)} (+${s.ttsCachedChars} chars from cache, ${s.cacheHits} hits, ${promptCache.composed} composed) | llm ${u.calls} calls ${u.input}/${u.output} tokens $${llmCost.toFixed(4)} | total $${total.toFixed(4)} = $${min > 0 ? (total / min).toFixed(4) : '0'}/min`);
   }
 }
 
@@ -851,7 +854,7 @@ server.listen(PORT, () => {
   console.log(`🗣️ TTS: ${TTS_PROVIDER}${TTS_PROVIDER === 'elevenlabs' ? ` (${process.env.ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5'}, voice ${process.env.ELEVENLABS_VOICE_ID})` : ` (${process.env.CARTESIA_MODEL_ID || 'sonic-3'})`}`);
   console.log(`💬 LLM: ${llm ? llm.name : 'none'} (free-form parts only)`);
   console.log(`🎚️ Ambience: ${AMBIENCE === 'office' ? `office room tone at ${AMBIENCE_LEVEL_DB} dBFS` : 'off (AMBIENCE=office to enable)'}`);
-  console.log(`⏱️ Barge-in grace ${BARGE_GRACE_MS} ms, watchdog ${WATCHDOG_MS} ms, re-prompt ${REPROMPT_MS} ms`);
+  console.log(`⏱️ Barge-in grace ${BARGE_GRACE_MS} ms (${BARGE_GRACE_CONFIRM_MS} ms during the recap), watchdog ${WATCHDOG_MS} ms, re-prompt ${REPROMPT_MS} ms`);
   console.log(`📍 Webhook: https://<your-domain>/twilio/voice`);
   console.log('🎧 Waiting for calls...');
   warmPromptCache();
