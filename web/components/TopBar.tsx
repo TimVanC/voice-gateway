@@ -12,6 +12,7 @@ export default function TopBar() {
         <nav className="topnav">
           <Link href="/">Calls</Link>
           <Link href="/tests">Test calls</Link>
+          <Link href="/tickets">Tickets</Link>
         </nav>
         <span className="spacer" />
         <form action={logout}>
