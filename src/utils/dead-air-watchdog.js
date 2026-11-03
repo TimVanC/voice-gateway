@@ -24,7 +24,8 @@
  * Pure function, exported for direct testing.
  */
 
-const TRANSCRIPT_WAIT_CEILING_MS = 10000;
+// Overridable (ms) for local harness runs that force the ceiling; production uses the default.
+const TRANSCRIPT_WAIT_CEILING_MS = Number(process.env.TRANSCRIPT_WAIT_CEILING_MS) || 10000;
 
 /**
  * @param {object} s

@@ -203,7 +203,10 @@ function digits(s) {
 
 function fieldMatches(field, expected, actual) {
   if (actual == null || actual === '') return false;
-  if (field === 'intent') return String(actual) === String(expected);
+  // Ava's Neon row carries the Sheet's sub-typed intent ("generator_new" /
+  // "generator_existing" for a "generator" call), so a scenario may expect
+  // either the family or the exact sub-type.
+  if (field === 'intent') return String(actual) === String(expected) || String(actual).startsWith(`${expected}_`);
   if (field === 'phone') {
     const a = digits(actual);
     const e = digits(expected).slice(-10);

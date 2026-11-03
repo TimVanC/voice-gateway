@@ -268,8 +268,10 @@ wss.on("connection", (twilioWs, req) => {
   // TRANSCRIPT_WAIT_CEILING_MS after speech end so a lost one still recovers.
   // ============================================================================
   let watchdogTimer = null;
-  const WATCHDOG_MS = 3000;              // after caller speech
-  const DEAD_AIR_RECOVERY_MS = 4000;     // after a dead response (headroom for late transcripts)
+  // Both overridable (ms) for local harness runs that force the watchdog to
+  // fire before the transcript arrives; production uses the defaults.
+  const WATCHDOG_MS = Number(process.env.WATCHDOG_MS) || 3000;              // after caller speech
+  const DEAD_AIR_RECOVERY_MS = Number(process.env.DEAD_AIR_RECOVERY_MS) || 4000;  // after a dead response (headroom for late transcripts)
   const MAX_DEAD_AIR_RECOVERIES = 3;     // per call; cap reached → offer live agent
   let deadAirRecoveries = 0;
   let recoveryPromptInFlight = false;    // The watchdog's re-ask is being spoken; a transcript landing now cuts it off
