@@ -214,8 +214,48 @@ function createCallStateMachine() {
     if (!data._nameLocked || !data.firstName || !data.lastName) return false;
     const nonName = /\b(not|heat|yes|no|out|working|the|and|all|say|just|hot|cold|warm|cool|any|its)\b/i;
     if (nonName.test(String(data.firstName).trim()) || nonName.test(String(data.lastName).trim())) return false;
+    if (looksLikeNonNamePhrase(data.firstName, data.lastName)) return false;
     if (String(data.firstName).trim().length < 2 || String(data.lastName).trim().length < 2) return false;
     return true;
+  }
+
+  // Asking for a missing name just before the recap: at most this many times
+  // per call, then the recap goes ahead without it (a caller who only gives a
+  // first name must not be asked forever).
+  const MAX_NAME_ASKS_BEFORE_RECAP = 2;
+  function canAskNameBeforeRecap() {
+    return (data._nameAsksBeforeRecap || 0) < MAX_NAME_ASKS_BEFORE_RECAP;
+  }
+
+  /**
+   * The name is missing at AVAILABILITY or CONFIRMATION: go back to NAME, then
+   * return to the recap once it is taken. transitionTo() refuses backward moves,
+   * which used to leave the call in CONFIRMATION asking for a name it then
+   * ignored ("Can I get your first and last name?" / "Is everything correct?"
+   * until the caller hung up), so this moves explicitly.
+   */
+  function askNameBeforeRecap() {
+    data._nameAsksBeforeRecap = (data._nameAsksBeforeRecap || 0) + 1;
+    data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
+    data._returnToConfirmationAfterName = true;
+    clearPendingClarification();
+    const from = currentState;
+    if (from !== STATES.NAME) {
+      previousState = from;
+      currentState = STATES.NAME;
+      console.log(`📍 State: ${from} → ${STATES.NAME} (name missing before the recap)`);
+      intakeLog('state_transition', { from, to: STATES.NAME, reason: 'name_missing_before_recap' });
+    }
+    return { nextState: STATES.NAME, prompt: CALLER_INFO.name, action: 'ask' };
+  }
+
+  /** Where to go once NAME has locked the name: the recap if we came from it, else PHONE. */
+  function nameDoneNext(phonePrompt) {
+    if (data._returnToConfirmationAfterName) {
+      data._returnToConfirmationAfterName = false;
+      return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
+    }
+    return { nextState: transitionTo(STATES.PHONE), prompt: phonePrompt, action: 'ask' };
   }
 
   /**
@@ -908,7 +948,7 @@ function createCallStateMachine() {
       case STATES.NAME:
         // If name already confirmed/locked, do not parse again (immutable)
         if (data._nameLocked) {
-          return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+          return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
         }
         // Immediate confirmation: we asked "Did I get your last name right. X Y Z." (Phase 2)
         // THIS IS A BLOCKING STATE - do not advance until confirmation equals YES
@@ -925,7 +965,7 @@ function createCallStateMachine() {
             data._nameLocked = true;  // CSV/recap read only this; ignore future transcript for name
             console.log(`✅ Name CONFIRMED (locked): ${data.firstName} ${data.lastName} (confidence: ${data.name_confidence}%)`);
             clearPendingClarification();
-            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+            return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
           }
           
           // CASE 1.5: User is providing a clarification about the spelling (not spelling new letters)
@@ -981,7 +1021,7 @@ function createCallStateMachine() {
             data._nameLocked = true;
             clearPendingClarification();
             console.log(`✅ Name CONFIRMED from spelling (letter-only, locked): ${data.firstName} ${data.lastName}`);
-            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+            return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
           }
           if (spellingAttempts >= MAX_SPELLING_ATTEMPTS) {
             return forceLockNameAndAdvance((strictSpelling && strictSpelling.lastName) || null, transcript);
@@ -1036,7 +1076,15 @@ function createCallStateMachine() {
             data._nameComplete = true;
             data._nameLocked = true;
             console.log(`✅ Name from spelling letter-only (locked): ${data.firstName} ${data.lastName}`);
-            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+            return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
+          }
+          // Ordinary words are not a name: "Nothing like that" (the tail of the
+          // safety answer) was stored as "Nothing That" by the spelled-name
+          // path below. Checked after letter-by-letter spelling, before the rest.
+          if (looksLikeNonNamePhrase(firstName, lastName)) {
+            console.log(`⚠️  Not a name (common words): "${transcript}"`);
+            intakeLog('field_parse', { field: 'name', parsed_value: null, raw: transcript.substring(0, 60), reason: 'non_name_words' });
+            return { nextState: currentState, prompt: CALLER_INFO.name, action: 'ask' };
           }
           // 0 letter tokens but transcript looks like misheard spelling — enter spelling mode (silent). One user-facing retry only.
           if (strictFirst === null && looksLikeMisheardSpelling(transcript)) {
@@ -1073,7 +1121,7 @@ function createCallStateMachine() {
             data._nameComplete = true;
             data._nameLocked = true;  // Lock immediately; ignore all future tokens for name
             console.log(`✅ Name from spelling (locked): ${data.firstName} ${data.lastName} - bypassing confidence`);
-            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+            return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
           }
           
           console.log(`📋 Name extraction: firstName="${firstName}", lastName="${lastName}", raw="${transcript.substring(0, 50)}"`);
@@ -1161,11 +1209,7 @@ function createCallStateMachine() {
               data.lastName = cleanFieldValue(lastNameParts.slice(1).join(' ') || '') || (lastNameParts.slice(1).join(' ') || '');
               data.name_confidence = 50;
               data._nameLocked = true;  // Persist only this; will not overwrite from transcript
-              return {
-                nextState: transitionTo(STATES.PHONE),
-                prompt: CALLER_INFO.phone,
-                action: 'ask'
-              };
+              return nameDoneNext(CALLER_INFO.phone);
             }
             // If lastName has a prefix, it's likely part of a multi-part name - ask to repeat
             if (lastNameHasPrefix) {
@@ -1194,7 +1238,7 @@ function createCallStateMachine() {
             data._nameComplete = true;
             data._nameLocked = true;  // Single source of truth; CSV/recap read only this
             console.log(`✅ Name stored (locked): ${data.firstName} ${data.lastName} (confidence: ${nameConfidencePercent}%)`);
-            return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+            return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
           }
           // Below threshold: ask user to spell (first ask). Max 2 attempts then force lock.
           data.name_confidence = nameConfidencePercent;
@@ -1923,8 +1967,10 @@ function createCallStateMachine() {
           
           // First check if this actually looks like an address
           if (!looksLikeAddress(transcript)) {
-            // If user says goodbye or thanks, transition to close
-            if (/\b(bye|goodbye|good one|take care|thanks|thank you)\b/i.test(lowerTranscript)) {
+            // If user says goodbye, transition to close. "Thanks" alone is not a
+            // goodbye: "Thanks. I appreciate it." (to "I'm sorry to hear that")
+            // used to end the call before the address was given.
+            if (/\b(bye|goodbye|take care)\b/i.test(lowerTranscript)) {
               console.log(`📋 User indicating end of call in ADDRESS state`);
               return {
                 nextState: transitionTo(STATES.CLOSE),
@@ -2110,10 +2156,10 @@ function createCallStateMachine() {
             data._availabilityComplete = true;
             data._availabilityLocked = true;
             clearPendingClarification();
-            if (!hasRequiredName()) {
+            if (!hasRequiredName() && canAskNameBeforeRecap()) {
               console.log(`📋 Name required before confirmation - forcing name intake`);
               data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
-              return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+              return askNameBeforeRecap();
             }
             return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
           }
@@ -2127,10 +2173,10 @@ function createCallStateMachine() {
           data._availabilityComplete = true;
           data._availabilityLocked = true;
           clearPendingClarification();
-          if (!hasRequiredName()) {
+          if (!hasRequiredName() && canAskNameBeforeRecap()) {
             console.log(`📋 Name required before confirmation - forcing name intake`);
             data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
-            return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+            return askNameBeforeRecap();
           }
           return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
         }
@@ -2141,10 +2187,10 @@ function createCallStateMachine() {
           data._availabilityLocked = true;
           data.availability_confidence = 100;
           console.log(`📋 Availability (urgency): ${data.availability} - advancing`);
-          if (!hasRequiredName()) {
+          if (!hasRequiredName() && canAskNameBeforeRecap()) {
             console.log(`📋 Name required before confirmation - forcing name intake`);
             data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
-            return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+            return askNameBeforeRecap();
           }
           return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
         }
@@ -2192,10 +2238,10 @@ function createCallStateMachine() {
           data.availability = 'Available anytime';
           data.availability_confidence = 100;
           data._availabilityComplete = true;
-          if (!hasRequiredName()) {
+          if (!hasRequiredName() && canAskNameBeforeRecap()) {
             console.log(`📋 Name required before confirmation - forcing name intake`);
             data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
-            return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+            return askNameBeforeRecap();
           }
           return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
         }
@@ -2213,10 +2259,10 @@ function createCallStateMachine() {
           if (availabilityConfidencePercent >= CONFIDENCE_THRESHOLD) {
             data.availability = extracted;
             data._availabilityComplete = true;
-            if (!hasRequiredName()) {
+            if (!hasRequiredName() && canAskNameBeforeRecap()) {
               console.log(`📋 Name required before confirmation - forcing name intake`);
               data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
-              return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+              return askNameBeforeRecap();
             }
             return { nextState: transitionTo(STATES.CONFIRMATION), prompt: getConfirmationPrompt(), action: 'confirm' };
           }
@@ -2254,10 +2300,10 @@ function createCallStateMachine() {
         // The agent's recap speech must never be treated as user input (would corrupt first_name with "Tim and last name is...").
         // Only respond to yes/no/correction. If user says "no" or "something's wrong", we ask what to correct and handle in a follow-up.
         if (isConfirmation(lowerTranscript)) {
-          if (!hasRequiredName()) {
+          if (!hasRequiredName() && canAskNameBeforeRecap()) {
             console.log(`📋 Name required before close - forcing name intake`);
             data.firstName = null; data.lastName = null; data._nameLocked = false; data._nameComplete = false;
-            return { nextState: transitionTo(STATES.NAME), prompt: CALLER_INFO.name, action: 'ask' };
+            return askNameBeforeRecap();
           }
           return {
             nextState: transitionTo(STATES.CLOSE),
@@ -2466,6 +2512,25 @@ function createCallStateMachine() {
   /**
    * Check if text looks like an actual name (not a phrase/question/number)
    */
+  // Everyday words that are never part of a person's name. Kept clear of words
+  // that are also names or name particles (Will, Hope, Rose, de, la, van, da...).
+  const NON_NAME_WORDS = new Set([
+    'nothing', 'anything', 'something', 'everything', 'none', 'like', 'that', 'this', 'these', 'those',
+    'there', 'here', 'what', 'which', 'just', 'really', 'actually', 'appreciate', 'thanks', 'thank',
+    'please', 'okay', 'ok', 'yes', 'yeah', 'yep', 'no', 'nope', 'nah', 'not', 'sorry', 'smell', 'smoke',
+    'sparks', 'gas', 'fine', 'sure', 'it', 'its', "it's", 'is', 'was', 'are', 'be', 'been', 'have', 'has',
+    'had', 'do', 'does', 'did', 'you', 'your', 'me', 'my', 'we', 'our', 'of', 'to', 'for', 'with', 'but',
+    'or', 'all', 'any', 'correct', 'wrong', 'um', 'uh', 'hmm', 'hello', 'bye', 'goodbye', 'name', 'number',
+    'phone', 'email', 'address', 'calling', 'because', 'about'
+  ]);
+  /** The first word, or most of the words, are everyday words: a phrase, not a name. */
+  function looksLikeNonNamePhrase(...parts) {
+    const words = parts.join(' ').toLowerCase().split(/[^a-z']+/).filter(Boolean);
+    if (words.length === 0) return false;
+    const common = words.filter(w => NON_NAME_WORDS.has(w)).length;
+    return NON_NAME_WORDS.has(words[0]) || common * 2 > words.length;
+  }
+
   function looksLikeName(text) {
     if (!text || text.length < 2) return false;
     
@@ -2908,7 +2973,7 @@ function createCallStateMachine() {
     console.log(`✅ Name force-locked (spelling cap): ${data.firstName} ${data.lastName}`);
     intakeLog('retry_cap_reached', { field: 'last_name', spelling_attempt_count: pendingClarification.spellingAttempts || 0 });
     intakeLog('field_locked', { field: 'name', value: `${data.firstName} ${data.lastName}` });
-    return { nextState: transitionTo(STATES.PHONE), prompt: withAcknowledgment(CALLER_INFO.phone), action: 'ask' };
+    return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
   }
   
   function getLowestConfidence(...confidences) {
@@ -2998,7 +3063,12 @@ function createCallStateMachine() {
       /^(okay thanks|ok thanks|alright thanks|all right thanks)$/,
       /^(appreciate it|got it|sounds good|perfect|great|awesome)$/
     ];
-    return ackPatterns.some((p) => p.test(cleaned));
+    if (ackPatterns.some((p) => p.test(cleaned))) return true;
+    // Combinations of thanks words: "thanks i appreciate it", "thank you so much"
+    const words = cleaned.split(' ');
+    const ACK_WORDS = new Set(['thanks', 'thank', 'you', 'thx', 'so', 'much', 'very', 'i', 'really', 'appreciate',
+      'it', 'that', 'okay', 'ok', 'alright', 'oh']);
+    return words.length <= 8 && words.every(w => ACK_WORDS.has(w)) && words.some(w => /^(thanks|thank|thx|appreciate)$/.test(w));
   }
   
   function extractEmail(text) {

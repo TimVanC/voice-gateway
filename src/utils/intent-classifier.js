@@ -19,6 +19,14 @@ const AC_VARIANTS = 'ac|a\\/c|air condition\\w*|central air';
 // so "what does your maintenance membership plan cost" is membership, not an
 // installation estimate: price/cost/quote words are how callers ask about
 // plans too.
+// Softer "I want one" phrasing, and "installed"/"installing" (the install
+// pattern is the bare word, so "...generator installed" missed it). These also
+// occur in service calls ("the furnace you installed won't start", "looking to
+// get my generator serviced"), so they count only without service words.
+const SOFT_INSTALL_PATTERN = /\b(installed|installing|put in|(?:like|love|want|wanting|looking|hoping|planning) to (?:get|have|buy|add)|thinking (?:about|of) (?:getting|adding|buying))\b/;
+const SERVICE_WORDS_PATTERN = /\b(servic\w*|repair\w*|fix\w*|broke\w*|not working|isn'?t working|won'?t|wont|stopped|leak\w*|noise|issue|problem|maintenance|tune|check\w*|look(?:ed)? at)\b/;
+const softInstall = (text) => SOFT_INSTALL_PATTERN.test(text) && !SERVICE_WORDS_PATTERN.test(text);
+
 const MEMBERSHIP_PATTERN = /\b(membership|member|maintenance plan|maintenance membership|home comfort plan|service plan|annual coverage|monthly coverage|tune up plan|tune-up plan)\b/;
 
 function classifyIntent(text) {
@@ -86,7 +94,8 @@ function classifyIntent(text) {
   // Generator keywords - check for NEW vs SERVICE
   if (hasGeneratorLikeToken || /\b(generac|cummins|backup power|standby|whole house power)\b/.test(text)) {
     // Check if it's for a NEW generator (installation, not service)
-    const isNewGenerator = /\b(new|install|installation|buy|purchase|looking for|interested in|want to get|quote|estimate|price|cost)\b/.test(text);
+    const isNewGenerator = /\b(new|install|installation|buy|purchase|looking for|interested in|want to get|quote|estimate|price|cost)\b/.test(text) ||
+      softInstall(text);
     if (isNewGenerator) {
       // Return with a flag that we can use to skip safety check
       // We'll handle this by returning a special object
@@ -99,7 +108,8 @@ function classifyIntent(text) {
   // "new", "install", "replace" indicate installation, not service.
   // Membership phrasing is excluded: "cost"/"price" of a plan is a membership
   // question, handled below (after the service checks, as before).
-  if (/\b(new|install|installation|replace|replacement|upgrade|estimate|quote|cost|price|proposal)\b/.test(text) &&
+  if ((/\b(new|install|installation|replace|replacement|upgrade|estimate|quote|cost|price|proposal)\b/.test(text) ||
+       /\b(installed|installing)\b/.test(text) && !SERVICE_WORDS_PATTERN.test(text)) &&
       !MEMBERSHIP_PATTERN.test(text)) {
     console.log('📋 Detected installation/upgrade keywords');
     return INTENT_TYPES.HVAC_INSTALLATION;
