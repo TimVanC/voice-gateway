@@ -30,3 +30,6 @@ build/
 # Secrets
 secrets/
 
+
+# Rendered TTS prompts (src/pipeline/prompt-cache.js)
+data/prompt-cache/

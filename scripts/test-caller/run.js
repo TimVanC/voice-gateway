@@ -11,8 +11,11 @@
  *   --scenario <name>      file in scenarios/<name>.json (required)
  *   --mode local|phone     default local
  *   --host <ws url>        Ava's /stream (local mode), default ws://localhost:$PORT/stream
- *   --spawn                local mode: start `node src/server-rse.js` on a free port,
- *                          capture its log, stop it afterwards
+ *   --spawn                local mode: start Ava (`node src/server-rse.js`) on a free port,
+ *                          capture her log, stop her afterwards
+ *   --server <path>        with --spawn: a different entry point, e.g. src/server-pipeline.js
+ *   --server-env K=V       with --spawn: extra environment for the spawned server (repeatable),
+ *                          e.g. --server-env TTS_PROVIDER=cartesia
  *   --keep-side-effects    with --spawn: keep Sheets/email/Twilio variables in Ava's env
  *                          (by default they are stripped so test calls stay out of the Sheet)
  *   --server-log <path>    read Ava's intake from this log file (when Ava runs elsewhere)
@@ -45,7 +48,7 @@ const REPO = path.resolve(HERE, '..', '..');
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const args = { mode: 'local', spawn: false, keepSideEffects: false, quiet: false, out: path.join(HERE, 'out') };
+  const args = { mode: 'local', spawn: false, keepSideEffects: false, quiet: false, out: path.join(HERE, 'out'), server: 'src/server-rse.js', serverEnv: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -53,6 +56,13 @@ function parseArgs(argv) {
     else if (a === '--mode') args.mode = next();
     else if (a === '--host') args.host = next();
     else if (a === '--spawn') args.spawn = true;
+    else if (a === '--server') args.server = next();
+    else if (a === '--server-env') {
+      const kv = next();
+      const eq = kv.indexOf('=');
+      if (eq < 1) throw new Error(`--server-env expects KEY=VALUE, got ${kv}`);
+      args.serverEnv[kv.slice(0, eq)] = kv.slice(eq + 1);
+    }
     else if (a === '--keep-side-effects') args.keepSideEffects = true;
     else if (a === '--server-log') args.serverLog = next();
     else if (a === '--out') args.out = next();
@@ -102,9 +112,9 @@ function freePort() {
   });
 }
 
-async function spawnAva({ logPath, keepSideEffects }) {
+async function spawnAva({ logPath, keepSideEffects, server = 'src/server-rse.js', serverEnv = {} }) {
   const port = await freePort();
-  const env = { ...process.env, PORT: String(port) };
+  const env = { ...process.env, ...serverEnv, PORT: String(port) };
   delete env.NODE_ENV; // local URL config, never the production one
   if (!keepSideEffects) for (const k of SIDE_EFFECT_VARS) delete env[k];
   const log = fs.openSync(logPath, 'a');
@@ -112,7 +122,9 @@ async function spawnAva({ logPath, keepSideEffects }) {
   // the shim is preloaded into her process too (no change to her code; Linux
   // ignores it). TEST_CALLER_NO_TIMER_SHIM=1 runs her untouched.
   const nodeArgs = process.env.TEST_CALLER_NO_TIMER_SHIM ? [] : ['--require', path.join(HERE, 'precise-timers.js')];
-  const child = spawn(process.execPath, [...nodeArgs, path.join(REPO, 'src', 'server-rse.js')], {
+  const serverPath = path.isAbsolute(server) ? server : path.join(REPO, server);
+  if (!fs.existsSync(serverPath)) throw new Error(`--server ${server} not found`);
+  const child = spawn(process.execPath, [...nodeArgs, serverPath], {
     cwd: REPO,
     env,
     stdio: ['ignore', log, log],
@@ -371,10 +383,10 @@ async function main() {
   if (args.mode === 'local') {
     if (args.spawn) {
       serverLogPath = path.join(outDir, 'server.log');
-      ava = await spawnAva({ logPath: serverLogPath, keepSideEffects: args.keepSideEffects });
+      ava = await spawnAva({ logPath: serverLogPath, keepSideEffects: args.keepSideEffects, server: args.server, serverEnv: args.serverEnv });
       cleanupOnExit.push(() => ava.child.kill());
       legUrl = ava.url;
-      log(`Ava started on port ${ava.port}${args.keepSideEffects ? '' : ' (Sheets, email and Twilio variables stripped)'}`);
+      log(`Ava (${args.server}) started on port ${ava.port}${args.keepSideEffects ? '' : ' (Sheets, email and Twilio variables stripped)'}`);
     } else {
       legUrl = args.host || `ws://localhost:${process.env.PORT || 8080}`;
       if (!/\/stream$/.test(legUrl)) legUrl = legUrl.replace(/\/+$/, '') + '/stream';
@@ -475,6 +487,8 @@ async function main() {
   const summary = {
     scenario: scenario.name,
     mode: args.mode,
+    server: args.spawn ? args.server : (args.host || 'external'),
+    serverEnv: args.serverEnv,
     startedAt: new Date(call.t0).toISOString(),
     callId,
     callSid: leg.callSid,

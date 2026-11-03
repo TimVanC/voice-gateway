@@ -50,7 +50,11 @@ node scripts/test-caller/run.js --scenario no-heat --spawn
 
 `--spawn` strips the Google Sheets, SendGrid and Twilio variables from Ava's
 environment so test calls never land in the real Sheet or email the office
-(`--keep-side-effects` keeps them). Ava's `/twilio/voice` webhook is not
+(`--keep-side-effects` keeps them). `--server src/server-pipeline.js` spawns
+the pipeline prototype instead of `server-rse.js`, and `--server-env KEY=VALUE`
+(repeatable) adds variables to the spawned server's environment, e.g.
+`--server-env TTS_PROVIDER=cartesia --server-env AMBIENCE=office`. The run's
+`report.json` records which server and variables were used. Ava's `/twilio/voice` webhook is not
 involved in local mode, so the Twilio signature check is never exercised here.
 
 Scenarios: `no-heat`, `generator-install`, `membership-pricing`,
