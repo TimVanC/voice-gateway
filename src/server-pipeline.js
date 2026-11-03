@@ -386,7 +386,16 @@ class CallSession {
       utt.append(text);
       utt.end();
     } else if (feed) {
-      feed(rec, utt).catch((err) => { console.error(`❌ Reply generation failed: ${err.message}`); utt.end(); });
+      feed(rec, utt).catch((err) => {
+        console.error(`❌ Reply generation failed: ${err.message}`);
+        if (this.current !== rec) return;
+        // The LLM is a convenience, not a dependency: fall back to the script
+        // so the caller never sits in silence because a model call failed.
+        utt.cancel();
+        this.current = null;
+        const fallback = this.stateMachine.getNextPrompt() || CLOSE.anything_else;
+        this.speakPrompt(fallback);
+      });
     }
     return rec;
   }
