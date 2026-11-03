@@ -40,7 +40,7 @@ const twilio = require('twilio');
 const { BASE_URL } = require('./config/baseUrl');
 
 const { SYSTEM_PROMPT, GREETING, STATES, CLOSE, SAFETY, OUT_OF_SCOPE } = require('./scripts/rse-script');
-const { createCallStateMachine } = require('./state/call-state-machine');
+const { createCallStateMachine, detectSafetyEmergency } = require('./state/call-state-machine');
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
 const { isLikelySilenceHallucination, isClearYesOrNo } = require('./utils/transcript-filters');
 const { createTwilioSignatureValidator } = require('./utils/twilio-security');
@@ -98,6 +98,12 @@ const BACKCHANNEL = /^(mm+-?hm+|mhm+|uh-?huh|yeah|yep|ok(ay)?|right|sure|got it|
 const BARE_HELLO = /^(hi|hello|hey|hiya|good (morning|afternoon|evening))( there| ava)?[.!,?]*$/i;
 const HELLO_WAIT_MS = 2500;            // caller said only "hi": give them a moment to say why they called
 const SAME_PROMPT_LIMIT = 3;           // same prompt this many times in one state = stuck; break out
+// Speech that starts this soon after Ava begins a new question cannot be an
+// answer to it (the caller has not heard it yet): it is the rest of their
+// previous answer, split off by the end-of-turn detector. Seen: "No. ...
+// Nothing like that." -> the safety check took "No." and the name step took
+// "Nothing like that" as the caller's name.
+const CONTINUATION_WINDOW_MS = Number(process.env.CONTINUATION_WINDOW_MS || 1200);
 
 // Published list prices, for the per-call estimate printed at hang-up. Override in env.
 const PRICE = {
@@ -499,6 +505,7 @@ class CallSession {
   }
 
   onCallerSpeechStarted() {
+    if (!this.callerSpeaking) this.turnStartAt = Date.now();
     this.callerSpeaking = true;
     this.callerSpeechStartAt = Date.now();
     this.bargedIn = false;
@@ -574,6 +581,29 @@ class CallSession {
       return;
     }
 
+    // Tail of the previous answer (see CONTINUATION_WINDOW_MS)?
+    const prompt = this.lastPromptRec;
+    if (prompt && this.turnStartAt && this.turnStartAt >= prompt.startedAt - 100
+        && this.turnStartAt - prompt.startedAt < CONTINUATION_WINDOW_MS && this.lastAnswerState) {
+      const lowerT = transcript.toLowerCase();
+      if (detectRealPersonRequest(transcript, this.stateMachine.getState())) {
+        console.log('🚨 Real person requested (in a late fragment) - transferring');
+        this.transferToRealPerson();
+        return;
+      }
+      if (this.lastAnswerState === STATES.SAFETY_CHECK && detectSafetyEmergency(lowerT)) {
+        console.log(`🚨 Late fragment of the safety answer reports danger: "${transcript}"`);
+        this.processUserInputAsEmergency();
+        return;
+      }
+      console.log(`🧩 "${transcript}" started ${this.turnStartAt - prompt.startedAt} ms into Ava's new question: rest of the previous answer, not an answer to it`);
+      this.stateMachine.intakeLog('state_event', { event: 'late_fragment_ignored', transcript: transcript.substring(0, 60) });
+      this.turnStartAt = 0;
+      // Re-ask if the fragment cut the question off; otherwise let it play on.
+      if (!this.isSpeaking() && this.currentPromptText && !this.callCompleted) this.speakPrompt(this.currentPromptText);
+      return;
+    }
+
     if (this.isSpeaking() && !this.bargedIn) {
       // Ava is still talking and the caller did not interrupt her for real.
       if (BACKCHANNEL.test(transcript) || transcript.split(/\s+/).length <= 2 && !isClearYesOrNo(transcript)) {
@@ -636,6 +666,7 @@ class CallSession {
     this.lastProcessedTranscript = transcript;
 
     const currentState = sm.getState();
+    this.lastAnswerState = currentState; // the state this answer was given in (for late fragments)
     const lower = transcript.toLowerCase().trim();
     const currentData = sm.getData();
     console.log(`🔄 Processing input in state ${currentState}: "${transcript.substring(0, 50)}..."`);
@@ -766,7 +797,22 @@ class CallSession {
     this.stateMachine.intakeLog('prompt', { prompt: prompt.substring(0, 120) });
     const state = this.stateMachine.getState();
     if (this.repromptsInState.state !== state) this.repromptsInState = { state, count: 0 };
-    return this.speak(prompt, { kind: 'prompt', ...opts });
+    const rec = this.speak(prompt, { kind: 'prompt', ...opts });
+    if (rec) this.lastPromptRec = rec;
+    return rec;
+  }
+
+  /** The caller reported danger after the safety question had already moved on. */
+  processUserInputAsEmergency() {
+    if (this.callCompleted) return;
+    const sm = this.stateMachine;
+    sm.updateData('isSafetyRisk', true);
+    sm.transitionTo(STATES.ENDED);
+    sm.intakeLog('state_event', { event: 'closing_started', state: 'ended', reason: 'safety_emergency_late' });
+    this.pendingInput = null;
+    this.callCompleted = true;
+    this.speak(SAFETY.emergency_response, { kind: 'goodbye', allowDuringCompleted: true });
+    this.scheduleDisconnect('emergency', CLOSING_FAILSAFE_MS, true);
   }
 
   /** Free-form reply: the LLM writes it, TTS speaks it a sentence at a time. */

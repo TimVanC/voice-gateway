@@ -84,7 +84,10 @@ function normalizeSpokenNumbers(text, { cardinals = false } = {}) {
   while (i < tokens.length) {
     const w = wordOf(tokens[i]);
     // "o" and "oh" only count inside a run ("zero seven nine oh one"), never alone.
-    const startsRun = isNumberWord(w) && w !== 'o' && w !== 'oh' && w !== 'hundred' && !(w in MULT && !(wordOf(tokens[i + 2] || '') in UNITS));
+    // "o"/"oh" start a run only when two more number words follow ("oh seven
+    // zero four two"); on its own it is the interjection ("Oh, okay").
+    const ohStarts = (w === 'o' || w === 'oh') && isNumberWord(wordOf(tokens[i + 2] || '')) && isNumberWord(wordOf(tokens[i + 4] || ''));
+    const startsRun = isNumberWord(w) && (ohStarts || (w !== 'o' && w !== 'oh')) && w !== 'hundred' && !(w in MULT && !(wordOf(tokens[i + 2] || '') in UNITS));
     if (!startsRun) { out.push(tokens[i]); i++; continue; }
     // Collect the run: number words separated only by spaces, commas or hyphens.
     const words = [w];
