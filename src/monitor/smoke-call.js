@@ -37,27 +37,8 @@
 const crypto = require('crypto');
 const { WebSocket } = require('ws');
 const { GREETING } = require('../scripts/rse-script');
-const { int16ToPcm16leBuffer } = require('../g711');
+const { int16ToPcm16leBuffer, muLawToPcm16 } = require('../g711');
 const callDb = require('../utils/call-db');
-
-// Standard G.711 mu-law decode table. src/g711.js's muLawToPcm16 shifts by
-// two bits too many for every exponent above 0 (its output is about 4x too
-// hot and wraps around at loud samples), which is harmless where Ava hands
-// mu-law straight to OpenAI but would garble a WAV. Decoded here instead.
-const MULAW_TO_PCM = new Int16Array(256);
-for (let byte = 0; byte < 256; byte++) {
-  const u = ~byte & 0xff;
-  const exponent = (u >> 4) & 0x07;
-  const mantissa = u & 0x0f;
-  const magnitude = (((mantissa << 3) + 0x84) << exponent) - 0x84;
-  MULAW_TO_PCM[byte] = (u & 0x80) ? -magnitude : magnitude;
-}
-
-function muLawToPcm16(mulaw) {
-  const out = new Int16Array(mulaw.length);
-  for (let i = 0; i < mulaw.length; i++) out[i] = MULAW_TO_PCM[mulaw[i]];
-  return out;
-}
 
 const SCENARIO = 'daily-greeting';
 const FULL_SCENARIO = 'daily-full-call';

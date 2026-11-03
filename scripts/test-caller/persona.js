@@ -7,7 +7,10 @@
  * Audio in:  Ava's frames, straight into input_audio_buffer (server VAD
  *            decides when Ava has finished a turn).
  * Audio out: response.output_audio.delta chunks, handed to the caller via
- *            the 'audio' event; run.js paces them onto the wire.
+ *            the 'audio' event; run.js paces them onto the wire. OpenAI
+ *            renders the voice at full scale, which on a phone line is
+ *            hot and clips; it is turned down by `gainDb` (default -6 dB,
+ *            about the level of a real caller next to Ava's voice) first.
  *
  * Also used, out of band (conversation: "none"), to synthesise short clips
  * such as "mm-hm" that the harness injects while Ava is talking.
@@ -15,9 +18,11 @@
 
 const { EventEmitter } = require('events');
 const WebSocket = require('ws');
+const { scaleMulaw } = require('./audio');
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=';
 const CLIP_PURPOSE = 'clip';
+const DEFAULT_GAIN_DB = -6;
 
 class Persona extends EventEmitter {
   /**
@@ -29,6 +34,7 @@ class Persona extends EventEmitter {
    * @param {number} [opts.silenceMs]      VAD silence before the caller answers, default 700
    * @param {number} [opts.threshold]      VAD threshold, default 0.5
    * @param {boolean} [opts.interruptible] cancel the caller mid-sentence when Ava talks over them
+   * @param {number} [opts.gainDb]         level change applied to the caller's voice, default -6
    */
   constructor(opts) {
     super();
@@ -39,6 +45,7 @@ class Persona extends EventEmitter {
     this.silenceMs = opts.silenceMs || 700;
     this.threshold = opts.threshold || 0.5;
     this.interruptible = Boolean(opts.interruptible);
+    this.gainDb = Number.isFinite(opts.gainDb) ? opts.gainDb : DEFAULT_GAIN_DB;
     this.ws = null;
     this.ready = false;
     this.closed = false;
@@ -130,7 +137,7 @@ class Persona extends EventEmitter {
       }
       case 'response.output_audio.delta': {
         const r = this.responses.get(event.response_id);
-        const buf = Buffer.from(event.delta, 'base64');
+        const buf = scaleMulaw(Buffer.from(event.delta, 'base64'), this.gainDb);
         if (r && r.purpose === CLIP_PURPOSE) r.chunks.push(buf);
         else this.emit('audio', buf, event.response_id);
         break;

@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { muLawToPcm16 } = require('../../src/g711');
+const { muLawToPcm16, pcm16ToMuLaw } = require('../../src/g711');
 
 const SAMPLE_RATE = 8000;
 const FRAME_MS = 20;
@@ -35,10 +35,27 @@ function frameRms(frame) {
   return Math.sqrt(acc / pcm.length);
 }
 
-/** Audible by a generous threshold: anything a listener would notice as sound. */
-const AUDIBLE_RMS = 200;
+/**
+ * Audible by a generous threshold: anything a listener would notice as sound
+ * (50 is about -56 dBFS; the value was 200 against the old 4x-hot decoder).
+ */
+const AUDIBLE_RMS = 50;
 function isAudible(frame) {
   return frameRms(frame) > AUDIBLE_RMS;
+}
+
+/**
+ * The same mu-law audio `db` decibels quieter (or louder, if positive):
+ * decoded, scaled, re-encoded. Used to bring the persona's voice, which
+ * OpenAI renders at full scale, down to the level of a real phone caller.
+ */
+function scaleMulaw(mulaw, db) {
+  if (!db) return mulaw;
+  const factor = Math.pow(10, db / 20);
+  const pcm = muLawToPcm16(mulaw);
+  const out = new Int16Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) out[i] = clamp16(Math.round(pcm[i] * factor));
+  return pcm16ToMuLaw(out);
 }
 
 /** Split a mu-law buffer into 20 ms frames; the tail is padded with silence. */
@@ -165,5 +182,6 @@ module.exports = {
   isAudible,
   frameRms,
   toFrames,
+  scaleMulaw,
   TrackRecorder,
 };
