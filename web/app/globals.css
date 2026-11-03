@@ -233,6 +233,44 @@ th.nowrap {
   background: var(--accent-soft);
   color: var(--accent);
 }
+.badge.sev-high {
+  background: #fde8e8;
+  color: #b42318;
+}
+.badge.sev-medium {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+.badge.sev-low {
+  background: #eef0f3;
+  color: #4b5563;
+}
+.badge.ticket-open {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+.badge.ticket-fixed {
+  background: var(--ok-bg);
+  color: var(--ok-text);
+}
+.badge.ticket-ignored {
+  background: #eef0f3;
+  color: #4b5563;
+}
+.ticket-actions form + form {
+  margin-left: 4px;
+}
+button.small {
+  font-size: 12px;
+  padding: 3px 8px;
+}
+.findings {
+  padding-left: 20px;
+  margin: 8px 0 0;
+}
+.findings li {
+  margin-bottom: 10px;
+}
 .badge.status-failed {
   background: #fde8e8;
   color: #b42318;

@@ -29,6 +29,7 @@ const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
 const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder, isTestCallerNumber } = require('./utils/call-db');
 const { TrackRecorder } = require('./utils/track-recorder');
+const callReviewer = require('./review/call-reviewer');  // CALL_REVIEW=on: Claude reviews each saved call, findings become tickets
 
 // Call recording (CALL_RECORDING=on): both sides of every call are kept in
 // memory as the mu-law frames pass through and stored on the call's Neon row
@@ -2841,8 +2842,12 @@ Keep it SHORT.`;
         endedAt,
         environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || 'local',
         transcript: transcriptRecorder.turns()
-      }).then((saved) => {
-        if (callRecorder && saved && saved.id) return saveRecording(saved.id, callRecorder, 'server');
+      }).then(async (saved) => {
+        if (!saved || !saved.id) return null;
+        if (callRecorder) await saveRecording(saved.id, callRecorder, 'server');
+        // The review reads the row and the transcript back from Neon, so it
+        // runs after the save; it is the last thing to happen for a call.
+        if (callReviewer.enabled) await callReviewer.reviewCall(saved.id);
         return null;
       }).catch(err => {
         console.error('❌ Call DB save rejected unexpectedly:', err.message);
@@ -2940,6 +2945,18 @@ if (CALL_RECORDING && !process.env.DATABASE_URL) {
   console.log(`🎙️ Call recording on: both sides of every call are stored in Neon at hang-up and kept ${CALL_RECORDING_KEEP_DAYS} days`);
 } else {
   console.log('🎙️ Call recording off (set CALL_RECORDING=on to store both sides of every call in Neon)');
+}
+
+// Call review (src/review/call-reviewer.js): with CALL_REVIEW=on every saved
+// call is read by Claude against the script and discrepancies become tickets
+// (web app /tickets); the daily check reports the new ones.
+if (callReviewer.enabled && (!process.env.DATABASE_URL || !process.env.ANTHROPIC_API_KEY)) {
+  console.warn('⚠️ CALL_REVIEW is on but DATABASE_URL or ANTHROPIC_API_KEY is not set: no call will be reviewed');
+} else if (callReviewer.enabled) {
+  extraChecks.push(() => callReviewer.ticketsCheck());
+  console.log(`🔎 Call review on: every saved call is reviewed by ${callReviewer.model}; findings become tickets at ${callReviewer.CALL_LOG_URL}/tickets`);
+} else {
+  console.log('🔎 Call review off (set CALL_REVIEW=on to have every call reviewed and tickets filed)');
 }
 
 if (DAILY_CHECK_ENABLED) {

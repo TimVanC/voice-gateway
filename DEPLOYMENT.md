@@ -164,6 +164,32 @@ free tier (0.5 GB) with little to spare; a longer window needs Neon's Launch
 plan (10 GB). The `002` migration that creates the table is already applied
 to the current database.
 
+### Call review and tickets (`CALL_REVIEW=on`)
+
+Off by default. With `CALL_REVIEW=on` every call, once saved to Neon, is read
+by Claude (`src/review/call-reviewer.js`): the transcript and the saved intake
+row are compared with the script, and each discrepancy (a field saved wrong, an
+answer ignored, a question repeated, an improvised line, a premature end, dead
+air, a mishandled safety check or transfer) is reported with the turn numbers
+as evidence. Findings are filed as tickets keyed by a fingerprint
+(`category:key`), so one bug seen on ten calls is one ticket with ten
+occurrences; marking a ticket fixed and seeing it again reopens it. The web app
+lists them at `/tickets` and shows each call's review on its call page. The
+daily check gets a line, `Call review tickets`, that is a WARNING on any day
+with new tickets, so the 8 AM email says what needs looking at.
+
+| Variable | Value |
+|---|---|
+| `CALL_REVIEW` | `on` to review every saved call |
+| `CALL_REVIEW_MODEL` | optional, default `claude-sonnet-5-5` |
+| `CALL_LOG_URL` | optional, the web app's address for links in the email, default `https://rse-ava-calls.vercel.app` |
+
+Cost: one model call per phone call, a few thousand input tokens and a few
+hundred out, a few cents. Schema: `db/migrations/003_call_reviews_and_tickets.sql`
+(`node scripts/db-migrate.js`). To review calls stored before the switch was
+on, or after a prompt change: `node scripts/review-calls.js --days 30 --limit 50`
+(`--include-tests`, `--force`, `--call <id>`, `--show <id>` prints the prompt).
+
 ## 🖥️ Call Log Web App (`web/`, Vercel)
 
 A small Next.js app that shows the calls table: paginated list with search,
