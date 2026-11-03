@@ -258,5 +258,19 @@ console.log('\n🧪 At the recap, a goodbye ends the call instead of re-asking "
   }
 }
 
+console.log('\n🧪 "Hi, I\'m having an HVAC issue" is an answer, not a request to repeat the greeting (staging call Nov 3 2026)');
+{
+  const { isBareHello } = require('./utils/transcript-filters');
+  check('"hello?" repeats', isBareHello('hello?'), true);
+  check('"Hi, hello?" repeats', isBareHello('Hi, hello?'), true);
+  check('"hey there" repeats', isBareHello('hey there'), true);
+  check('"hi Ava" repeats', isBareHello('hi Ava'), true);
+  check('"Hello, anybody?" repeats', isBareHello('Hello, anybody?'), true);
+  check('"Hi. I\'m having HVAC issue." does not', isBareHello("Hi. I'm having HVAC issue."), false);
+  check('"Hi, my furnace is out" does not', isBareHello('Hi, my furnace is out'), false);
+  check('"yes hi" does not', isBareHello('yes hi'), false);
+  check('empty does not', isBareHello(''), false);
+}
+
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
