@@ -27,7 +27,7 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
-const { saveCall: saveCallToDb, createTranscriptRecorder } = require('./utils/call-db');
+const { saveCall: saveCallToDb, createTranscriptRecorder, isTestCallerNumber } = require('./utils/call-db');
 const { startDailyCheckSchedule, parseTimes, defaultHealthUrl } = require('./monitor/schedule');
 const { runDailyCheck } = require('./monitor/daily-check');
 const smokeCall = require('./monitor/smoke-call');
@@ -2790,10 +2790,15 @@ Keep it SHORT.`;
     console.log("📋 Call data collected:", JSON.stringify(data, null, 2));
     console.log(`📋 Final state: ${currentState}`);
     
-    // The daily smoke call (src/monitor/smoke-call.js) is a scripted test
-    // caller: it goes to Neon as a test call, never to RSE's Sheet or inbox.
-    const isSmokeCall = smokeCall.isSmokeCaller(callerNumber);
-    if (isSmokeCall) console.log('🧪 Daily smoke call: skipping the Google Sheets row and the summary email');
+    // Test calls go to Neon (flagged is_test) and never to RSE's Sheet or
+    // inbox: the daily smoke call (src/monitor/smoke-call.js), any call from
+    // the test caller's numbers (TEST_CALLER_NUMBERS), and every call to an
+    // Ava running outside Railway (a laptop, the harness's spawned copy)
+    // unless LOCAL_SIDE_EFFECTS=on says that copy may write to the real Sheet.
+    const isSmokeCall = smokeCall.isSmokeCaller(callerNumber)
+      || isTestCallerNumber(callerNumber)
+      || (!process.env.RAILWAY_ENVIRONMENT_NAME && process.env.LOCAL_SIDE_EFFECTS !== 'on');
+    if (isSmokeCall) console.log('🧪 Test call: skipping the Google Sheets row and the summary email');
 
     // Log to Google Sheets (non-blocking) - only if confirmation succeeded
     if (!isSmokeCall) {

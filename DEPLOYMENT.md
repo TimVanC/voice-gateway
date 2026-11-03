@@ -104,7 +104,7 @@ after it, never blocks the call, and logs-and-continues on any failure. With
    | Variable | Value |
    |---|---|
    | `DATABASE_URL` | the Neon connection string from step 1 |
-   | `TEST_CALLER_NUMBERS` | optional, comma-separated numbers whose calls are flagged `is_test` (RSE's own and Tim's phones); `TWILIO_NUMBER` is always included |
+   | `TEST_CALLER_NUMBERS` | optional, comma-separated numbers whose calls are flagged `is_test` (RSE's own and Tim's phones); `TWILIO_NUMBER` is always included. Since Nov 3 2026 calls from these numbers also skip the Google Sheet and the summary email (they still go to Neon). |
 
    Staging and production write to the same database; the `environment`
    column records which one wrote each row, and the web app shows it on the
@@ -240,11 +240,14 @@ phone, email, details, address, availability, recap, goodbye).
   call herself, and no silence on the line was longer than
   `SMOKE_CALL_MAX_GAP_MS` (default 8000). Reply time (median, 90th
   percentile) and the longest silence are reported on every run.
-- **Stays out of RSE's Sheet and inbox:** while the call runs (and two
-  minutes after), Ava skips the Google Sheets row and the summary email for
-  calls from `SMOKE_CALL_FROM`; calls from that number at other times log as
-  usual. If Ava tries to transfer the smoke call she ends it instead of
-  ringing the live line, and the check fails with that reason.
+- **Stays out of RSE's Sheet and inbox:** Ava skips the Google Sheets row
+  and the summary email for any call from `SMOKE_CALL_FROM` or a number in
+  `TEST_CALLER_NUMBERS`, and for every call to an Ava that is
+  not running on Railway (no `RAILWAY_ENVIRONMENT_NAME`: a laptop, the test
+  harness) unless that copy is started with `LOCAL_SIDE_EFFECTS=on`. Those
+  calls still go to Neon, flagged as tests. If Ava tries to transfer the
+  smoke call she ends it instead of ringing the live line, and the check
+  fails with that reason.
 - **Where it shows:** the daily check line `Ava handles a full call`, the
   server log (`✅ Daily full smoke call PASS` / `❌ ... FAIL` plus the
   transcript), and the web app's Test calls tab (scenario `daily-full-call`,

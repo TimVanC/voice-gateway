@@ -83,6 +83,18 @@ function isOwnNumber(phone, env = process.env) {
   return Boolean(digits) && ownNumberDigits(env).has(digits);
 }
 
+/**
+ * The test caller's numbers only (TEST_CALLER_NUMBERS), without
+ * TWILIO_NUMBER: calls from these never reach the Sheet or the inbox.
+ * TWILIO_NUMBER is left out on purpose, because a caller-ID hiccup that
+ * showed every caller as RSE's own number must not silence real calls.
+ */
+function isTestCallerNumber(phone, env = process.env) {
+  const digits = lastTenDigits(phone);
+  if (!digits) return false;
+  return String(env.TEST_CALLER_NUMBERS || '').split(',').map(lastTenDigits).includes(digits);
+}
+
 // ---------------------------------------------------------------------------
 // Transcript accumulation (one recorder per call)
 // ---------------------------------------------------------------------------
@@ -295,6 +307,7 @@ module.exports = {
   saveCall,
   createTranscriptRecorder,
   isOwnNumber,
+  isTestCallerNumber,
   lastTenDigits,
   ownNumberDigits,
   insertCall,
