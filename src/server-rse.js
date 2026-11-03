@@ -23,7 +23,7 @@ const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
 const { isLikelySilenceHallucination, isClearYesOrNo, transcriptMatchesExpected } = require('./utils/transcript-filters');
-const { TRANSCRIPT_WAIT_CEILING_MS, decideWatchdogAction, transcriptSupersedesRecovery } = require('./utils/dead-air-watchdog');
+const { TRANSCRIPT_WAIT_CEILING_MS, decideWatchdogAction, decideEmptyTranscriptAction, transcriptSupersedesRecovery } = require('./utils/dead-air-watchdog');
 const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
@@ -273,6 +273,7 @@ wss.on("connection", (twilioWs, req) => {
   const WATCHDOG_MS = Number(process.env.WATCHDOG_MS) || 3000;              // after caller speech
   const DEAD_AIR_RECOVERY_MS = Number(process.env.DEAD_AIR_RECOVERY_MS) || 4000;  // after a dead response (headroom for late transcripts)
   const MAX_DEAD_AIR_RECOVERIES = 3;     // per call; cap reached → offer live agent
+  const EMPTY_TRANSCRIPT_REPROMPT_MS = 250; // re-ask almost at once when a turn transcribed to nothing
   let deadAirRecoveries = 0;
   let recoveryPromptInFlight = false;    // The watchdog's re-ask is being spoken; a transcript landing now cuts it off
   let supersededRecoveryResponseId = null;  // Re-ask cut off by a transcript: its response.done is stale, ignore it
@@ -1653,9 +1654,34 @@ wss.on("connection", (twilioWs, req) => {
         }
         break;
         
-      case "conversation.item.input_audio_transcription.completed":
-        if (event.transcript) {
-          const transcript = event.transcript.trim();
+      case "conversation.item.input_audio_transcription.completed": {
+        const transcript = String(event.transcript || '').trim();
+        if (!transcript) {
+          // Nothing transcribable in the committed turn ("" or "\n"). Until
+          // Nov 2026 this was ignored outright: the pending flag stayed set,
+          // the watchdog held for it until the ceiling, and the log showed no
+          // event at all (the staging call of Nov 3 2026 20:52 UTC looked
+          // exactly like that; see utils/dead-air-watchdog.js).
+          const action = decideEmptyTranscriptAction({
+            speechDurationMs: lastSpeechDurationMs,
+            callCompleted: _callCompleted,
+            inEndedState: stateMachine.getState() === STATES.ENDED,
+          });
+          console.log(`📝 Empty transcript for the caller's turn (speech ${lastSpeechDurationMs}ms) - ${action}`);
+          stateMachine.intakeLog('state_event', { event: 'empty_transcript', duration_ms: lastSpeechDurationMs, action });
+          waitingForTranscription = false;
+          if (action === 'reprompt') {
+            // The caller said something we did not get: ask again now rather
+            // than after the ceiling. Goes through the watchdog so the usual
+            // skip rules and the dead-air cap apply.
+            clearWatchdog();
+            armWatchdog(EMPTY_TRANSCRIPT_REPROMPT_MS, 'empty_transcript', true);
+          } else if (action === 'drop') {
+            clearWatchdog();
+          }
+          break;
+        }
+        {
           console.log(`📝 User said: "${transcript}"`);
           stateMachine.intakeLog('transcript', { transcript: transcript.substring(0, 100) });
 
@@ -1774,6 +1800,7 @@ wss.on("connection", (twilioWs, req) => {
           processUserInput(transcript);
         }
         break;
+      }
 
       case "conversation.item.input_audio_transcription.failed":
         // No transcript is coming for that turn: let the watchdog recover at

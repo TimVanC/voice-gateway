@@ -290,7 +290,7 @@ console.log('\n🧪 Dead-air watchdog holds while the caller\'s transcript is st
     { action: 'hold', reason: 'transcript_pending', holdMs: TRANSCRIPT_WAIT_CEILING_MS - 4000 });
   check('hold does not count as a recovery (no cap, even at the cap)',
     decide({ waitingForTranscription: true, transcriptWaitedMs: 4100, deadAirRecoveries: 3 }).action, 'hold');
-  check('the ceiling is well above the 4 s recovery delay', TRANSCRIPT_WAIT_CEILING_MS >= 8000, true);
+  check('the ceiling is above the 4 s recovery delay and the slowest transcript seen (4.1 s)', TRANSCRIPT_WAIT_CEILING_MS > 4100 + 2000, true);
 
   // A transcript that never arrives still recovers once the ceiling passes.
   check('transcript still missing at the ceiling -> fallback, transcript abandoned',
@@ -331,6 +331,41 @@ console.log('\n🧪 Dead-air watchdog holds while the caller\'s transcript is st
     transcriptSupersedesRecovery({ recoveryPromptInFlight: true, responseCreated: true, callCompleted: false, inEndedState: true }), 'none');
   check('nothing to cut once the call completed',
     transcriptSupersedesRecovery({ recoveryPromptInFlight: true, responseCreated: true, callCompleted: true, inEndedState: false }), 'none');
+}
+
+console.log('\n🧪 A caller turn with no transcript at all (staging call Nov 3 2026 20:52 UTC): shorter wait, and an empty transcript is acted on');
+{
+  const { decideWatchdogAction, decideEmptyTranscriptAction, TRANSCRIPT_WAIT_CEILING_MS, EMPTY_TRANSCRIPT_REPROMPT_MIN_MS } = require('./utils/dead-air-watchdog');
+  const base = {
+    callCompleted: false, responseInProgress: false, speechActive: false,
+    waitingForTranscription: true, transcriptWaitedMs: 0,
+    isDeadAirRecovery: true, deadAirRecoveries: 0, maxDeadAirRecoveries: 3,
+  };
+  const decide = (o) => decideWatchdogAction({ ...base, ...o });
+
+  // The staging call: 3.3 s of speech, no transcription event ever. The 4 s
+  // recovery held until the 10 s ceiling, then re-sent the greeting at +15 s.
+  check('ceiling is 7 s by default (was 10 s)', TRANSCRIPT_WAIT_CEILING_MS, 7000);
+  check('at +4.1 s the recovery still holds, for the rest of the 7 s',
+    decide({ transcriptWaitedMs: 4099 }), { action: 'hold', reason: 'transcript_pending', holdMs: 2901 });
+  check('at +7 s the transcript is given up on and the question is re-asked',
+    decide({ transcriptWaitedMs: 7000 }), { action: 'fallback', reason: 'transcript_never_arrived', transcriptAbandoned: true });
+  check('a transcript that takes 3.2 s (slowest harness turn) is still waited for',
+    decide({ transcriptWaitedMs: 3203 }).action, 'hold');
+
+  // transcription.completed with an empty transcript used to be ignored.
+  check('3.3 s of speech transcribed to nothing -> re-ask now',
+    decideEmptyTranscriptAction({ speechDurationMs: 3315, callCompleted: false, inEndedState: false }), 'reprompt');
+  check('a short blip transcribed to nothing -> drop quietly',
+    decideEmptyTranscriptAction({ speechDurationMs: 600, callCompleted: false, inEndedState: false }), 'drop');
+  check('the threshold itself counts as a real turn',
+    decideEmptyTranscriptAction({ speechDurationMs: EMPTY_TRANSCRIPT_REPROMPT_MIN_MS, callCompleted: false, inEndedState: false }), 'reprompt');
+  check('nothing after the call completed',
+    decideEmptyTranscriptAction({ speechDurationMs: 3315, callCompleted: true, inEndedState: false }), 'skip');
+  check('nothing while the goodbye plays',
+    decideEmptyTranscriptAction({ speechDurationMs: 3315, callCompleted: false, inEndedState: true }), 'skip');
+  check('no speech duration known -> drop',
+    decideEmptyTranscriptAction({ speechDurationMs: 0, callCompleted: false, inEndedState: false }), 'drop');
 }
 
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);

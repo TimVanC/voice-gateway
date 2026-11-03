@@ -21,11 +21,24 @@
  * recovery (and its cap) applies, so a transcript that never arrives still
  * recovers.
  *
- * Pure function, exported for direct testing.
+ * Ceiling: 7 s. Staging call Nov 3 2026 20:52 UTC: the caller's first answer
+ * (3.3 s of speech) got neither a transcription.completed nor a .failed from
+ * OpenAI, ever (not reproducible: 14 probes with the same session config,
+ * echoed greeting, reversed speech, quiet speech, all transcribed in 0.4-1.1 s;
+ * 139 harness turns: median 0.5 s, p95 1.4 s, slowest 3.2 s; PR #18's slowest
+ * 4.1 s). With the 10 s ceiling the caller waited 15 s in silence; 7 s keeps
+ * ~3 s of headroom over the slowest transcript seen and halves the wait.
+ *
+ * Pure functions, exported for direct testing.
  */
 
 // Overridable (ms) for local harness runs that force the ceiling; production uses the default.
-const TRANSCRIPT_WAIT_CEILING_MS = Number(process.env.TRANSCRIPT_WAIT_CEILING_MS) || 10000;
+const TRANSCRIPT_WAIT_CEILING_MS = Number(process.env.TRANSCRIPT_WAIT_CEILING_MS) || 7000;
+
+// A committed turn whose transcript came back empty: shorter than this it is
+// a blip (dropped like a silence hallucination); longer, the caller said
+// something and gets the question again.
+const EMPTY_TRANSCRIPT_REPROMPT_MIN_MS = 1500;
 
 /**
  * @param {object} s
@@ -79,8 +92,30 @@ function transcriptSupersedesRecovery({ recoveryPromptInFlight, responseCreated,
   return responseCreated ? 'cut_now' : 'cut_on_create';
 }
 
+/**
+ * transcription.completed with an empty transcript. The server used to test
+ * `if (event.transcript)` and do nothing for "" (or process "\n" as a real
+ * turn): the pending flag stayed set and the log showed no event at all,
+ * exactly what the staging call's log looked like. The transcriber returns
+ * text for everything that trips the VAD in every probe so far, so this is a
+ * net, not the diagnosed cause.
+ *
+ * - 'skip':     call over / goodbye playing, nothing to do.
+ * - 'drop':     a blip (speech shorter than EMPTY_TRANSCRIPT_REPROMPT_MIN_MS): clear
+ *               the watchdog and stay quiet, like a dropped silence hallucination.
+ * - 'reprompt': the caller said something we did not get: ask the current
+ *               question again right away (counts toward the dead-air cap, so
+ *               an echo loop ends in the live-agent offer, not forever).
+ */
+function decideEmptyTranscriptAction({ speechDurationMs, callCompleted, inEndedState, minRepromptMs = EMPTY_TRANSCRIPT_REPROMPT_MIN_MS }) {
+  if (callCompleted || inEndedState) return 'skip';
+  return (speechDurationMs || 0) >= minRepromptMs ? 'reprompt' : 'drop';
+}
+
 module.exports = {
   TRANSCRIPT_WAIT_CEILING_MS,
+  EMPTY_TRANSCRIPT_REPROMPT_MIN_MS,
   decideWatchdogAction,
+  decideEmptyTranscriptAction,
   transcriptSupersedesRecovery,
 };
