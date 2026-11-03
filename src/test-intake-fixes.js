@@ -184,6 +184,21 @@ console.log("\n🧪 Test-caller numbers never reach the Sheet; RSE's own number 
   check('no number, no match', isTestCallerNumber(null, env), false);
 }
 
+console.log("\n🧪 Only production's calls are live: staging and local runs are test calls (Tim's staging call reached the Sheet, Nov 3 2026)");
+{
+  const { isProductionEnvironment, environmentTestReason, buildCallRow } = require('./utils/call-db');
+  check('production is production', isProductionEnvironment('production'), true);
+  check('staging / local / unset are not', [isProductionEnvironment('staging'), isProductionEnvironment('local'), isProductionEnvironment(undefined)], [false, false, false]);
+  check('reasons', [environmentTestReason('production'), environmentTestReason('staging'), environmentTestReason('local'), environmentTestReason(null)],
+    [null, 'staging environment', 'local run', 'local run']);
+  const row = (environment) => buildCallRow({ intent: 'hvac_service', firstName: 'Maria', lastName: 'Lopez', phone: '9735550142' }, 'ended', {
+    callId: 'MZtest', callerNumber: '+19735551234', wasTransferred: false, startedAt: Date.now() - 60000, endedAt: Date.now(), environment,
+  });
+  check('a customer calling staging is a test call', [row('staging').is_test, row('staging').test_reason], [true, 'staging environment']);
+  check('a customer calling production is live', [row('production').is_test, row('production').test_reason], [false, null]);
+  check('a local run is still a test call', [row('local').is_test, row('local').test_reason], [true, 'local run']);
+}
+
 // Nov 3 2026, Neon call 2593: at the recap the model said "Is there anything
 // else I can help with today?" instead of the read-back, the server accepted
 // it, the caller answered "No, that's it. Thank you." and CONFIRMATION took
