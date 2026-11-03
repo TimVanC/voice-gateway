@@ -28,7 +28,7 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
-const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder, isTestCallerNumber } = require('./utils/call-db');
+const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder, isTestCallerNumber, isProductionEnvironment } = require('./utils/call-db');
 const { TrackRecorder } = require('./utils/track-recorder');
 const callReviewer = require('./review/call-reviewer');  // CALL_REVIEW=on: Claude reviews each saved call, findings become tickets
 
@@ -2940,12 +2940,15 @@ Keep it SHORT.`;
     
     // Test calls go to Neon (flagged is_test) and never to RSE's Sheet or
     // inbox: the daily smoke call (src/monitor/smoke-call.js), any call from
-    // the test caller's numbers (TEST_CALLER_NUMBERS), and every call to an
-    // Ava running outside Railway (a laptop, the harness's spawned copy)
-    // unless LOCAL_SIDE_EFFECTS=on says that copy may write to the real Sheet.
+    // the test caller's numbers (TEST_CALLER_NUMBERS), every call to an Ava
+    // running outside Railway (a laptop, the harness's spawned copy) unless
+    // LOCAL_SIDE_EFFECTS=on says that copy may write to the real Sheet, and
+    // every call to a Railway environment other than production (staging).
+    const railwayEnv = process.env.RAILWAY_ENVIRONMENT_NAME;
     const isSmokeCall = smokeCall.isSmokeCaller(callerNumber)
       || isTestCallerNumber(callerNumber)
-      || (!process.env.RAILWAY_ENVIRONMENT_NAME && process.env.LOCAL_SIDE_EFFECTS !== 'on');
+      || (!railwayEnv && process.env.LOCAL_SIDE_EFFECTS !== 'on')
+      || (Boolean(railwayEnv) && !isProductionEnvironment(railwayEnv));
     if (isSmokeCall) console.log('🧪 Test call: skipping the Google Sheets row and the summary email');
 
     // Log to Google Sheets (non-blocking) - only if confirmation succeeded
