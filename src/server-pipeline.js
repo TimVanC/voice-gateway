@@ -104,6 +104,13 @@ const SAME_PROMPT_LIMIT = 3;           // same prompt this many times in one sta
 // Nothing like that." -> the safety check took "No." and the name step took
 // "Nothing like that" as the caller's name.
 const CONTINUATION_WINDOW_MS = Number(process.env.CONTINUATION_WINDOW_MS || 1200);
+// Commit late: after the STT says the turn is over, hold the reply this long
+// and merge if the caller's voice comes back (people pause 0.5-1 s between
+// sentences; Flux ends a turn after ~0.5 s, so without this every sentence
+// became its own turn and Ava answered the first while the caller went on).
+// Realtime in server-rse.js waits 1.2 s of silence for the same reason.
+const TURN_HOLD_MS = Number(process.env.TURN_HOLD_MS ?? 450);
+const TURN_RESUME_MAX_MS = 4000;       // caller resumed but no transcript came: answer what we have
 
 // Published list prices, for the per-call estimate printed at hang-up. Override in env.
 const PRICE = {
@@ -549,6 +556,52 @@ class CallSession {
   }
 
   onCallerTranscript({ text, durationMs, endedAt }) {
+    const piece = String(text || '').trim();
+    if (!piece) return;
+    this.clearWatchdog();
+    this.callerSpeaking = false;
+    // No hold while Ava is talking (the caller is talking over her: handled
+    // downstream), once the call is closing, or when disabled.
+    if (!TURN_HOLD_MS || this.callCompleted || this.isSpeaking()) {
+      const held = this.takeHeld();
+      return this.handleTurn(held ? { text: `${held.text} ${piece}`, durationMs: held.durationMs + (durationMs || 0), endedAt } : { text: piece, durationMs, endedAt });
+    }
+    if (this.held) {
+      this.held.text = `${this.held.text} ${piece}`;
+      this.held.durationMs += durationMs || 0;
+      this.held.endedAt = endedAt;
+      console.log(`🧷 Caller kept going - merged: "${this.held.text.slice(0, 70)}"`);
+    } else {
+      this.held = { text: piece, durationMs: durationMs || 0, endedAt };
+    }
+    this.held.eotAt = Date.now();
+    if (this.holdTimer) clearTimeout(this.holdTimer);
+    this.holdTimer = setTimeout(() => this.checkHold(), TURN_HOLD_MS);
+  }
+
+  takeHeld() {
+    if (this.holdTimer) { clearTimeout(this.holdTimer); this.holdTimer = null; }
+    const h = this.held;
+    this.held = null;
+    return h;
+  }
+
+  checkHold() {
+    this.holdTimer = null;
+    const h = this.held;
+    if (!h) return;
+    const voiceSince = this.stt && this.stt.lastVoiceAt > h.eotAt;
+    if ((this.callerSpeaking || voiceSince) && Date.now() - h.eotAt < TURN_RESUME_MAX_MS) {
+      // The caller is still talking: wait for the next transcript (it merges),
+      // but never longer than TURN_RESUME_MAX_MS.
+      this.holdTimer = setTimeout(() => this.checkHold(), 250);
+      return;
+    }
+    this.takeHeld();
+    this.handleTurn({ text: h.text, durationMs: h.durationMs, endedAt: h.endedAt });
+  }
+
+  handleTurn({ text, durationMs, endedAt }) {
     let transcript = String(text || '').trim();
     this.clearWatchdog();
     this.callerSpeaking = false;
@@ -956,7 +1009,7 @@ class CallSession {
     this.cleanedUp = true;
     activeCalls.delete(this);
     if (this.paceTimer) clearInterval(this.paceTimer);
-    for (const t of ['watchdogTimer', 'repromptTimer', 'bargeTimer', 'failsafeTimer', 'disconnectTimer', 'helloTimer']) {
+    for (const t of ['watchdogTimer', 'repromptTimer', 'bargeTimer', 'failsafeTimer', 'disconnectTimer', 'helloTimer', 'holdTimer']) {
       if (this[t]) { clearTimeout(this[t]); this[t] = null; }
     }
     if (this.stt) this.stt.close();
@@ -1043,6 +1096,7 @@ server.listen(PORT, () => {
   console.log(`🗣️ TTS: ${TTS_PROVIDER} (${ttsDetail})`);
   console.log(`💬 LLM: ${llm ? llm.name : 'none'} (free-form parts only)`);
   console.log(`🎚️ Ambience: ${AMBIENCE === 'office' ? `office room tone at ${AMBIENCE_LEVEL_DB} dBFS` : 'off (AMBIENCE=office to enable)'}`);
+  console.log(`🧷 Turn hold ${TURN_HOLD_MS} ms after end of turn (merge if the caller keeps going)`);
   console.log(`⏱️ Barge-in grace ${BARGE_GRACE_MS} ms (${BARGE_GRACE_CONFIRM_MS} ms during the recap), watchdog ${WATCHDOG_MS} ms, re-prompt ${REPROMPT_MS} ms`);
   console.log(`📍 Webhook: https://<your-domain>/twilio/voice`);
   console.log('🎧 Waiting for calls...');
