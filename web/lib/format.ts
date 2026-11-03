@@ -21,6 +21,20 @@ export function formatTime(value: Date | string | null | undefined): string {
   return d.toLocaleTimeString("en-US", { timeZone: ET, hour: "numeric", minute: "2-digit", second: "2-digit" });
 }
 
+/**
+ * Transcript turn time with milliseconds ("6:44:10.149 PM"): the server stamps
+ * each turn when the transcript lands, so the fraction shows how fast Ava
+ * answered. Seconds only for rows imported from the Sheet (no fraction stored).
+ */
+export function formatTimeMs(value: Date | string | null | undefined): string {
+  if (!value) return "";
+  const d = typeof value === "string" ? new Date(value) : value;
+  if (Number.isNaN(d.getTime())) return "";
+  const base = d.toLocaleTimeString("en-US", { timeZone: ET, hour: "numeric", minute: "2-digit", second: "2-digit" });
+  const ms = String(d.getMilliseconds()).padStart(3, "0");
+  return base.replace(/(d) (AM|PM)$/, `$1.${ms} $2`);
+}
+
 export function formatDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined) return "";
   const m = Math.floor(seconds / 60);

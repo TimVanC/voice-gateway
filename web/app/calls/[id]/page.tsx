@@ -4,7 +4,7 @@ import TopBar from "@/components/TopBar";
 import { getCallReview } from "@/lib/tickets";
 import { FlagBadges, StatusBadge } from "@/components/Badges";
 import { requireSession } from "@/lib/auth";
-import { formatDateTime, formatDuration, formatIntent, formatPhone, formatTime, fullName } from "@/lib/format";
+import { formatDateTime, formatDuration, formatIntent, formatPhone, formatTime, formatTimeMs, fullName } from "@/lib/format";
 import { getCall, isSmokeRun } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -282,7 +282,7 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
               <li key={t.id} className={`turn ${t.speaker}`}>
                 <span className="who">
                   {t.speaker === "ava" ? "Ava" : "Caller"}
-                  <span className="when">{formatTime(t.at)}</span>
+                  <span className="when">{formatTimeMs(t.at)}</span>
                 </span>
                 <p>{t.text}</p>
               </li>
