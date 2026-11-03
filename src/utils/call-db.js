@@ -95,6 +95,23 @@ function isTestCallerNumber(phone, env = process.env) {
   return String(env.TEST_CALLER_NUMBERS || '').split(',').map(lastTenDigits).includes(digits);
 }
 
+/**
+ * Only Railway's `production` environment serves real callers. Everything
+ * else (`staging`, a laptop, the harness's spawned copy) is a test by
+ * definition, whoever the caller was: Tim's own calls to the staging number
+ * were landing on the main Calls page and in RSE's Sheet (Nov 3 2026).
+ */
+function isProductionEnvironment(name) {
+  return String(name || '').toLowerCase() === 'production';
+}
+
+/** Why a call to this environment is a test call, or null for production. */
+function environmentTestReason(name) {
+  if (isProductionEnvironment(name)) return null;
+  if (!name || String(name).toLowerCase() === 'local') return 'local run';
+  return `${name} environment`;
+}
+
 // ---------------------------------------------------------------------------
 // Transcript accumulation (one recorder per call)
 // ---------------------------------------------------------------------------
@@ -154,10 +171,10 @@ function buildCallRow(callData, currentState, metadata) {
   const endedAt = metadata.endedAt ? new Date(metadata.endedAt) : new Date();
   const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
   const testByNumber = isOwnNumber(metadata.callerNumber);
-  // A call to an Ava that is not running on Railway (a laptop, the test
-  // harness's spawned copy) is a test by definition, whoever the caller was.
-  const localRun = !metadata.environment || metadata.environment === 'local';
-  const testReason = testByNumber ? 'caller is an RSE number' : localRun ? 'local run' : null;
+  // A call to any Ava but production's (a laptop, the test harness's spawned
+  // copy, Railway staging) is a test by definition, whoever the caller was.
+  const envReason = environmentTestReason(metadata.environment);
+  const testReason = testByNumber ? 'caller is an RSE number' : envReason;
 
   return {
     call_id: metadata.callId,
@@ -165,7 +182,7 @@ function buildCallRow(callData, currentState, metadata) {
     source: 'server',
     environment: metadata.environment || null,
     sheet_row_number: null,
-    is_test: testByNumber || localRun,
+    is_test: testByNumber || Boolean(envReason),
     test_reason: testReason,
     pre_caller_id_fix: false,
     direction: 'inbound',
@@ -375,6 +392,9 @@ module.exports = {
   createTranscriptRecorder,
   isOwnNumber,
   isTestCallerNumber,
+  isProductionEnvironment,
+  environmentTestReason,
+  buildCallRow,
   lastTenDigits,
   ownNumberDigits,
   insertCall,

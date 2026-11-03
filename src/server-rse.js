@@ -23,11 +23,12 @@ const { createCallStateMachine } = require('./state/call-state-machine');
 const { createBackchannelManager, createMicroResponsePayload } = require('./utils/backchannel');
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
 const { isLikelySilenceHallucination, isClearYesOrNo, transcriptMatchesExpected } = require('./utils/transcript-filters');
+const { TRANSCRIPT_WAIT_CEILING_MS, decideWatchdogAction, transcriptSupersedesRecovery } = require('./utils/dead-air-watchdog');
 const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
-const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder, isTestCallerNumber } = require('./utils/call-db');
+const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder, isTestCallerNumber, isProductionEnvironment } = require('./utils/call-db');
 const { TrackRecorder } = require('./utils/track-recorder');
 const callReviewer = require('./review/call-reviewer');  // CALL_REVIEW=on: Claude reviews each saved call, findings become tickets
 
@@ -191,6 +192,7 @@ wss.on("connection", (twilioWs, req) => {
   let currentResponseId = null;  // Track current OpenAI response ID for cancellation
   const cancelledResponseIds = new Set();  // Track cancelled response IDs to drop stale deltas
   let waitingForTranscription = false;  // Set when speech stops, cleared when transcript arrives
+  let transcriptWaitStartedAt = 0;      // When the caller stopped speaking (the watchdog's transcript ceiling counts from here)
   let suppressAutoResponseWhileTranscribing = false;  // Drop OpenAI auto-response while waiting for transcript
   let pendingUserInput = null;  // Queue for input that arrives while response is in progress
   let pendingUserInputMeta = { queuedAtMs: 0, reason: null };
@@ -259,12 +261,48 @@ wss.on("connection", (twilioWs, req) => {
   //      is not the prompt). Before (b) existed, those paths had no net
   //      faster than the 20s keep-alive — observed as 22s of dead air.
   // Any legitimate follow-up (new prompt, response.created) clears it.
+  // While the caller's transcript is still pending the watchdog holds
+  // instead of re-asking (see utils/dead-air-watchdog.js): transcription
+  // regularly takes longer than DEAD_AIR_RECOVERY_MS, and a re-ask sent then
+  // collides with the answer. It gives up on the transcript at
+  // TRANSCRIPT_WAIT_CEILING_MS after speech end so a lost one still recovers.
   // ============================================================================
   let watchdogTimer = null;
-  const WATCHDOG_MS = 3000;              // after caller speech
-  const DEAD_AIR_RECOVERY_MS = 4000;     // after a dead response (headroom for late transcripts)
+  // Both overridable (ms) for local harness runs that force the watchdog to
+  // fire before the transcript arrives; production uses the defaults.
+  const WATCHDOG_MS = Number(process.env.WATCHDOG_MS) || 3000;              // after caller speech
+  const DEAD_AIR_RECOVERY_MS = Number(process.env.DEAD_AIR_RECOVERY_MS) || 4000;  // after a dead response (headroom for late transcripts)
   const MAX_DEAD_AIR_RECOVERIES = 3;     // per call; cap reached → offer live agent
   let deadAirRecoveries = 0;
+  let recoveryPromptInFlight = false;    // The watchdog's re-ask is being spoken; a transcript landing now cuts it off
+  let supersededRecoveryResponseId = null;  // Re-ask cut off by a transcript: its response.done is stale, ignore it
+  let recoveryCutPending = null;         // Answer held until the re-ask's response.created arrives (then it is cancelled and the answer acted on)
+  let recoveryCutTimer = null;           // Bound on that hold, in case response.created never comes
+  const RECOVERY_CUT_HOLD_MS = 2000;
+
+  function clearRecoveryCutHold() {
+    if (recoveryCutTimer) { clearTimeout(recoveryCutTimer); recoveryCutTimer = null; }
+    const held = recoveryCutPending;
+    recoveryCutPending = null;
+    return held;
+  }
+
+  // Cancel the watchdog re-ask (created or being created) because the caller
+  // answered it: its late response.done / transcript.done are then ignored.
+  function cutRecoveryPrompt(responseId, why) {
+    recoveryPromptInFlight = false;
+    supersededRecoveryResponseId = responseId || null;
+    cancelResponseAudio("recovery_superseded_by_transcript", responseId, {
+      sendCancelToOpenAI: true,
+      stopTwilioPlayback: true
+    });
+    stateMachine.intakeLog('state_event', { event: 'recovery_prompt_superseded', why, response_id: responseId || null });
+    currentResponseId = null;
+    currentPromptText = null;
+    expectedTranscript = null;
+    actualTranscript = null;
+    audioDoneReceived = false;
+  }
 
   function clearWatchdog() {
     if (watchdogTimer) {
@@ -277,22 +315,46 @@ wss.on("connection", (twilioWs, req) => {
     if (watchdogTimer) clearTimeout(watchdogTimer);
     watchdogTimer = setTimeout(() => {
       watchdogTimer = null;
-      if (_callCompleted) return;
-      if (responseInProgress) return;  // something is already speaking
-      if (speechStartTime) return;     // caller mid-speech; their transcript drives the next turn
-      if (isDeadAirRecovery) {
-        if (deadAirRecoveries >= MAX_DEAD_AIR_RECOVERIES) {
-          console.error(`🚨 WATCHDOG: dead-air recovery cap (${MAX_DEAD_AIR_RECOVERIES}) reached - offering live agent`);
-          offerTransferForCommunicationIssue('dead_air_recoveries_exceeded');
-          return;
-        }
-        deadAirRecoveries++;
+      const waitedMs = transcriptWaitStartedAt ? Date.now() - transcriptWaitStartedAt : 0;
+      const decision = decideWatchdogAction({
+        callCompleted: _callCompleted,
+        responseInProgress,
+        speechActive: Boolean(speechStartTime),
+        waitingForTranscription,
+        transcriptWaitedMs: waitedMs,
+        transcriptWaitCeilingMs: TRANSCRIPT_WAIT_CEILING_MS,
+        isDeadAirRecovery,
+        deadAirRecoveries,
+        maxDeadAirRecoveries: MAX_DEAD_AIR_RECOVERIES,
+      });
+      if (decision.action === 'skip') return;
+      if (decision.action === 'hold') {
+        // The caller's answer is still being transcribed: re-asking now would
+        // collide with it. Wait for it, up to the ceiling.
+        console.log(`⏳ WATCHDOG: transcript still pending ${waitedMs}ms after speech end - holding the ${reason} recovery for up to ${decision.holdMs}ms more`);
+        stateMachine.intakeLog('state_event', { event: 'watchdog_hold', reason, waited_ms: waitedMs, hold_ms: decision.holdMs });
+        armWatchdog(decision.holdMs, reason, isDeadAirRecovery);
+        return;
       }
+      if (decision.transcriptAbandoned) {
+        console.error(`⚠️ WATCHDOG: no transcript ${waitedMs}ms after speech end (ceiling ${TRANSCRIPT_WAIT_CEILING_MS}ms) - giving up on it`);
+        stateMachine.intakeLog('state_event', { event: 'transcript_abandoned', waited_ms: waitedMs });
+        waitingForTranscription = false;
+      }
+      if (decision.action === 'offer_transfer') {
+        console.error(`🚨 WATCHDOG: dead-air recovery cap (${MAX_DEAD_AIR_RECOVERIES}) reached - offering live agent`);
+        offerTransferForCommunicationIssue('dead_air_recoveries_exceeded');
+        return;
+      }
+      if (isDeadAirRecovery) deadAirRecoveries++;
       console.error(`⚠️ WATCHDOG: No response within ${delayMs}ms after ${reason} - sending fallback`);
       stateMachine.intakeLog('state_event', { event: 'watchdog_fallback', reason, delay_ms: delayMs });
       const fallback = stateMachine.getNextPrompt();
       if (fallback && openaiWs?.readyState === WebSocket.OPEN) {
         sendStatePrompt(fallback);
+        // Only in flight if sendStatePrompt actually sent it (it skips when a
+        // response is in progress or the call is completed).
+        recoveryPromptInFlight = responseInProgress && currentPromptText === fallback;
       }
     }, delayMs);
   }
@@ -759,6 +821,15 @@ wss.on("connection", (twilioWs, req) => {
           console.log(`⏭️ Suppressed auto-response while waiting for transcript (id: ${nextResponseId || "unknown"})`);
           break;
         }
+        if (recoveryCutPending) {
+          // The watchdog re-ask, created after the caller already answered it.
+          const held = clearRecoveryCutHold();
+          console.log(`✂️ Watchdog re-ask created after its answer landed - cancelling it (id: ${nextResponseId || "unknown"}) and answering`);
+          clearAudioCompletionTimeout();
+          cutRecoveryPrompt(nextResponseId, 'created_after_answer');
+          processUserInput(held);
+          break;
+        }
         clearWatchdog();
         const staleBytes = playBuffer.length;
         const previousResponseId = currentResponseId;
@@ -877,6 +948,10 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.output_audio_transcript.done":
+        if (supersededRecoveryResponseId && event.response_id === supersededRecoveryResponseId) {
+          console.log(`⏭️ Ignoring transcript of the cut-off watchdog re-ask: "${String(event.transcript || '').substring(0, 40)}"`);
+          break;
+        }
         if (event.transcript) {
           actualTranscript = event.transcript;  // Store transcript for completeness checking
           // CRITICAL: Check for off-script hallucination
@@ -1013,9 +1088,20 @@ wss.on("connection", (twilioWs, req) => {
         break;
         
       case "response.done":
+        // The watchdog re-ask that a transcript cut off: its done arrives after
+        // the answer's prompt has already been sent, so it must not reset the
+        // in-progress flags, null the new prompt's expected transcript, or
+        // arm another recovery.
+        if (supersededRecoveryResponseId && event.response?.id === supersededRecoveryResponseId) {
+          console.log(`⏭️ Ignoring response.done (${event.response?.status}) for the cut-off watchdog re-ask ${supersededRecoveryResponseId}`);
+          supersededRecoveryResponseId = null;
+          break;
+        }
+        recoveryPromptInFlight = false;
+
         // Clear timeout since response is done
         clearAudioCompletionTimeout();
-        
+
         const status = event.response?.status;
         const currentState = stateMachine.getState();
         
@@ -1529,6 +1615,7 @@ wss.on("connection", (twilioWs, req) => {
         }
         if (openaiWs?.readyState === WebSocket.OPEN) {
           waitingForTranscription = true;
+          transcriptWaitStartedAt = Date.now();
           suppressAutoResponseWhileTranscribing = true;
           if (speechDuration < 1000) {
             // Very short speech - wait a bit in case user continues
@@ -1627,7 +1714,41 @@ wss.on("connection", (twilioWs, req) => {
           }
           
           clearConfirmationRecoveryTimer();
-          
+
+          // The watchdog gave up waiting and re-asked the question; this
+          // transcript is the caller's answer to it. Cut the re-ask off and act
+          // on the answer now rather than queuing it behind the re-ask (the
+          // caller would hear the question again and answer it a second time).
+          const cut = transcriptSupersedesRecovery({
+            recoveryPromptInFlight,
+            responseCreated: Boolean(currentResponseId),
+            callCompleted: _callCompleted,
+            inEndedState: stateMachine.getState() === STATES.ENDED,
+          });
+          if (cut === 'cut_now') {
+            console.log(`✂️ Transcript landed during the watchdog re-ask - cutting the re-ask off and answering it: "${transcript.substring(0, 40)}..."`);
+            cutRecoveryPrompt(currentResponseId, 'transcript_during_re_ask');
+          } else if (cut === 'cut_on_create') {
+            // The re-ask's response.create is out but OpenAI has not created it
+            // yet: nothing to cancel, and a second response.create now would be
+            // refused. Hold the answer; response.created cancels the re-ask and
+            // acts on it. Bounded in case that event never comes.
+            console.log(`✂️ Transcript landed before the watchdog re-ask was created - holding it to cut the re-ask on creation: "${transcript.substring(0, 40)}..."`);
+            recoveryPromptInFlight = false;
+            recoveryCutPending = mergePendingTranscript(recoveryCutPending, transcript);
+            if (!recoveryCutTimer) {
+              recoveryCutTimer = setTimeout(() => {
+                recoveryCutTimer = null;
+                const held = clearRecoveryCutHold();
+                if (held && !_callCompleted) {
+                  console.log(`⚠️ Watchdog re-ask never created within ${RECOVERY_CUT_HOLD_MS}ms - acting on the held answer`);
+                  processUserInput(held);
+                }
+              }, RECOVERY_CUT_HOLD_MS);
+            }
+            break;
+          }
+
           if (tts_active) {
             console.log(`🔒 TTS active - queuing transcript until playback completes: "${transcript.substring(0, 40)}..."`);
             queuePendingUserInput(transcript, "tts_active");
@@ -1653,7 +1774,15 @@ wss.on("connection", (twilioWs, req) => {
           processUserInput(transcript);
         }
         break;
-        
+
+      case "conversation.item.input_audio_transcription.failed":
+        // No transcript is coming for that turn: let the watchdog recover at
+        // its own time instead of holding for one until the ceiling.
+        console.error(`❌ Transcription failed: ${event.error?.message || JSON.stringify(event.error || {})}`);
+        stateMachine.intakeLog('state_event', { event: 'transcription_failed' });
+        waitingForTranscription = false;
+        break;
+
       case "error":
         const errorMsg = event.error?.message || JSON.stringify(event.error);
         console.error(`❌ OpenAI error: ${errorMsg}`);
@@ -2004,6 +2133,14 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
       return;
     }
     console.log("👋 Sending greeting retry (strict repeat-only)");
+    // Like sendStatePrompt: this is our own prompt, not the auto-response the
+    // speech_end suppression is for. Left armed, the suppression cancelled the
+    // retry the moment it was created (staging call 20:53 UTC Nov 3 2026: the
+    // caller's "Hello?" got silence twice), and the watchdog must not fire
+    // its own greeting on top of this one.
+    suppressAutoResponseWhileTranscribing = false;
+    clearWatchdog();
+    recoveryPromptInFlight = false;
     currentPromptText = GREETING.primary;
     expectedTranscript = GREETING.primary;
     responseInProgress = true;
@@ -2469,6 +2606,7 @@ STRICT RULES:
       console.log(`⏳ Skipping prompt - response in progress`);
       return;
     }
+    recoveryPromptInFlight = false;  // armWatchdog() sets it after this call when the prompt is its re-ask
     // Clear only truly stale queued input; preserve fresh speech fragments so
     // user corrections are not dropped during barge-in/cancel loops.
     if (pendingUserInput) {
@@ -2802,12 +2940,15 @@ Keep it SHORT.`;
     
     // Test calls go to Neon (flagged is_test) and never to RSE's Sheet or
     // inbox: the daily smoke call (src/monitor/smoke-call.js), any call from
-    // the test caller's numbers (TEST_CALLER_NUMBERS), and every call to an
-    // Ava running outside Railway (a laptop, the harness's spawned copy)
-    // unless LOCAL_SIDE_EFFECTS=on says that copy may write to the real Sheet.
+    // the test caller's numbers (TEST_CALLER_NUMBERS), every call to an Ava
+    // running outside Railway (a laptop, the harness's spawned copy) unless
+    // LOCAL_SIDE_EFFECTS=on says that copy may write to the real Sheet, and
+    // every call to a Railway environment other than production (staging).
+    const railwayEnv = process.env.RAILWAY_ENVIRONMENT_NAME;
     const isSmokeCall = smokeCall.isSmokeCaller(callerNumber)
       || isTestCallerNumber(callerNumber)
-      || (!process.env.RAILWAY_ENVIRONMENT_NAME && process.env.LOCAL_SIDE_EFFECTS !== 'on');
+      || (!railwayEnv && process.env.LOCAL_SIDE_EFFECTS !== 'on')
+      || (Boolean(railwayEnv) && !isProductionEnvironment(railwayEnv));
     if (isSmokeCall) console.log('🧪 Test call: skipping the Google Sheets row and the summary email');
 
     // Log to Google Sheets (non-blocking) - only if confirmation succeeded
