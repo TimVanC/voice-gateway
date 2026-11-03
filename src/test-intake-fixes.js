@@ -173,5 +173,16 @@ console.log('\n🧪 "Thanks" in ADDRESS is not a goodbye');
   check('an actual goodbye still ends the intake', [STATES.CLOSE, STATES.ENDED].includes(r.nextState), true);
 }
 
+console.log("\n🧪 Test-caller numbers never reach the Sheet; RSE's own number alone does not count");
+{
+  const { isTestCallerNumber, isOwnNumber } = require('./utils/call-db');
+  const env = { TWILIO_NUMBER: '+18885842210', TEST_CALLER_NUMBERS: '+19735457975, 2015550177' };
+  check('the smoke caller is a test number', isTestCallerNumber('+19735457975', env), true);
+  check('a persona number is a test number (any formatting)', isTestCallerNumber('(201) 555-0177', env), true);
+  check('a customer is not', isTestCallerNumber('+19735551234', env), false);
+  check("RSE's own number is own but not a test caller", [isOwnNumber('+18885842210', env), isTestCallerNumber('+18885842210', env)], [true, false]);
+  check('no number, no match', isTestCallerNumber(null, env), false);
+}
+
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
