@@ -582,9 +582,14 @@ class CallSession {
     }
 
     // Tail of the previous answer (see CONTINUATION_WINDOW_MS)?
+    // Only the first prompt spoken in reply to a processed answer opens the
+    // window, and only once: a re-ask must never open another (that cascaded,
+    // dropping the caller's real answers one after another).
     const prompt = this.lastPromptRec;
-    if (prompt && this.turnStartAt && this.turnStartAt >= prompt.startedAt - 100
+    if (prompt && prompt.answerSeq === this.answerSeq && !prompt.windowUsed && this.turnStartAt
+        && this.turnStartAt >= prompt.startedAt - 100
         && this.turnStartAt - prompt.startedAt < CONTINUATION_WINDOW_MS && this.lastAnswerState) {
+      prompt.windowUsed = true;
       const lowerT = transcript.toLowerCase();
       if (detectRealPersonRequest(transcript, this.stateMachine.getState())) {
         console.log('🚨 Real person requested (in a late fragment) - transferring');
@@ -600,7 +605,7 @@ class CallSession {
       this.stateMachine.intakeLog('state_event', { event: 'late_fragment_ignored', transcript: transcript.substring(0, 60) });
       this.turnStartAt = 0;
       // Re-ask if the fragment cut the question off; otherwise let it play on.
-      if (!this.isSpeaking() && this.currentPromptText && !this.callCompleted) this.speakPrompt(this.currentPromptText);
+      if (!this.isSpeaking() && this.currentPromptText && !this.callCompleted) this.speakPrompt(this.currentPromptText, { reask: true });
       return;
     }
 
@@ -667,6 +672,7 @@ class CallSession {
 
     const currentState = sm.getState();
     this.lastAnswerState = currentState; // the state this answer was given in (for late fragments)
+    this.answerSeq = (this.answerSeq || 0) + 1; // the next prompt is the reply to this answer
     const lower = transcript.toLowerCase().trim();
     const currentData = sm.getData();
     console.log(`🔄 Processing input in state ${currentState}: "${transcript.substring(0, 50)}..."`);
@@ -798,7 +804,13 @@ class CallSession {
     const state = this.stateMachine.getState();
     if (this.repromptsInState.state !== state) this.repromptsInState = { state, count: 0 };
     const rec = this.speak(prompt, { kind: 'prompt', ...opts });
-    if (rec) this.lastPromptRec = rec;
+    if (rec && !opts.reask && !opts.loopBreak) {
+      // The first prompt after an answer is the reply that opens the late-fragment window.
+      if (!this.lastPromptRec || this.lastPromptRec.answerSeq !== this.answerSeq) {
+        rec.answerSeq = this.answerSeq;
+        this.lastPromptRec = rec;
+      }
+    }
     return rec;
   }
 
