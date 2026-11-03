@@ -2133,6 +2133,14 @@ Speak at a normal conversational pace - not slow or formal. Use contractions. So
       return;
     }
     console.log("👋 Sending greeting retry (strict repeat-only)");
+    // Like sendStatePrompt: this is our own prompt, not the auto-response the
+    // speech_end suppression is for. Left armed, the suppression cancelled the
+    // retry the moment it was created (staging call 20:53 UTC Nov 3 2026: the
+    // caller's "Hello?" got silence twice), and the watchdog must not fire
+    // its own greeting on top of this one.
+    suppressAutoResponseWhileTranscribing = false;
+    clearWatchdog();
+    recoveryPromptInFlight = false;
     currentPromptText = GREETING.primary;
     expectedTranscript = GREETING.primary;
     responseInProgress = true;
