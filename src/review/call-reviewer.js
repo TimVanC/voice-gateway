@@ -316,6 +316,48 @@ async function reviewCall(callRowId, { force = false, log = console } = {}) {
 }
 
 /**
+ * Review the unreviewed real calls of the last `days` days, newest first,
+ * one at a time (CALL_REVIEW_BACKFILL_DAYS on the server, or
+ * scripts/review-calls.js). Already-reviewed calls are skipped, so running
+ * it again costs nothing. Never throws.
+ */
+async function backfill({ days = 7, limit = 50, includeTests = false, log = console } = {}) {
+  const pool = callDb.getPool();
+  if (!pool || !getClient()) return { reviewed: 0, skipped: true };
+  let ids = [];
+  try {
+    ids = (await pool.query(
+      `SELECT c.id FROM calls c
+       WHERE c.started_at > now() - make_interval(days => $1::int)
+         AND ($2::boolean OR NOT c.is_test)
+         AND NOT EXISTS (SELECT 1 FROM call_reviews r WHERE r.call_id = c.id)
+         AND (SELECT count(*) FROM transcript_turns t WHERE t.call_id = c.id) >= $3
+       ORDER BY c.started_at DESC LIMIT $4`,
+      [days, includeTests, MIN_TURNS, limit]
+    )).rows.map((r) => r.id);
+  } catch (err) {
+    log.error(`❌ Call review backfill could not list calls: ${err.message}`);
+    return { reviewed: 0, error: err.message };
+  }
+  if (!ids.length) {
+    log.log(`🔎 Call review backfill: nothing to review in the last ${days} days`);
+    return { reviewed: 0 };
+  }
+  log.log(`🔎 Call review backfill: reviewing ${ids.length} call(s) from the last ${days} days`);
+  let reviewed = 0, withFindings = 0, opened = 0;
+  for (const id of ids) {
+    const r = await reviewCall(id, { log });
+    if (r.review) {
+      reviewed++;
+      if (r.review.findings.length) withFindings++;
+      opened += r.tickets.filter((t) => t.inserted).length;
+    }
+  }
+  log.log(`🔎 Call review backfill done: ${reviewed} reviewed, ${withFindings} with findings, ${opened} new ticket(s)`);
+  return { reviewed, withFindings, opened };
+}
+
+/**
  * The daily check's line: tickets opened or reopened in the last 24 hours,
  * and how many are open in all. A quiet day is a pass.
  */
@@ -373,5 +415,6 @@ module.exports = {
   fingerprintOf,
   upsertTickets,
   reviewCall,
+  backfill,
   ticketsCheck,
 };

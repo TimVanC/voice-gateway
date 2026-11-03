@@ -183,6 +183,7 @@ with new tickets, so the 8 AM email says what needs looking at.
 | `CALL_REVIEW` | `on` to review every saved call |
 | `CALL_REVIEW_MODEL` | optional, default `claude-sonnet-5-5` |
 | `CALL_LOG_URL` | optional, the web app's address for links in the email, default `https://rse-ava-calls.vercel.app` |
+| `CALL_REVIEW_BACKFILL_DAYS` | optional; with a number, 20 s after boot the server reviews the real calls of the last N days that have no review yet (up to `CALL_REVIEW_BACKFILL_LIMIT`, default 50). Reviewed calls are skipped, so leaving it set is harmless. |
 
 Cost: one model call per phone call, a few thousand input tokens and a few
 hundred out, a few cents. Schema: `db/migrations/003_call_reviews_and_tickets.sql`
