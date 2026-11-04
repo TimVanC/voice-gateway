@@ -271,7 +271,14 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
           </div>
         )}
 
-        <h2>Transcript</h2>
+        <h2>
+          Transcript
+          {turns.length > 0 && (
+            <a className="small" style={{ marginLeft: 12, fontWeight: 400 }} href={`/calls/${call.id}/transcript`} download={`call-${call.id}-transcript.txt`}>
+              download .txt
+            </a>
+          )}
+        </h2>
         {turns.length === 0 ? (
           <div className="card empty">
             {call.source === "sheets" ? "No transcript: this call was imported from the Google Sheet, which never stored one." : "No transcript was captured for this call."}
