@@ -213,7 +213,7 @@ function createCallStateMachine() {
   /** No call completes without name unless explicitly configured. Required before CONFIRMATION/CLOSE. */
   function hasRequiredName() {
     if (!data._nameLocked || !data.firstName || !data.lastName) return false;
-    const nonName = /\b(not|heat|yes|no|out|working|the|and|all|say|just|hot|cold|warm|cool|any|its)\b/i;
+    const nonName = /\b(not|heat|yes|no|out|working|the|and|all|say|just|hot|cold|warm|cool|any|its|already|gave|told|you|said|again)\b/i;
     if (nonName.test(String(data.firstName).trim()) || nonName.test(String(data.lastName).trim())) return false;
     if (looksLikeNonNamePhrase(data.firstName, data.lastName)) return false;
     if (String(data.firstName).trim().length < 2 || String(data.lastName).trim().length < 2) return false;
@@ -1072,17 +1072,60 @@ function createCallStateMachine() {
           };
         }
         
+        // "I already gave it to you" / "I just told you" is never a name
+        // (staging call Nov 4 2026: it became Name: "already gave it to you"
+        // and the recap looped). Use what we have, or ask again plainly.
+        if (saysAlreadyGaveIt(lowerTranscript) || isAlreadyProvidedResponse(lowerTranscript)) {
+          if (data.firstName && data.lastName) {
+            data._nameLocked = true;
+            data._nameComplete = true;
+            console.log(`📋 Caller says the name was given - keeping ${data.firstName} ${data.lastName}`);
+            return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
+          }
+          if (data.lastName && !data.firstName) {
+            return { nextState: currentState, prompt: `I have ${data.lastName} as the last name. And your first name?`, action: 'ask' };
+          }
+          return { nextState: currentState, prompt: "Sorry, I didn't catch it. What's your first and last name?", action: 'ask' };
+        }
+
+        // A spelled last name was taken and only the first name is missing: a
+        // one- or two-word answer here is the first name.
+        if (data.lastName && !data.firstName && !data._nameLocked) {
+          const words = stripNameLeadIns(transcript).replace(/[^a-zA-Z' -]/g, ' ').trim().split(/\s+/).filter(Boolean);
+          if (words.length >= 1 && words.length <= 2 && looksLikeName(words[0]) && !looksLikeNonNamePhrase(words[0], '')) {
+            data.firstName = cleanFieldValue(words[0]) || words[0];
+            data.name_confidence = 90;
+            data._nameComplete = true;
+            data._nameLocked = true;
+            console.log(`✅ First name added to the spelled last name (locked): ${data.firstName} ${data.lastName}`);
+            return nameDoneNext(withAcknowledgment(CALLER_INFO.phone));
+          }
+        }
+
         if (transcript.length > 0) {
+          // "Sure. It is, uh, Joseph Chisano." -> "Joseph Chisano." before any
+          // parsing: the lead-in and the filler made the whole turn look like
+          // ordinary words (staging call Nov 4 2026) and the name was refused.
+          const nameText = stripNameLeadIns(transcript);
           // Extract name FIRST
-          const extracted = extractName(transcript);
+          const extracted = extractName(nameText);
           const { firstName, lastName } = extracted;
-          
+
           // SPELLING OVERRIDE: prefer deterministic letter-only so ASR words (e.g. "bye van kallenberg") are never used
-          const strictFirst = parseSpelledLettersOnly(transcript);
+          const strictFirst = parseSpelledLettersOnly(nameText);
           if (strictFirst && strictFirst.letterCount >= 3 && strictFirst.lastName) {
-            data.firstName = cleanFieldValue(firstName) || firstName || '';
+            const first = cleanFieldValue(firstName) || firstName || data.firstName || '';
             data.lastName = cleanFieldValue(strictFirst.lastName) || strictFirst.lastName;
             data.name_confidence = 95;
+            if (!first) {
+              // Letters only, no first name yet (the earlier attempt was refused): ask for it rather than lock half a name.
+              data.firstName = '';
+              data._nameComplete = false;
+              data._nameLocked = false;
+              console.log(`📋 Last name from spelling: ${data.lastName}; first name still needed`);
+              return { nextState: currentState, prompt: `Thanks, I have ${data.lastName}. And your first name?`, action: 'ask' };
+            }
+            data.firstName = first;
             data._nameComplete = true;
             data._nameLocked = true;
             console.log(`✅ Name from spelling letter-only (locked): ${data.firstName} ${data.lastName}`);
@@ -3197,8 +3240,28 @@ function createCallStateMachine() {
       .trim();
 
     // Normalize spoken separators and punctuation.
+    working = working.toLowerCase();
+    // "j two at g mail dot com" (staging call Nov 4 2026) arrived as "j 2 at g
+    // mail dot com" and became g@mail.com: single letters and digits said one
+    // by one join up, and providers said in two words are one word.
+    // Runs of letters and digits said one at a time ("t v c 4 2", "j 2") become one token.
+    {
+      const toks = working.split(" ");
+      const out = [];
+      let run = [];
+      const flush = () => { if (run.length) { out.push(run.join("")); run = []; } };
+      for (const t of toks) {
+        if (/^[a-z0-9]{1,2}$/.test(t) && !/^(at|to|my|is|no|so|it|an|or|of|in|on|be|we|me|do|if|up|as|by)$/.test(t)) run.push(t);
+        else { flush(); out.push(t); }
+      }
+      flush();
+      working = out.join(" ");
+    }
     working = working
-      .toLowerCase()
+      .replace(/\b([a-z0-9]+)\s+(?=[a-z0-9]+@)/g, '$1')
+      .replace(/\bg\s*mail\b/g, 'gmail').replace(/\bhot\s*mail\b/g, 'hotmail').replace(/\bi\s*cloud\b/g, 'icloud')
+      .replace(/\bout\s*look\b/g, 'outlook').replace(/\bya\s*hoo\b/g, 'yahoo').replace(/\bproton\s*mail\b/g, 'protonmail');
+    working = working
       .replace(/\bat\b/g, '@')
       .replace(/\bdot\b/g, '.')
       .replace(/\bunderscore\b/g, '_')
@@ -3208,6 +3271,14 @@ function createCallStateMachine() {
       .replace(/[^a-z0-9@._\-\s]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+
+    // "bob 7 at outlook" / "tim underscore v at yahoo": the words right before the @
+    // belong to the local part (up to three of them, never filler words).
+    for (let i = 0; i < 3; i++) {
+      const before = working;
+      working = working.replace(/(^|\s)([a-z0-9._%+-]+)\s+([a-z0-9._%+-]*@)/, (m, lead, w, rest) => (/^(is|my|email|the|it|its|and|mail|address|um|uh|so|yeah|yes|would|be|that|this)$/.test(w) ? m : lead + w + rest));
+      if (working === before) break;
+    }
 
     // First pass: direct email token in normalized text.
     const directMatch = working.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/);
@@ -3285,6 +3356,18 @@ function createCallStateMachine() {
       'we already did'
     ];
     return alreadyProvidedPatterns.some(p => text.includes(p));
+  }
+
+  /** "Sure. It is, uh, Joseph Chisano." -> "Joseph Chisano." (lead-ins and fillers a caller puts before their name). */
+  function stripNameLeadIns(text) {
+    let t = String(text || '').trim();
+    for (let i = 0; i < 4; i++) {
+      const before = t;
+      t = t.replace(/^(sure|yes|yeah|yep|okay|ok|well|um+|uh+|er+|so|oh|hi|hello)[,.!]?\s+/i, '')
+        .replace(/^(it is|it's|its|this is|that is|that's|my name is|my name's|the name is|name is|i am|i'm|name's|it would be|that would be|you can call me|call me)[,.]?\s+/i, '');
+      if (t === before) break;
+    }
+    return t.replace(/\b(um+|uh+|er+|hmm+)\b[,.]?\s*/gi, ' ').replace(/\s+,/g, ',').replace(/\s{2,}/g, ' ').trim();
   }
 
   /** "I just said that", "I told you", "I gave it to you": the answer was given and not taken. */
@@ -3743,6 +3826,8 @@ function createCallStateMachine() {
     
     if (data.intent === INTENT_TYPES.HVAC_SERVICE) {
       if (currentQuestion === DETAILS.hvac_service.system_type) {
+        // "Furnish" for furnace (staging call Nov 4 2026) and other near-misses the recogniser makes.
+        text = text.replace(/\bfurn(ish|es|ess|ace)\b/gi, 'furnace').replace(/\bmany\s*split\b/gi, 'mini split').replace(/\bmini-split\b/gi, 'mini split').replace(/\bboiler room\b/gi, 'boiler');
         // Normalize system type: "Oh, it's central here" → "central air"
         data.details.systemType = normalizeSystemType(text);
         const uncertainPhrases = /\b(not\s+too?\s+sure|i'?d\s+take|maybe|i\s+think|unsure|not\s+sure|don'?t\s+know|might\s+be)\b/i;

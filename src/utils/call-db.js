@@ -356,6 +356,45 @@ async function saveRecording(callRowId, recorder, source = 'server') {
 }
 
 /**
+ * Store two ready-made 8 kHz mu-law tracks (a recording Twilio made of a
+ * ConversationRelay call, src/utils/twilio-recording.js). Same row shape as
+ * saveRecording(). Never throws.
+ */
+async function saveRecordingTracks(callRowId, { caller, ava }, source = 'twilio') {
+  const pool = getPool();
+  if (!pool || !callRowId || !caller || !ava) return { success: false, skipped: true };
+  try {
+    const totalSamples = Math.max(caller.length, ava.length);
+    if (totalSamples <= 0) return { success: false, skipped: true, reason: 'no audio' };
+    const res = await pool.query(
+      `INSERT INTO recordings (call_id, source, codec, sample_rate, duration_seconds, caller_audio, ava_audio)
+       VALUES ($1, $2, 'pcmu', 8000, $3, $4, $5)
+       ON CONFLICT (call_id) DO NOTHING RETURNING id`,
+      [callRowId, source, (totalSamples / 8000).toFixed(1), Buffer.from(caller), Buffer.from(ava)]
+    );
+    if (res.rows.length === 0) return { success: true, skipped: true, reason: 'exists' };
+    console.log(`🎙️  Recording saved (call ${callRowId}, ${Math.round(totalSamples / 8000)} s, from ${source})`);
+    return { success: true, id: res.rows[0].id };
+  } catch (err) {
+    console.error(`❌ Recording save failed for call ${callRowId}: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
+/** The calls.id for a Twilio call SID, or null. */
+async function findCallRowIdBySid(twilioCallSid) {
+  const pool = getPool();
+  if (!pool || !twilioCallSid) return null;
+  try {
+    const res = await pool.query('SELECT id FROM calls WHERE twilio_call_sid = $1 OR call_id = $1 ORDER BY id DESC LIMIT 1', [twilioCallSid]);
+    return res.rows[0] ? Number(res.rows[0].id) : null;
+  } catch (err) {
+    console.error(`❌ Call lookup failed for ${twilioCallSid}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Delete recordings older than `keepDays` (the calls and transcripts stay).
  * Run once a day by the daily check. Never throws.
  */
@@ -388,6 +427,8 @@ async function closePool() {
 module.exports = {
   saveCall,
   saveRecording,
+  saveRecordingTracks,
+  findCallRowIdBySid,
   pruneOldRecordings,
   createTranscriptRecorder,
   isOwnNumber,

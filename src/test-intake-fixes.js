@@ -411,5 +411,41 @@ console.log('\n🧪 Prompt cache: a stretched render ("tiiiime", staging Nov 3 2
   check('phone read back digit by digit', formatPhoneForReadback('973-222-2222'), '9 7 3, 2 2 2, 2 2 2 2');
 }
 
+console.log('\n🧪 Relay call Nov 4 2026 (Joseph Chiusano): lead-ins before a name, a spelled last name alone, "I already gave it to you", a spelled email, "Furnish"');
+{
+  const atName = () => {
+    const sm = createCallStateMachine();
+    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+    sm.updateData('phone', '+19738852528');
+    sm.transitionTo(STATES.NAME);
+    return sm;
+  };
+  let sm = atName();
+  let r = sm.processInput('Sure. It is, uh, Joseph Chisano.');
+  check('"Sure. It is, uh, Joseph Chisano." is Joseph Chisano', [sm.getData().firstName, sm.getData().lastName, r.nextState], ['Joseph', 'Chisano', STATES.PHONE]);
+
+  sm = atName();
+  r = sm.processInput("It's c h i u s a n o.");
+  check('letters alone: last name kept, first name asked for', [sm.getData().lastName, r.prompt, r.nextState], ['Chiusano', 'Thanks, I have Chiusano. And your first name?', STATES.NAME]);
+  r = sm.processInput('Joseph.');
+  check('the first name completes it', [sm.getData().firstName, sm.getData().lastName, sm.getData()._nameLocked, r.nextState], ['Joseph', 'Chiusano', true, STATES.PHONE]);
+
+  sm = atName();
+  r = sm.processInput('I already gave it to you.');
+  check('"I already gave it to you" is not a name', [sm.getData().firstName, sm.getData().lastName, r.nextState], [null, null, STATES.NAME]);
+  check('and gets a plain re-ask', r.prompt, "Sorry, I didn't catch it. What's your first and last name?");
+
+  const atEmail = () => { const m = atName(); m.transitionTo(STATES.EMAIL); return m; };
+  sm = atEmail(); sm.processInput('j 2 at g mail dot com.');
+  check('"j 2 at g mail dot com" is j2@gmail.com', sm.getData().email, 'j2@gmail.com');
+  sm = atEmail(); sm.processInput('t v c 4 2 at hot mail dot com');
+  check('"t v c 4 2 at hot mail dot com" is tvc42@hotmail.com', sm.getData().email, 'tvc42@hotmail.com');
+  sm = atEmail(); sm.processInput('maria at example dot com');
+  check('plain emails still parse', sm.getData().email, 'maria@example.com');
+
+  sm = atName(); sm.transitionTo(STATES.DETAILS_BRANCH); sm.processInput('Furnish.');
+  check('"Furnish" is a furnace', sm.getData().details.systemType, 'furnace');
+}
+
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

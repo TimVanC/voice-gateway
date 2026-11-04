@@ -57,6 +57,7 @@ const { PromptCache, collectFixedPrompts } = require('./pipeline/prompt-cache');
 const { RoomTone } = require('./pipeline/ambience');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
 const relay = require('./relay');
+const { ingestTwilioRecording } = require('./utils/twilio-recording');
 
 // ============================================================================
 // CONFIGURATION
@@ -227,6 +228,17 @@ app.post('/twilio/voice', twilioWebhookGuard, (req, res) => {
 app.post('/twilio/relay-ended', twilioWebhookGuard, (req, res) => {
   console.log(`🔀 Relay ended (HandoffData: ${(req.body.HandoffData || '').slice(0, 80) || 'none'})`);
   res.type('text/xml').send(relay.relayEndedTwiml({ handoffData: req.body.HandoffData, callerNumber: req.body.From, transferNumber: TRANSFER_PHONE_NUMBER }));
+});
+
+// Twilio's recording of a ConversationRelay call is ready: pull it into Neon.
+app.post('/twilio/recording-status', twilioWebhookGuard, (req, res) => {
+  res.status(204).end();
+  const { RecordingStatus, RecordingUrl, CallSid, RecordingSid } = req.body || {};
+  if (RecordingStatus !== 'completed') return;
+  console.log(`🎙️ Twilio recording ${RecordingSid} completed for ${CallSid} - fetching`);
+  ingestTwilioRecording({ recordingUrl: RecordingUrl, callSid: CallSid, accountSid: TWILIO_ACCOUNT_SID, authToken: TWILIO_AUTH_TOKEN })
+    .then((r) => console.log(r.ok ? `🎙️ Twilio recording stored for call ${r.callRowId} (${r.seconds} s)` : `⚠️ Twilio recording not stored: ${r.reason || JSON.stringify(r.saved)}`))
+    .catch((err) => console.error(`❌ Twilio recording ingest failed: ${err.message}`));
 });
 
 app.post('/twilio/transfer', twilioWebhookGuard, (req, res) => {
@@ -1123,7 +1135,7 @@ class CallSession {
 wss.on('connection', (twilioWs, req) => {
   if ((req.url || '').startsWith('/relay')) {
     console.log('📞 New ConversationRelay connection');
-    new relay.RelaySession(twilioWs, { llm, transferNumber: TRANSFER_PHONE_NUMBER }); // eslint-disable-line no-new
+    new relay.RelaySession(twilioWs, { llm, transferNumber: TRANSFER_PHONE_NUMBER, twilioClient, baseUrl: BASE_URL, record: CALL_RECORDING && Boolean(process.env.DATABASE_URL) }); // eslint-disable-line no-new
     return;
   }
   console.log('📞 New connection');

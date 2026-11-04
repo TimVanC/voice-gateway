@@ -25,13 +25,21 @@ const { cleanCallData } = require('./utils/data-cleanup');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { saveCall: saveCallToDb, createTranscriptRecorder } = require('./utils/call-db');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
+const { startCallRecording } = require('./utils/twilio-recording');
 
 // ElevenLabs voice string for Twilio: VOICE_ID-MODEL-SPEED_STABILITY_SIMILARITY
 // (v3/v4 models take STABILITY_SIMILARITY only). Default: Eryn hyper-real on
 // turbo v2.5 with the settings staging uses, so the first call compares like
 // for like; RELAY_VOICE=kdnRe2koJdOK4Ovxn2DI-v4_turbo-0.65_0.75 tries v4.
 const RELAY_VOICE = process.env.RELAY_VOICE || 'kdnRe2koJdOK4Ovxn2DI-turbo_v2_5-0.92_0.65_0.75';
-const RELAY_EOT_THRESHOLD = process.env.RELAY_EOT_THRESHOLD || '0.7';
+// Flux's own end-of-turn confidence (0.5 eager .. 0.9 patient). 0.7 cut
+// "What's the" and "171 Main Street," off mid-sentence on the first relay
+// call; Twilio's default 0.8 is kept.
+const RELAY_EOT_THRESHOLD = process.env.RELAY_EOT_THRESHOLD || '0.8';
+// After a finished caller turn, wait this long for the next one and merge
+// them ("171 Main Street," + "Madison, New Jersey." were answered apart).
+// Same idea as the pipeline's TURN_HOLD_MS.
+const RELAY_TURN_HOLD_MS = Number(process.env.RELAY_TURN_HOLD_MS ?? 700);
 const RELAY_INTERRUPT_SENSITIVITY = process.env.RELAY_INTERRUPT_SENSITIVITY || 'medium';
 const HINTS = 'Ava,RSE Energy,HVAC,mini split,ductless,heat pump,furnace,boiler,thermostat,generator,Generac,Cummins,maintenance plan,membership,New Jersey,Montclair,Madison,Morristown';
 const GOODBYE_FAILSAFE_MS = 15000;
@@ -74,10 +82,14 @@ function relayEndedTwiml({ handoffData, callerNumber, transferNumber }) {
 }
 
 class RelaySession {
-  constructor(ws, { llm = null, transferNumber = null } = {}) {
+  constructor(ws, { llm = null, transferNumber = null, twilioClient = null, baseUrl = null, record = false } = {}) {
     this.ws = ws;
     this.llm = llm;
     this.transferNumber = transferNumber;
+    this.twilioClient = twilioClient;
+    this.baseUrl = baseUrl;
+    this.record = record;
+    this.held = null; // { text, timer }: a finished turn waiting RELAY_TURN_HOLD_MS for a continuation
     this.sm = createCallStateMachine();
     this.transcript = createTranscriptRecorder();
     this.callSid = null;
@@ -120,11 +132,19 @@ class RelaySession {
         this.callerNumber = msg.customParameters?.callerNumber || msg.from || null;
         if (this.callerNumber) this.sm.updateData('phone', this.callerNumber);
         console.log(`📞 Relay session ${this.sessionId} call ${this.callSid} from ${(this.callerNumber || '').replace(/(\d{3})\d{4}(\d{4})/, '$1***$2')} voice ${RELAY_VOICE}`);
+        if (this.record && this.twilioClient && this.baseUrl) {
+          // The audio never reaches us on a relay call: have Twilio record it; src/utils/twilio-recording.js stores it at the end.
+          startCallRecording({ twilioClient: this.twilioClient, callSid: this.callSid, statusCallbackUrl: `${this.baseUrl}/twilio/recording-status` })
+            .then((sid) => console.log(`🎙️ Twilio recording started (${sid})`))
+            .catch((err) => console.error(`❌ Twilio recording could not start: ${err.message}`));
+        } else if (this.record) {
+          console.warn('⚠️ CALL_RECORDING is on but the Twilio client or PUBLIC_BASE_URL is missing: relay calls are not recorded');
+        }
         break;
       case 'prompt':
         if (!msg.last) return; // partial prompts are off; be safe
         this.lastCallerAt = Date.now();
-        this.handleTurn(String(msg.voicePrompt || ''));
+        this.holdTurn(String(msg.voicePrompt || ''));
         break;
       case 'interrupt':
         console.log(`🛑 Caller interrupted after ${msg.durationUntilInterruptMs} ms: "${(msg.utteranceUntilInterrupt || '').slice(0, 60)}"`);
@@ -142,6 +162,29 @@ class RelaySession {
       default:
         break;
     }
+  }
+
+  /** Hold a finished turn briefly; a continuation that lands in the window is merged into it. */
+  holdTurn(text) {
+    const t = String(text || '').trim();
+    if (!t) return;
+    if (this.held) {
+      clearTimeout(this.held.timer);
+      this.held.text = `${this.held.text} ${t}`;
+      console.log(`🧷 Caller kept going - merged: "${this.held.text.slice(0, 80)}"`);
+    } else {
+      this.held = { text: t, timer: null };
+    }
+    if (!RELAY_TURN_HOLD_MS) return this.flushHeld();
+    this.held.timer = setTimeout(() => this.flushHeld(), RELAY_TURN_HOLD_MS);
+  }
+
+  flushHeld() {
+    if (!this.held) return;
+    const { text, timer } = this.held;
+    if (timer) clearTimeout(timer);
+    this.held = null;
+    this.handleTurn(text);
   }
 
   handleTurn(text) {
@@ -284,6 +327,7 @@ class RelaySession {
     if (this.cleanedUp) return;
     this.cleanedUp = true;
     if (this.goodbyeTimer) clearTimeout(this.goodbyeTimer);
+    if (this.held && this.held.timer) clearTimeout(this.held.timer);
     let data = this.sm.getData();
     const currentState = this.sm.getState();
     data = await cleanCallData(data);
