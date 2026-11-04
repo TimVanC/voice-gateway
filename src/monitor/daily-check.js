@@ -3,7 +3,7 @@
  *
  * Runs a series of independent health checks and emails a single status report
  * to one recipient. Two ways to run it:
- *   - inside the server on Railway, every day at 8:00 AM Eastern, via
+ *   - inside the server on Railway, every day at 8:30 AM and 4 PM Eastern, via
  *     src/monitor/schedule.js (the primary, on-time report), or
  *   - as a one-shot script (`node src/monitor/daily-check.js`), which is how the
  *     GitHub Actions backup runs it; exits 0 when all good, 1 otherwise.

@@ -25,7 +25,7 @@ const { cleanCallData } = require('./utils/data-cleanup');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { saveCall: saveCallToDb, createTranscriptRecorder } = require('./utils/call-db');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
-const { startCallRecording } = require('./utils/twilio-recording');
+const { startCallRecording, ingestCallRecordingsByPolling } = require('./utils/twilio-recording');
 
 // ElevenLabs voice string for Twilio: VOICE_ID-MODEL-SPEED_STABILITY_SIMILARITY
 // (v3/v4 models take STABILITY_SIMILARITY only). Default: Eryn hyper-real on
@@ -82,7 +82,8 @@ function relayEndedTwiml({ handoffData, callerNumber, transferNumber }) {
 }
 
 class RelaySession {
-  constructor(ws, { llm = null, transferNumber = null, twilioClient = null, baseUrl = null, record = false } = {}) {
+  constructor(ws, { llm = null, transferNumber = null, twilioClient = null, baseUrl = null, record = false, twilioAuth = null } = {}) {
+    this.twilioAuth = twilioAuth; // { accountSid, authToken } for pulling the recording file
     this.ws = ws;
     this.llm = llm;
     this.transferNumber = transferNumber;
@@ -336,12 +337,24 @@ class RelaySession {
     logCallIntake(data, currentState, { callId, callerNumber: this.callerNumber, wasTransferred: this.transferRequested })
       .catch((err) => console.error('❌ Failed to log to Google Sheets:', err.message));
     const endedAt = Date.now();
+    const recordingWanted = this.record && this.twilioClient && this.twilioAuth && this.callSid;
     await saveCallToDb(data, currentState, {
       callId, twilioCallSid: this.callSid, callerNumber: this.callerNumber, wasTransferred: this.transferRequested,
       startedAt: this.startedAt, endedAt,
       environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || 'local',
       transcript: this.transcript.turns(),
     }).catch((err) => console.error('❌ Call DB save rejected unexpectedly:', err.message));
+    if (recordingWanted) {
+      // Belt and braces: Twilio's "recording ready" callback once went to the
+      // wrong host (staging's PUBLIC_BASE_URL pointed at production, Nov 4
+      // 2026) and the call stayed without a recording. Poll for it too; the
+      // insert is idempotent, so callback and poll never store it twice.
+      setTimeout(() => {
+        ingestCallRecordingsByPolling({ twilioClient: this.twilioClient, callSid: this.callSid, accountSid: this.twilioAuth.accountSid, authToken: this.twilioAuth.authToken })
+          .then((r) => console.log(r.ok ? `🎙️ Recording pulled for call ${r.callRowId} (${r.seconds} s)` : `⚠️ Recording poll: ${r.reason || JSON.stringify(r.saved)}`))
+          .catch((err) => console.error(`❌ Recording poll crashed: ${err.message}`));
+      }, 8000);
+    }
   }
 }
 

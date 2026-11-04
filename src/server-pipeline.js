@@ -1135,7 +1135,10 @@ class CallSession {
 wss.on('connection', (twilioWs, req) => {
   if ((req.url || '').startsWith('/relay')) {
     console.log('📞 New ConversationRelay connection');
-    new relay.RelaySession(twilioWs, { llm, transferNumber: TRANSFER_PHONE_NUMBER, twilioClient, baseUrl: BASE_URL, record: CALL_RECORDING && Boolean(process.env.DATABASE_URL) }); // eslint-disable-line no-new
+    // Callbacks go to this host, whatever PUBLIC_BASE_URL says: staging's pointed at production once.
+    const host = req.headers && req.headers.host;
+    const baseUrl = host ? `${host.includes('localhost') || host.startsWith('127.') ? 'http' : 'https'}://${host}` : BASE_URL;
+    new relay.RelaySession(twilioWs, { llm, transferNumber: TRANSFER_PHONE_NUMBER, twilioClient, baseUrl, record: CALL_RECORDING && Boolean(process.env.DATABASE_URL), twilioAuth: TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN ? { accountSid: TWILIO_ACCOUNT_SID, authToken: TWILIO_AUTH_TOKEN } : null }); // eslint-disable-line no-new
     return;
   }
   console.log('📞 New connection');

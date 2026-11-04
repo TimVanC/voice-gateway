@@ -107,4 +107,27 @@ async function ingestTwilioRecording({ recordingUrl, callSid, accountSid, authTo
   return { ok: Boolean(saved && saved.success), callRowId, seconds: Math.round(caller.length / 8000), saved };
 }
 
-module.exports = { startCallRecording, ingestTwilioRecording, parseWav };
+/**
+ * No callback came (or it went to the wrong host): ask Twilio for the call's
+ * recordings and ingest the completed one. Polls a few times, since the file
+ * is finalised shortly after hang-up. Never throws.
+ */
+async function ingestCallRecordingsByPolling({ twilioClient, callSid, accountSid, authToken, source = 'twilio', attempts = 6, delayMs = 10000 }) {
+  if (!twilioClient || !callSid) return { ok: false, reason: 'no client or call sid' };
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const list = await twilioClient.recordings.list({ callSid, limit: 5 });
+      const done = list.find((r) => r.status === 'completed');
+      if (done) {
+        const recordingUrl = `https://api.twilio.com${done.uri.replace(/\.json$/, '')}`;
+        return await ingestTwilioRecording({ recordingUrl, callSid, accountSid, authToken, source });
+      }
+    } catch (err) {
+      console.error(`❌ Recording poll failed for ${callSid}: ${err.message}`);
+    }
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return { ok: false, reason: 'no completed recording after polling' };
+}
+
+module.exports = { startCallRecording, ingestTwilioRecording, ingestCallRecordingsByPolling, parseWav };

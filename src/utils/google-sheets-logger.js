@@ -512,6 +512,27 @@ function getSheetsClient() {
  * - Include all captured system types: boiler, furnace, HVAC, heat pump, etc.
  * - Never use transcript slice or selective transcript. Never invent dialogue.
  */
+/**
+ * One answer as a summary fragment: lead-in fillers and "it's / the system
+ * is" dropped, inner sentence breaks turned into commas, no trailing
+ * punctuation, lower-case start. "It's completely out. No air at all." ->
+ * "completely out, no air at all".
+ */
+function tidySummaryFragment(text) {
+  let t = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:(?:yeah|yes|yep|uh|um|er|ah|oh|well|so|okay|ok|right|sure|honestly|basically)[,\s]+)+/i, '')
+    .replace(/^(?:it'?s|it\s+is|the\s+(?:system|unit|furnace|boiler|heat\s+pump|ac|air\s+conditioner)\s+(?:is|has\s+been)|there'?s|there\s+is|i\s+(?:think|guess|believe)\s+(?:it'?s|it\s+is)?)\s+/i, '')
+    .replace(/\s*[.!?;]+\s*(?=\S)/g, ', ')
+    .replace(/[.!?;,\s]+$/g, '')
+    .replace(/^[,\s]+/g, '')
+    .replace(/,\s*,/g, ',')
+    .trim();
+  if (!t) return '';
+  return t.charAt(0).toLowerCase() + t.slice(1);
+}
+
 function generateCallSummary(callData, callStatus) {
   const {
     intent,
@@ -562,34 +583,46 @@ function generateCallSummary(callData, callStatus) {
   
   // Combine system type and issue (make semantic, not verbatim)
   const systemTypeUncertain = details.systemTypeUncertain === true;
-  if (systemType && issueText) {
-    // Clean issue text: remove filler words and rephrase
-    const cleanedIssue = issueText
-      .replace(/\b(there'?s|there\s+is|there'?s\s+no)\s+/gi, 'no ')
-      .replace(/\b(no|not)\s+(hot|warm|air|heat|cooling)\s+(coming|blowing|out|from)\b/gi, 'no warm air')
-      .replace(/\s+/g, ' ')
-      .trim();
-    
-    // Build comprehensive summary; note uncertainty if caller wasn't sure about system type
-    let mainIssue = cleanedIssue && cleanedIssue.length > 10 ? cleanedIssue : 'issue';
-    const systemLabel = systemTypeUncertain ? `possibly ${systemType} (caller unsure)` : systemType;
-    summary = `Caller reported ${mainIssue}; ${systemLabel} system`;
-    
-    // Add severity if available
-    if (severityText) {
-      summary += ` - ${severityText}`;
+  const systemLabel = systemType ? (systemTypeUncertain ? `possibly ${systemType} (caller unsure)` : systemType) : '';
+  if (systemType || issueText) {
+    // One sentence built from the structured answers, in the caller's own
+    // words: "Furnace, about 10 years old: completely out, no air at all;
+    // started this morning." It used to stitch the symptom and severity
+    // answers together verbatim ("Caller reported completely out.  No air
+    // at all. ; furnace system - completely out") and rewrote "no air
+    // coming out" as "no warm air" (review ticket 12, seven calls).
+    const fragments = [];
+    const addFragment = (text) => {
+      const f = tidySummaryFragment(text);
+      if (!f) return;
+      const words = new Set(f.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2));
+      // Skip a fragment that only repeats an earlier one ("completely out"
+      // after "completely out, no air at all").
+      const repeated = fragments.some((g) => {
+        const gw = new Set(g.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2));
+        return [...words].every((w) => gw.has(w)) || [...gw].every((w) => words.has(w)) && gw.size >= words.size;
+      });
+      if (repeated) {
+        // Keep the longer of the two.
+        const i = fragments.findIndex((g) => g.length < f.length && [...new Set(g.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2))].every((w) => words.has(w)));
+        if (i >= 0) fragments[i] = f;
+        return;
+      }
+      fragments.push(f);
+    };
+    addFragment(issueText);
+    addFragment(severityText);
+    if (details.startTime) {
+      const started = tidySummaryFragment(details.startTime)
+        .replace(/^(?:it\s+)?(?:started|began|happened|stopped(?:\s+working)?)\s+/i, 'started ')
+        .replace(/^(?:since|from)\s+/i, 'since ');
+      if (started) addFragment(/^(?:started|since)\b/i.test(started) ? started : `started ${started}`);
     }
-    summary += '.';
-  } else if (systemType) {
-    const systemLabel = systemTypeUncertain ? `possibly ${systemType} (caller unsure)` : systemType;
-    summary = `Caller reported issue with ${systemLabel} system.`;
-  } else if (issueText) {
-    // Clean and simplify issue text
-    const cleanedIssue = issueText
-      .replace(/\b(there'?s|there\s+is)\s+(no)\s+/gi, 'no ')
-      .replace(/\b(no|not)\s+(hot|warm|air|heat|cooling)\s+(coming|blowing|out)\b/gi, 'no warm air')
-      .trim();
-    summary = `Caller reported ${cleanedIssue}.`;
+    const age = details.systemAge ? (details.systemAge === 'new' ? 'new' : `${details.systemAge} old`) : '';
+    const head = systemLabel ? `${systemLabel.charAt(0).toUpperCase()}${systemLabel.slice(1)}${age ? `, ${age}` : ''}` : '';
+    if (head && fragments.length) summary = `${head}: ${fragments.join('; ')}.`;
+    else if (head) summary = `${head}: issue not described.`;
+    else summary = `${fragments.join('; ').replace(/^./, (c) => c.toUpperCase())}.`;
   } else {
     // Fallback: use locked intent + structured details only (no transcript)
     const intentDescriptions = {

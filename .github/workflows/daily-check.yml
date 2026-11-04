@@ -1,6 +1,6 @@
 name: RSE Ava Daily Check
 
-# BACKUP ONLY. The on-time 8 AM and 4 PM Eastern reports are sent by the Railway
+# BACKUP ONLY. The on-time 8:30 AM and 4 PM Eastern reports are sent by the Railway
 # server itself (src/monitor/schedule.js). GitHub's cron has been starting this
 # repo's scheduled runs 3-9 hours late every day, so this job exists to catch the
 # one thing the server cannot report on: the server being down. Scheduled runs
@@ -9,15 +9,15 @@ name: RSE Ava Daily Check
 
 on:
   schedule:
-    # Targets: 8:00 AM and 4:00 PM America/New_York. GitHub cron is UTC-only, so
+    # Targets: 8:30 AM and 4:00 PM America/New_York. GitHub cron is UTC-only, so
     # both candidate UTC hours are scheduled for each and the DST guard step
     # picks the right one:
-    #   12:03 / 20:03 UTC = 8:03 AM / 4:03 PM EDT (Mar-Nov)
-    #   13:03 / 21:03 UTC = 8:03 AM / 4:03 PM EST (Nov-Mar)
+    #   12:33 / 20:03 UTC = 8:33 AM / 4:03 PM EDT (Mar-Nov)
+    #   13:33 / 21:03 UTC = 8:33 AM / 4:03 PM EST (Nov-Mar)
     # Minute 3 instead of 0 because top-of-hour schedules queue the longest.
     # In practice GitHub starts these hours late; see the note above.
-    - cron: '3 12 * * *'
-    - cron: '3 13 * * *'
+    - cron: '33 12 * * *'
+    - cron: '33 13 * * *'
     - cron: '3 20 * * *'
     - cron: '3 21 * * *'
   workflow_dispatch:
@@ -34,7 +34,7 @@ jobs:
     # The check takes ~30 s; do not let a stuck runner hold a slot for hours.
     timeout-minutes: 10
     steps:
-      - name: Decide whether this trigger matches 8 AM or 4 PM Eastern
+      - name: Decide whether this trigger matches 8:30 AM or 4 PM Eastern
         id: guard
         env:
           SCHEDULE: ${{ github.event.schedule }}
@@ -45,10 +45,10 @@ jobs:
           fi
           zone=$(TZ=America/New_York date +%Z)   # EDT or EST
           case "$zone|$SCHEDULE" in
-            "EDT|3 12 * * *"|"EDT|3 20 * * *"|"EST|3 13 * * *"|"EST|3 21 * * *")
+            "EDT|33 12 * * *"|"EDT|3 20 * * *"|"EST|33 13 * * *"|"EST|3 21 * * *")
               echo "run=true" >> "$GITHUB_OUTPUT" ;;
             *)
-              echo "Skipping: schedule '$SCHEDULE' is not 8 AM or 4 PM in zone $zone"
+              echo "Skipping: schedule '$SCHEDULE' is not 8:30 AM or 4 PM in zone $zone"
               echo "run=false" >> "$GITHUB_OUTPUT" ;;
           esac
 

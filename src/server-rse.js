@@ -509,7 +509,13 @@ wss.on("connection", (twilioWs, req) => {
   // SILENCE RECOVERY (for when INCOMPLETE responses leave system stuck)
   // ============================================================================
   let silenceRecoveryTimer = null;
-  const SILENCE_RECOVERY_MS = 6000;
+  // Re-ask a question once when the caller has said nothing for this long
+  // after Ava finished speaking it. Armed by the audio pump the moment the
+  // last frame of a prompt goes out (startSilenceRecoveryTimer). Before Nov
+  // 4 2026 the timer existed but nothing armed it, so a missed question sat
+  // in silence until the 20 s keep-alive noticed (review ticket 46: 31 s).
+  const SILENCE_RECOVERY_MS = 12000;
+  let silenceRepromptedFor = null; // currentPromptText already re-asked once
   
   // ============================================================================
   // CONFIRMATION RECOVERY (for when user doesn't respond to yes/no questions)
@@ -586,6 +592,11 @@ wss.on("connection", (twilioWs, req) => {
           // Log every 2 seconds (100 frames) to show progress
           if (VERBOSE_DEBUG && audioFramesSent % 100 === 0) {
             console.log(`🔊 Audio progress: ${(audioFramesSent * 0.02).toFixed(1)}s sent, ${(playBuffer.length/8000).toFixed(1)}s remaining`);
+          }
+          // The last frame of a finished prompt just went out: from here the
+          // caller is expected to answer. Re-ask once if nothing comes.
+          if (bytesConsumedFromBuffer > 0 && playBuffer.length === 0 && audioDoneReceived) {
+            startSilenceRecoveryTimer();
           }
         }
         
@@ -1819,50 +1830,39 @@ wss.on("connection", (twilioWs, req) => {
   // ============================================================================
   // SILENCE RECOVERY TIMER
   // ============================================================================
+  // States where a question is waiting for a short factual answer. The
+  // recap, the close and the name (spelling mode has its own prompts) are
+  // left alone: there a caller may need time, and the keep-alive still
+  // covers them.
+  const SILENCE_REPROMPT_STATES = new Set([STATES.PHONE, STATES.EMAIL, STATES.DETAILS_BRANCH, STATES.ADDRESS, STATES.AVAILABILITY]);
+
   function startSilenceRecoveryTimer() {
-    // Clear any existing timer
     if (silenceRecoveryTimer) {
       clearTimeout(silenceRecoveryTimer);
+      silenceRecoveryTimer = null;
     }
-    
-    // CRITICAL: Do NOT start recovery timer while TTS is playing (email confirmation must be atomic)
-    if (tts_active) {
-      console.log(`⏸️  Silence recovery disabled - TTS playing`);
-      return;
-    }
-    // CRITICAL: Do NOT start recovery timer during CONFIRMATION, CLOSE, or NAME (spelling) — no re-prompt while same state
+    if (_callCompleted || transferRequested || transferOfferPending) return;
     const currentState = stateMachine.getState();
-    if (currentState === STATES.CONFIRMATION || currentState === STATES.CLOSE || currentState === STATES.NAME) {
-      console.log(`⏸️  Silence recovery disabled in ${currentState} state - waiting for user response`);
-      return;
-    }
-    
+    if (!SILENCE_REPROMPT_STATES.has(currentState)) return;
+    const promptAtArm = currentPromptText;
+    if (!promptAtArm || promptAtArm === silenceRepromptedFor) return; // one re-ask per prompt
+    if (speechStartTime || pendingUserInput) return; // the caller is already answering
+
     silenceRecoveryTimer = setTimeout(() => {
       silenceRecoveryTimer = null;
-      
-      // Do not run recovery while TTS is playing
-      if (tts_active) {
-        console.log(`⏸️  Silence recovery skipped - TTS still playing`);
-        return;
-      }
-      // Double-check state hasn't changed
+      if (_callCompleted || transferRequested || transferOfferPending) return;
+      if (tts_active || responseInProgress || playBuffer.length > 0) return; // Ava is talking
+      if (speechStartTime || pendingUserInput) return; // the caller is talking
       const state = stateMachine.getState();
-      if (state === STATES.CONFIRMATION || state === STATES.CLOSE || state === STATES.NAME) {
-        console.log(`⏸️  Silence recovery cancelled - now in ${state} state`);
-        return;
-      }
-      
-      // Only prompt if we're not already in a response and user isn't speaking
-      if (!responseInProgress && !speechStartTime) {
-        console.log(`⏰ Silence recovery: no user response after ${SILENCE_RECOVERY_MS}ms`);
-        
-        // Re-send the current prompt with FRESH context
-        const currentPrompt = stateMachine.getNextPrompt();
-        if (currentPrompt && openaiWs?.readyState === WebSocket.OPEN) {
-          // Use special recovery prompt that forces complete re-statement
-          sendRecoveryPrompt(currentPrompt);
-        }
-      }
+      if (!SILENCE_REPROMPT_STATES.has(state) || currentPromptText !== promptAtArm) return; // moved on
+      if (openaiWs?.readyState !== WebSocket.OPEN) return;
+
+      const prompt = stateMachine.getNextPrompt();
+      if (!prompt) return;
+      silenceRepromptedFor = promptAtArm;
+      console.log(`⏰ Silence recovery: no answer ${Math.round(SILENCE_RECOVERY_MS / 1000)} s after the ${state} question; asking once more`);
+      stateMachine.intakeLog('state_event', { event: 'silence_reprompt', state, after_ms: SILENCE_RECOVERY_MS });
+      sendStatePrompt(prompt);
     }, SILENCE_RECOVERY_MS);
   }
   
@@ -3036,7 +3036,7 @@ server.listen(PORT, () => {
 });
 
 // ============================================================================
-// DAILY HEALTH CHECK (8 AM and 4 PM Eastern, runs here on Railway)
+// DAILY HEALTH CHECK (8:30 AM and 4 PM Eastern, runs here on Railway)
 // ============================================================================
 // Enabled automatically in Railway's "production" environment only. Railway
 // injects the environment name; the "staging" environment (deployed from the
@@ -3055,7 +3055,7 @@ if (['on', 'true', '1', 'yes'].includes(DAILY_CHECK_FLAG)) {
   console.warn(`⚠️ Ignoring DAILY_CHECK_SCHEDULE="${DAILY_CHECK_FLAG}" (expected on or off); using the environment rule`);
 }
 // Local times in America/New_York, comma separated.
-const DAILY_CHECK_TIMES = process.env.DAILY_CHECK_TIMES || '08:00,16:00';
+const DAILY_CHECK_TIMES = process.env.DAILY_CHECK_TIMES || '08:30,16:00';
 // Daily smoke call (src/monitor/smoke-call.js): with DAILY_SMOKE_CALL=on the
 // daily check also phones Ava's number from a test number and checks that
 // she answers with her greeting. It runs inside the daily check, so it is
