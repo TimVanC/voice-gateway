@@ -347,7 +347,7 @@ console.log('\n🧪 Phone: a 9-digit number is read back, "I just said that" off
   const sm = atPhone();
   const r1 = sm.processInput('973222222');
   check('9 digits: stays in PHONE', r1.nextState, STATES.PHONE);
-  check('9 digits: reads back what came through and says how many digits', /9 7 3, 2 2 2, 2 2 2\. That's 9 digits/.test(r1.prompt), true);
+  check('9 digits: asks for the last digit, not the whole question again', r1.prompt, 'Sorry, I think I missed the last digit. What was it?');
   const r2 = sm.processInput('Yeah. It just said that.');
   check('"it just said that": offers the number they are calling from', /calling from, 973, 885, 2528/.test(r2.prompt), true);
   check('still in PHONE while asking', r2.nextState, STATES.PHONE);
@@ -368,7 +368,32 @@ console.log('\n🧪 Phone: a 9-digit number is read back, "I just said that" off
 
   const sm4 = atPhone();
   const r6 = sm4.processInput('97322222222222');
-  check('14 digits: read back and asked again, not stored', [r6.nextState, sm4.getData()._phoneComplete || false], [STATES.PHONE, false]);
+  check('14 digits: asked again, not stored', [r6.nextState, sm4.getData()._phoneComplete || false], [STATES.PHONE, false]);
+
+  // Tim's case: "973-222-2222" heard as nine digits; the last digit completes it.
+  const sm5 = atPhone();
+  sm5.processInput('973222222');
+  const r7 = sm5.processInput('2');
+  check('the missing digit is stitched on and read back once', r7.prompt, 'Got it, 973, 222, 2222. Is that right?');
+  const r8 = sm5.processInput('Yes.');
+  check('yes: 973-222-2222 stored and on to EMAIL', [sm5.getData().phone, r8.nextState], ['973-222-2222', STATES.EMAIL]);
+
+  const sm6 = atPhone();
+  const r9 = sm6.processInput('97322222');
+  check('8 digits: asks for the last two', r9.prompt, 'Sorry, I missed the last two digits. What were they?');
+  const r10 = sm6.processInput('22');
+  check('two digits complete it', /973, 222, 2222/.test(r10.prompt), true);
+
+  const sm7 = atPhone();
+  const r11 = sm7.processInput('9732222');
+  check('7 digits: asks for the number again', r11.prompt, "Sorry, I didn't quite get that. Could you repeat the number?");
+  const r12 = sm7.processInput('9732222222');
+  check('a full number after a short one replaces it', [sm7.getData().phone, r12.nextState], ['973-222-2222', STATES.EMAIL]);
+
+  const sm8 = atPhone();
+  sm8.processInput('973222222');
+  const r13 = sm8.processInput('Nine seven three two two two two two two two');
+  check('a full number said again, in words the pipeline did not normalise, is not stitched on', r13.nextState, STATES.PHONE);
 }
 
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);

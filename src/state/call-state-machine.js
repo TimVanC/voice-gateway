@@ -142,6 +142,7 @@ function createCallStateMachine() {
   }
   
   // Confidence-based clarification tracking
+  let pendingPartialPhone = null; // digits heard when the number came up short; the next short answer completes it
   let pendingClarification = {
     field: null,
     value: null,
@@ -1440,23 +1441,48 @@ function createCallStateMachine() {
           };
         }
         
-        // Seven to nine digits, or more than eleven: the recogniser dropped or
-        // added one (Flux dropped one "two" of a run of seven, staging call
-        // Nov 4 2026). Read back what came through and ask for the whole
-        // number, instead of the bare question the caller just answered.
+        // A short number (7-9 digits: the recogniser dropped one, as with a run
+        // of seven "two"s on the staging call of Nov 4 2026) is kept, and the
+        // caller is asked only for what is missing; their next short answer is
+        // stitched on and read back once. A full number at any point replaces
+        // it. Not the bare question again, which is what used to happen.
         {
           const heard = transcript.replace(/\D/g, '');
+          if (pendingPartialPhone && heard.length > 0 && heard.length < 10) {
+            const missing = 10 - pendingPartialPhone.length;
+            if (heard.length <= missing) {
+              const joined = pendingPartialPhone + heard;
+              console.log(`🔢 Phone completed from "${pendingPartialPhone}" + "${heard}" -> ${joined}`);
+              pendingPartialPhone = null;
+              if (joined.length === 10) {
+                const formatted = `${joined.slice(0, 3)}-${joined.slice(3, 6)}-${joined.slice(6)}`;
+                data.phone_confidence = 70;
+                pendingClarification = { field: 'phone', value: formatted, confidence: estimatePhoneConfidence(joined), awaitingConfirmation: true };
+                return { nextState: currentState, prompt: `Got it, ${formatPhoneForReadback(formatted)}. Is that right?`, action: 'ask' };
+              }
+              pendingPartialPhone = joined;
+              return { nextState: currentState, prompt: `Thanks. And the last ${10 - joined.length === 1 ? 'digit' : `${10 - joined.length} digits`}?`, action: 'ask' };
+            }
+          }
           if ((heard.length >= 7 && heard.length < 10) || heard.length > 11) {
             console.log(`⚠️  Partial phone number: "${heard}" (${heard.length} digits)`);
-            return {
-              nextState: currentState,
-              prompt: `I got ${readbackDigits(heard)}. That's ${heard.length} digits. Could you say the full ten-digit number once more, nice and slow?`,
-              action: 'ask'
-            };
+            if (heard.length > 11) {
+              pendingPartialPhone = null;
+              return { nextState: currentState, prompt: "Sorry, I got more digits than I expected there. Could you give me the number once more?", action: 'ask' };
+            }
+            pendingPartialPhone = heard;
+            const missing = 10 - heard.length;
+            const prompt = missing === 1
+              ? 'Sorry, I think I missed the last digit. What was it?'
+              : missing === 2
+                ? 'Sorry, I missed the last two digits. What were they?'
+                : "Sorry, I didn't quite get that. Could you repeat the number?";
+            return { nextState: currentState, prompt, action: 'ask' };
           }
         }
 
         if (hasPhoneNumber(lowerTranscript)) {
+          pendingPartialPhone = null;
           const phone = extractPhone(transcript);
           const phoneConf = estimatePhoneConfidence(transcript);
           
