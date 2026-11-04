@@ -399,9 +399,18 @@ async function backfill({ days = 7, limit = 50, includeTests = false, log = cons
   return { reviewed, withFindings, opened };
 }
 
+// When the tickets digest was last emailed (this process). Tickets opened or
+// reopened since then go into the next digest; after a restart the window
+// falls back to 24 hours.
+let lastDigestSentAt = null;
+
 /**
- * The daily check's line: tickets opened or reopened in the last 24 hours,
- * and how many are open in all. A quiet day is a pass.
+ * The daily check's line: how many calls were reviewed and how many tickets
+ * are open. It PASSES whether or not there are new tickets: new tickets are
+ * a product matter, not an outage, and go out in their own email (the
+ * `digest` on the result, sent by daily-check.js), so a day with findings
+ * does not read as "attention needed" on the health report. The line only
+ * fails when the tickets cannot be read at all.
  */
 async function ticketsCheck() {
   const result = { name: 'Call review tickets', status: 'pass', detail: '' };
@@ -411,10 +420,10 @@ async function ticketsCheck() {
     return result;
   }
   try {
+    const since = lastDigestSentAt || new Date(Date.now() - 24 * 60 * 60 * 1000);
     const counts = (await pool.query(
       `SELECT count(*) FILTER (WHERE status = 'open') AS open,
               count(*) FILTER (WHERE status = 'open' AND severity = 'high') AS open_high,
-              count(*) FILTER (WHERE status = 'open' AND (created_at > now() - interval '24 hours' OR reopened_at > now() - interval '24 hours')) AS fresh,
               count(*) FILTER (WHERE last_seen_at > now() - interval '24 hours') AS seen
        FROM tickets`
     )).rows[0];
@@ -422,17 +431,30 @@ async function ticketsCheck() {
       `SELECT count(*) AS n, count(*) FILTER (WHERE verdict = 'issues') AS with_issues FROM call_reviews WHERE created_at > now() - interval '24 hours'`
     )).rows[0];
     const fresh = (await pool.query(
-      `SELECT id, severity, title, occurrences FROM tickets
-       WHERE status = 'open' AND (created_at > now() - interval '24 hours' OR reopened_at > now() - interval '24 hours')
-       ORDER BY CASE severity WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC, last_seen_at DESC LIMIT 5`
+      `SELECT id, severity, category, title, detail, fix_area, occurrences, first_call_id, last_call_id,
+              (reopened_at IS NOT NULL AND reopened_at > $1) AS reopened
+       FROM tickets
+       WHERE status = 'open' AND (created_at > $1 OR reopened_at > $1)
+       ORDER BY CASE severity WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC, last_seen_at DESC`,
+      [since]
     )).rows;
     const n = (v) => Number(v || 0);
     const parts = [`${n(reviewed.n)} call(s) reviewed since yesterday, ${n(reviewed.with_issues)} with findings`];
-    if (n(counts.fresh) > 0) {
-      result.status = 'warning';
-      parts.push(`${n(counts.fresh)} new ticket(s): ${fresh.map((t) => `#${t.id} [${t.severity}] ${t.title}${t.occurrences > 1 ? ` (×${t.occurrences})` : ''}`).join('; ')}`);
+    if (fresh.length > 0) {
+      parts.push(`${fresh.length} new or reopened ticket(s), sent in their own "RSE Ava call review" email`);
+      result.digest = {
+        since,
+        tickets: fresh,
+        reviewed: n(reviewed.n),
+        withIssues: n(reviewed.with_issues),
+        open: n(counts.open),
+        openHigh: n(counts.open_high),
+        url: `${CALL_LOG_URL}/tickets`,
+        callUrl: (id) => `${CALL_LOG_URL}/calls/${id}`,
+        markSent: () => { lastDigestSentAt = new Date(); },
+      };
     } else {
-      parts.push('no new tickets');
+      parts.push(lastDigestSentAt ? 'no new tickets since the last check' : 'no new tickets');
     }
     parts.push(`${n(counts.open)} open in all${n(counts.open_high) ? ` (${n(counts.open_high)} high)` : ''}, ${n(counts.seen)} seen again today`);
     parts.push(`${CALL_LOG_URL}/tickets`);

@@ -175,12 +175,18 @@ as evidence. Findings are filed as tickets keyed by a fingerprint
 (`category:key`), so one bug seen on ten calls is one ticket with ten
 occurrences; marking a ticket fixed and seeing it again reopens it. The web app
 lists them at `/tickets` and shows each call's review on its call page. The
-daily check gets a line, `Call review tickets`, that is a WARNING on any day
-with new tickets, so the 8:30 AM email says what needs looking at.
+daily check gets a line, `Call review tickets`, with the counts; it passes
+whether or not there are new tickets and fails only when the tickets cannot
+be read. New or reopened tickets since the previous check are sent in their
+own email, subject `RSE Ava call review: N new ticket(s)`, to `REVIEW_EMAIL_TO`
+(default: the health report's inbox), so findings never make the health
+report read "attention needed" and can be filtered separately. A quiet day
+sends no digest.
 
 | Variable | Value |
 |---|---|
 | `CALL_REVIEW` | `on` to review every saved call |
+| `REVIEW_EMAIL_TO` | optional, where the ticket digest goes; default `MONITOR_EMAIL_TO` |
 | `CALL_REVIEW_MODEL` | optional, default `claude-sonnet-5-5` |
 | `CALL_LOG_URL` | optional, the web app's address for links in the email, default `https://rse-ava-calls.vercel.app` |
 | `CALL_REVIEW_BACKFILL_DAYS` | optional; with a number, 20 s after boot the server reviews the real calls of the last N days that have no review yet (up to `CALL_REVIEW_BACKFILL_LIMIT`, default 50). Reviewed calls are skipped, so leaving it set is harmless. |
