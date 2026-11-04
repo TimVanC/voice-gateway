@@ -571,6 +571,67 @@ async function sendReport(checks, allGood) {
 }
 
 // ============================================================================
+// CALL REVIEW DIGEST (its own email, separate from the health report)
+// ============================================================================
+// Tickets opened or reopened by the call reviewer since the last check go to
+// REVIEW_EMAIL_TO (default: the same inbox as the health report) under their
+// own subject, so new findings never turn the health report into "attention
+// needed" and can be filtered on their own. Sent only when there is something
+// new; a quiet day sends nothing.
+const REVIEW_EMAIL_TO = process.env.REVIEW_EMAIL_TO || MONITOR_EMAIL_TO;
+
+function formatTicketsDigest(digest, now = new Date()) {
+  const localDate = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, dateStyle: 'medium', timeStyle: 'short' }).format(now);
+  const zone = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, timeZoneName: 'short' })
+    .formatToParts(now).find((p) => p.type === 'timeZoneName').value;
+  const sinceLocal = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(digest.since));
+  const lines = [
+    'RSE Ava — Call Review',
+    `Run at: ${localDate} ${zone}`,
+    `${digest.reviewed} call(s) reviewed in the last 24 hours, ${digest.withIssues} with findings.`,
+    `${digest.tickets.length} ticket(s) opened or reopened since ${sinceLocal}; ${digest.open} open in all${digest.openHigh ? ` (${digest.openHigh} high)` : ''}.`,
+    '',
+  ];
+  for (const t of digest.tickets) {
+    lines.push(`#${t.id} [${t.severity}] ${t.title}${t.reopened ? ' (reopened)' : ''}${t.occurrences > 1 ? ` (seen on ${t.occurrences} calls)` : ''}`);
+    if (t.detail) lines.push(`    Expected: ${t.detail}`);
+    if (t.fix_area) lines.push(`    Where: ${t.fix_area}`);
+    lines.push(`    Latest call: ${digest.callUrl(t.last_call_id)}`);
+    lines.push('');
+  }
+  lines.push(`All tickets: ${digest.url}`);
+  return lines.join('\n');
+}
+
+async function sendTicketsDigest(digest) {
+  const result = { sent: false, detail: '' };
+  try {
+    if (!process.env.SENDGRID_API_KEY) { result.detail = 'Missing SENDGRID_API_KEY'; return result; }
+    if (!process.env.EMAIL_FROM) { result.detail = 'Missing EMAIL_FROM'; return result; }
+    const now = new Date();
+    const localTime = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, timeStyle: 'short' }).format(now);
+    const zone = new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, timeZoneName: 'short' })
+      .formatToParts(now).find((p) => p.type === 'timeZoneName').value;
+    const high = digest.tickets.filter((t) => t.severity === 'high').length;
+    // A different prefix from the health report on purpose: mailbox filters key on it.
+    const subject = `RSE Ava call review: ${digest.tickets.length} new ticket(s)${high ? `, ${high} high` : ''} (${localTime} ${zone})`;
+    sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+    sgMail.setTimeout(30000);
+    const [response] = await sgMail.send({
+      from: process.env.EMAIL_FROM,
+      to: REVIEW_EMAIL_TO,
+      subject,
+      text: formatTicketsDigest(digest, now),
+    });
+    result.sent = true;
+    result.detail = `SendGrid responded ${response.statusCode}`;
+  } catch (err) {
+    result.detail = `Email send error — ${err && err.message ? err.message : String(err)}`;
+  }
+  return result;
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 /**
@@ -609,6 +670,24 @@ async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) 
     }
   }
 
+  // New call-review tickets go out in their own email (see sendTicketsDigest).
+  // If that email cannot be sent the health report says so, and the tickets
+  // stay in the next digest.
+  for (const c of checks) {
+    if (!c.digest) continue;
+    const digest = c.digest;
+    delete c.digest;
+    const sent = await sendTicketsDigest(digest);
+    if (sent.sent) {
+      digest.markSent();
+      console.log(`📧 Call review digest emailed to ${REVIEW_EMAIL_TO} (${digest.tickets.length} ticket(s)): ${sent.detail}`);
+    } else {
+      c.status = 'warning';
+      c.detail += `. Digest email NOT sent: ${sent.detail}`;
+      console.error(`❌ Call review digest NOT sent: ${sent.detail}`);
+    }
+  }
+
   for (const c of checks) {
     console.log(`[${statusLabel(c.status)}] ${c.name}: ${c.detail}`);
   }
@@ -632,7 +711,7 @@ async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) 
   return { checks, allGood, email, ok };
 }
 
-module.exports = { runDailyCheck, smokeCallRelayCheck };
+module.exports = { runDailyCheck, smokeCallRelayCheck, formatTicketsDigest };
 
 // One-shot mode (GitHub Actions backup / `node src/monitor/daily-check.js`).
 // When required by the server nothing runs until the schedule fires.
