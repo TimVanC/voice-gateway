@@ -56,6 +56,7 @@ const { createLlm, resolveLlmProvider } = require('./pipeline/llm');
 const { PromptCache, collectFixedPrompts } = require('./pipeline/prompt-cache');
 const { RoomTone } = require('./pipeline/ambience');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
+const relay = require('./relay');
 
 // ============================================================================
 // CONFIGURATION
@@ -75,6 +76,10 @@ const TTS_FALLBACK = (() => {
   return process.env.OPENAI_API_KEY ? 'openai' : null;
 })();
 const AMBIENCE_LEVEL_DB = Number(process.env.AMBIENCE_LEVEL_DB || -50);
+// RELAY=on: calls go through Twilio ConversationRelay (src/relay.js) instead
+// of the media stream below: Twilio does STT, turn-taking and ElevenLabs TTS,
+// we exchange text. Staging trial, Nov 2026.
+const RELAY = (process.env.RELAY || '').toLowerCase() === 'on';
 // Bump to throw away every stored render (v2: Nov 3 2026, a stretched take of the availability question was on staging's volume).
 const PROMPT_CACHE_VERSION = 2;
 // Call recording (CALL_RECORDING=on), as in server-rse.js: both sides of every
@@ -203,6 +208,10 @@ app.post('/twilio/voice', twilioWebhookGuard, (req, res) => {
   console.log('\n📞 Incoming call');
   console.log(`From: ${req.body.From?.replace(/(\d{3})\d{4}(\d{4})/, '$1***$2') || 'Unknown'}`);
   const host = req.headers.host;
+  if (RELAY) {
+    console.log('🔀 ConversationRelay call');
+    return res.type('text/xml').send(relay.relayTwiml({ host, callerNumber: req.body.From || '' }));
+  }
   const protocol = host?.includes('localhost') ? 'ws' : 'wss';
   res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -212,6 +221,12 @@ app.post('/twilio/voice', twilioWebhookGuard, (req, res) => {
     </Stream>
   </Connect>
 </Response>`);
+});
+
+// ConversationRelay hands the call back here when the relay ends (transfer or hang-up).
+app.post('/twilio/relay-ended', twilioWebhookGuard, (req, res) => {
+  console.log(`🔀 Relay ended (HandoffData: ${(req.body.HandoffData || '').slice(0, 80) || 'none'})`);
+  res.type('text/xml').send(relay.relayEndedTwiml({ handoffData: req.body.HandoffData, callerNumber: req.body.From, transferNumber: TRANSFER_PHONE_NUMBER }));
 });
 
 app.post('/twilio/transfer', twilioWebhookGuard, (req, res) => {
@@ -1106,6 +1121,11 @@ class CallSession {
 }
 
 wss.on('connection', (twilioWs, req) => {
+  if ((req.url || '').startsWith('/relay')) {
+    console.log('📞 New ConversationRelay connection');
+    new relay.RelaySession(twilioWs, { llm, transferNumber: TRANSFER_PHONE_NUMBER }); // eslint-disable-line no-new
+    return;
+  }
   console.log('📞 New connection');
   new CallSession(twilioWs, req); // eslint-disable-line no-new
 });
@@ -1136,6 +1156,7 @@ server.listen(PORT, () => {
   }
   console.log(`⏱️ Barge-in grace ${BARGE_GRACE_MS} ms (${BARGE_GRACE_CONFIRM_MS} ms during the recap), watchdog ${WATCHDOG_MS} ms, re-prompt ${REPROMPT_MS} ms`);
   console.log(`📍 Webhook: https://<your-domain>/twilio/voice`);
+  if (RELAY) console.log(`🔀 ConversationRelay ON: Twilio does STT (Flux) and TTS (ElevenLabs ${relay.RELAY_VOICE}); the media-stream path above is idle`);
   console.log('🎧 Waiting for calls...');
   warmPromptCache();
 });
