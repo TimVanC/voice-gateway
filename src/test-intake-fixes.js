@@ -333,5 +333,43 @@ console.log('\n🧪 Dead-air watchdog holds while the caller\'s transcript is st
     transcriptSupersedesRecovery({ recoveryPromptInFlight: true, responseCreated: true, callCompleted: true, inEndedState: false }), 'none');
 }
 
+console.log('\n🧪 Phone: a 9-digit number is read back, "I just said that" offers the caller ID (staging call Nov 4 2026, Catherine Polski)');
+{
+  const atPhone = () => {
+    const sm = createCallStateMachine();
+    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+    sm.updateData('phone', '+19738852528'); // the caller ID, as the server stores it at the start of the call
+    sm.updateData('firstName', 'Catherine');
+    sm.updateData('lastName', 'Polski');
+    sm.transitionTo(STATES.PHONE);
+    return sm;
+  };
+  const sm = atPhone();
+  const r1 = sm.processInput('973222222');
+  check('9 digits: stays in PHONE', r1.nextState, STATES.PHONE);
+  check('9 digits: reads back what came through and says how many digits', /9 7 3, 2 2 2, 2 2 2\. That's 9 digits/.test(r1.prompt), true);
+  const r2 = sm.processInput('Yeah. It just said that.');
+  check('"it just said that": offers the number they are calling from', /calling from, 973, 885, 2528/.test(r2.prompt), true);
+  check('still in PHONE while asking', r2.nextState, STATES.PHONE);
+  const r3 = sm.processInput('Yes.');
+  check('yes: the caller ID is the phone', sm.getData().phone, '973-885-2528');
+  check('yes: phone locked', sm.getData()._phoneLocked, true);
+  check('yes: on to EMAIL', r3.nextState, STATES.EMAIL);
+
+  const sm2 = atPhone();
+  sm2.processInput('Hey. I just said that.');
+  const r4 = sm2.processInput('No, it is 973-555-0142.');
+  check('a different number after the offer replaces it', sm2.getData().phone, '973-555-0142');
+  check('and moves on to EMAIL', r4.nextState, STATES.EMAIL);
+
+  const sm3 = atPhone();
+  const r5 = sm3.processInput('9732222222');
+  check('10 digits are taken as before', [sm3.getData().phone, r5.nextState], ['973-222-2222', STATES.EMAIL]);
+
+  const sm4 = atPhone();
+  const r6 = sm4.processInput('97322222222222');
+  check('14 digits: read back and asked again, not stored', [r6.nextState, sm4.getData()._phoneComplete || false], [STATES.PHONE, false]);
+}
+
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

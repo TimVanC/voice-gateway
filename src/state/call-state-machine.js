@@ -1371,7 +1371,20 @@ function createCallStateMachine() {
         
         // CRITICAL: Check if user said they already provided the phone (e.g., "we already went over that")
         // Or if they gave availability instead of phone
-        if (isAlreadyProvidedResponse(lowerTranscript) || lowerTranscript.includes('already') || lowerTranscript.includes('went over')) {
+        if (isAlreadyProvidedResponse(lowerTranscript) || saysAlreadyGaveIt(lowerTranscript) || lowerTranscript.includes('already') || lowerTranscript.includes('went over')) {
+          // The number they gave was lost on the way (staging call Nov 4 2026:
+          // the recogniser dropped one digit of "two two two two two two two",
+          // the 9-digit answer was refused, and "I just said that" got the same
+          // question twice more, then the live-agent offer). Offer the number
+          // they are calling from; a yes locks it, a new number replaces it.
+          if (data.phone && !data._phoneComplete) {
+            const callerId = normalizeTenDigitPhone(data.phone);
+            if (callerId) {
+              console.log(`📞 Caller says the number was already given - offering the caller ID ${callerId}`);
+              pendingClarification = { field: 'phone', value: callerId, confidence: estimatePhoneConfidence(callerId), awaitingConfirmation: true };
+              return { nextState: currentState, prompt: `Sorry about that. Is the number you're calling from, ${formatPhoneForReadback(callerId)}, the best one to reach you?`, action: 'ask' };
+            }
+          }
           // They already gave phone or are providing availability/other info
           // If phone is already set, move to email
           if (data.phone) {
@@ -1427,6 +1440,22 @@ function createCallStateMachine() {
           };
         }
         
+        // Seven to nine digits, or more than eleven: the recogniser dropped or
+        // added one (Flux dropped one "two" of a run of seven, staging call
+        // Nov 4 2026). Read back what came through and ask for the whole
+        // number, instead of the bare question the caller just answered.
+        {
+          const heard = transcript.replace(/\D/g, '');
+          if ((heard.length >= 7 && heard.length < 10) || heard.length > 11) {
+            console.log(`⚠️  Partial phone number: "${heard}" (${heard.length} digits)`);
+            return {
+              nextState: currentState,
+              prompt: `I got ${readbackDigits(heard)}. That's ${heard.length} digits. Could you say the full ten-digit number once more, nice and slow?`,
+              action: 'ask'
+            };
+          }
+        }
+
         if (hasPhoneNumber(lowerTranscript)) {
           const phone = extractPhone(transcript);
           const phoneConf = estimatePhoneConfidence(transcript);
@@ -3230,6 +3259,25 @@ function createCallStateMachine() {
       'we already did'
     ];
     return alreadyProvidedPatterns.some(p => text.includes(p));
+  }
+
+  /** "I just said that", "I told you", "I gave it to you": the answer was given and not taken. */
+  function saysAlreadyGaveIt(text) {
+    return /\b(just|already)\s+(said|told|gave|did)\b|\btold you\b|\bi said (it|that)\b|\bsaid that\b|\bgave (it|that) to you\b/.test(text);
+  }
+
+  /** "+19738852528" / "9738852528" -> "973-885-2528"; null when it is not a 10-digit US number. */
+  function normalizeTenDigitPhone(value) {
+    const digits = String(value || '').replace(/\D/g, '');
+    const ten = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits.length === 10 ? digits : null;
+    return ten ? `${ten.slice(0, 3)}-${ten.slice(3, 6)}-${ten.slice(6)}` : null;
+  }
+
+  /** Digits spoken one at a time in groups of three: "9 7 3, 2 2 2, 2 2 2". */
+  function readbackDigits(digits) {
+    const groups = [];
+    for (let i = 0; i < digits.length; i += 3) groups.push(digits.slice(i, i + 3).split('').join(' '));
+    return groups.join(', ');
   }
   
   /**
