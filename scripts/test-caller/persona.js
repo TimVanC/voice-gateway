@@ -125,6 +125,23 @@ class Persona extends EventEmitter {
     this.send({ type: 'input_audio_buffer.append', audio: frame.toString('base64') });
   }
 
+  /**
+   * Ava asked something and the caller has not reacted: make them answer
+   * now (a person would). Server VAD occasionally misses a turn; on Nov 4
+   * 2026 the caller sat through 27 s of silence after a question it had
+   * clearly heard, which failed the daily smoke call for a harness fault.
+   */
+  nudge() {
+    this.send({ type: 'input_audio_buffer.commit' });
+    this.send({
+      type: 'response.create',
+      response: {
+        output_modalities: ['audio'],
+        instructions: 'The assistant just asked you something and is waiting. Answer it now, in character, briefly. If you did not catch what was asked, say "Sorry, what was that?" and nothing else.',
+      },
+    });
+  }
+
   handle(event) {
     switch (event.type) {
       case 'response.created': {

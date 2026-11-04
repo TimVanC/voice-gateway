@@ -176,7 +176,7 @@ as evidence. Findings are filed as tickets keyed by a fingerprint
 occurrences; marking a ticket fixed and seeing it again reopens it. The web app
 lists them at `/tickets` and shows each call's review on its call page. The
 daily check gets a line, `Call review tickets`, that is a WARNING on any day
-with new tickets, so the 8 AM email says what needs looking at.
+with new tickets, so the 8:30 AM email says what needs looking at.
 
 | Variable | Value |
 |---|---|
@@ -239,14 +239,14 @@ The steps below describe that Git-connected setup from scratch.
 
 Vercel only ever reads the database. The server on Railway is the only writer
 besides the one-time import.
-## 📬 Daily Health Check (8:00 AM Eastern)
+## 📬 Daily Health Check (8:30 AM and 4 PM Eastern)
 
 `src/monitor/daily-check.js` tests Anthropic, OpenAI Realtime, Google Sheets, the
 email/transfer config and the public `/health` endpoint, then emails one report.
 
 - **Where it runs:** inside the production server on Railway
-  (`src/monitor/schedule.js`), at 8:00 AM and 4:00 PM America/New_York,
-  DST-aware. Change the times with `DAILY_CHECK_TIMES` (default `08:00,16:00`).
+  (`src/monitor/schedule.js`), at 8:30 AM and 4:00 PM America/New_York,
+  DST-aware. Change the times with `DAILY_CHECK_TIMES` (default `08:30,16:00`).
   Only the Railway `production` environment runs it; `staging` and local
   servers log "schedule off". Force either way with `DAILY_CHECK_SCHEDULE=on|off`.
 - **Recipient:** `MONITOR_EMAIL_TO` (default timvancau@gmail.com), sent through
@@ -257,7 +257,7 @@ email/transfer config and the public `/health` endpoint, then emails one report.
   anywhere with a changing IP; Twilio locked the account twice in Sep 2026 when
   the check ran from GitHub-hosted runners.
 - **Backup:** `.github/workflows/daily-check.yml` still runs on GitHub's cron
-  (8 AM and 4 PM targets, in practice hours late). Scheduled runs email only
+  (8:30 AM and 4 PM targets, in practice hours late). Scheduled runs email only
   when something fails (`MONITOR_EMAIL_ONLY_ON_FAILURE`); it exists to catch the
   one thing the server cannot report: the server being down. A manual
   "Run workflow" always emails the full report, which is how to test the email
@@ -309,7 +309,7 @@ phone, email, details, address, availability, recap, goodbye).
 
 `SMOKE_CALL_MODE=greeting` brings back the greeting-only check below.
 
-- **What happens:** at the 8:00 AM daily check the server calls `TWILIO_NUMBER`
+- **What happens:** at the 8:30 AM daily check the server calls `TWILIO_NUMBER`
   from `SMOKE_CALL_FROM` with TwiML that streams the call back to the server
   at `wss://<PUBLIC_BASE_URL host>/smoke/stream`. The server stays silent,
   collects about 15 s of audio after Ava's first sound, hangs up, transcribes
@@ -343,7 +343,7 @@ phone, email, details, address, availability, recap, goodbye).
   all already set in production. The server logs at start-up whether the
   smoke call is on and which numbers it will use.
 - **When:** inside the daily check, so production only (`DAILY_CHECK_SCHEDULE`
-  rules apply) and at its times (`DAILY_CHECK_TIMES`, default 8 AM and 4 PM).
+  rules apply) and at its times (`DAILY_CHECK_TIMES`, default 8:30 AM and 4 PM).
   A passing morning call is not repeated at the 4 PM check (its line repeats
   the morning result); a failed one is tried again. A restart between the two
   can cost one extra call.
@@ -356,7 +356,7 @@ phone, email, details, address, availability, recap, goodbye).
   the call itself, which is the GitHub Actions backup and any server with the
   smoke call off, reads that and adds the `Ava answers the phone` line from
   it: PASS/FAIL for today's call, FAIL when there was no call today, WARNING
-  when the smoke call is off. GitHub's run starts hours after 8 AM, so by
+  when the smoke call is off. GitHub's run starts hours after 8:30 AM, so by
   then the day's call has happened.
 - **Cost:** about 30 s of Twilio outbound + inbound legs and two media
   streams (roughly 3 to 5 cents), one 15 s transcription (well under a cent)

@@ -3,7 +3,7 @@
  *
  * Runs the daily health check (src/monitor/daily-check.js) inside the
  * long-running server at fixed wall-clock times in a fixed time zone
- * (default 8:00 AM and 4:00 PM America/New_York), every day, DST-aware.
+ * (default 8:30 AM and 4:00 PM America/New_York), every day, DST-aware.
  *
  * Why here and not GitHub Actions: GitHub's cron scheduler has been starting
  * this repo's scheduled runs 3-9 hours late every day, and GitHub-hosted
@@ -23,13 +23,13 @@ const { runDailyCheck } = require('./daily-check');
 const { BASE_URL } = require('../config/baseUrl');
 
 const DEFAULT_TIME_ZONE = 'America/New_York';
-const DEFAULT_TIMES = [{ hour: 8, minute: 0 }, { hour: 16, minute: 0 }];
+const DEFAULT_TIMES = [{ hour: 8, minute: 30 }, { hour: 16, minute: 0 }];
 const MINUTE_MS = 60 * 1000;
 // A check normally takes ~30 s. Anything past this is treated as hung and
 // abandoned so the next slot is still armed.
 const DEFAULT_WATCHDOG_MS = 10 * MINUTE_MS;
 
-/** Parse "08:00,16:00" into [{ hour, minute }]. Throws on malformed input. */
+/** Parse "08:30,16:00" into [{ hour, minute }]. Throws on malformed input. */
 function parseTimes(spec) {
   const times = String(spec || '')
     .split(',')
@@ -42,7 +42,7 @@ function parseTimes(spec) {
       if (!m || hour > 23 || minute > 59) throw new Error(`Bad time "${s}" (expected HH:MM, 24-hour)`);
       return { hour, minute };
     });
-  if (!times.length) throw new Error('No times given (expected e.g. "08:00,16:00")');
+  if (!times.length) throw new Error('No times given (expected e.g. "08:30,16:00")');
   return times;
 }
 

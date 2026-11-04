@@ -27,6 +27,9 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
   let clears = 0; // barge-in clears
   let routineClears = 0; // clear-before-speaking, Ava's normal behaviour
   let interjectionsFired = 0;
+  let nudges = 0; // caller nudged to answer a question it sat on
+  let nudgedUtterance = 0; // avaUtts.length at the last nudge
+  const NUDGE_AFTER_MS = scenario.nudgeAfterMs || 5000;
   let callerSpeaking = false;
   let callerLastSendAt = 0;
   let avaSpeaking = false;
@@ -172,6 +175,24 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
       u.end = avaLastAudioAt + FRAME_MS;
       event('ava_audio_end', { utterance: avaUtts.length });
     }
+
+    // Ava finished talking a while ago and the caller has done nothing since
+    // (no response started, nothing queued): the persona's VAD missed the
+    // turn. Nudge it once per Ava utterance, like a person who realises
+    // they were asked something.
+    if (!avaSpeaking && !callerSpeaking && avaUtts.length && goodbyeAt == null
+      && activeResponses.size === 0 && queue.length === 0
+      && nudgedUtterance !== avaUtts.length) {
+      const last = avaUtts[avaUtts.length - 1];
+      const lastCallerEnd = callerUtts.length ? (callerUtts[callerUtts.length - 1].end || 0) : 0;
+      if (last.end != null && last.end > lastCallerEnd && t - last.end >= NUDGE_AFTER_MS) {
+        nudgedUtterance = avaUtts.length;
+        nudges++;
+        event('caller_nudged', { utterance: avaUtts.length, silentMs: t - last.end });
+        note(`caller nudged to answer: nothing said ${Math.round((t - last.end) / 1000)} s after Ava's question`);
+        persona.nudge();
+      }
+    }
   }, FRAME_MS);
 
   // Call end ----------------------------------------------------------------
@@ -209,7 +230,7 @@ async function runCall({ args, scenario, leg, persona, clips, outDir, log }) {
       : events.some((e) => e.type === 'timeout')
         ? `caller gave up at the ${scenario.maxCallSeconds || 240} s limit (Ava never hung up)`
         : 'caller hung up';
-  return { t0, events, turns, callerUtts, avaUtts, recorder, clears, routineClears, interjectionsFired, endInfo, endedHow };
+  return { t0, events, turns, callerUtts, avaUtts, recorder, clears, routineClears, interjectionsFired, nudges, endInfo, endedHow };
 }
 
 module.exports = { runCall };
