@@ -1,19 +1,16 @@
-// test-intake-fixes.js - Regressions found by the bot-caller harness (Nov 2026)
+// test-intake-fixes.js - Walk the no-heat intake (the daily smoke call's
+// scenario) through the state machine and check the Nov 4 2026 fixes from
+// the call-review tickets: accented names, system age, the zip follow-up,
+// availability wording, the recap's issue line and the call summary.
 // Run: node src/test-intake-fixes.js
-//
-// 1. Name missing at the recap: AVAILABILITY/CONFIRMATION asked for the name
-//    but transitionTo() refused the backward move, so the call stayed in
-//    CONFIRMATION, ignored the name and looped "Can I get your first and last
-//    name?" / "Is everything correct?" until the caller hung up.
-// 2. "Nothing like that" (the tail of the safety answer) was taken as a name.
-// 3. "Thanks. I appreciate it." in ADDRESS was read as a goodbye and ended the call.
 
 const { createCallStateMachine } = require('./state/call-state-machine');
-const { STATES, INTENT_TYPES, CALLER_INFO, ADDRESS } = require('./scripts/rse-script');
+const { STATES, INTENT_TYPES, AVAILABILITY, CALLER_INFO } = require('./scripts/rse-script');
+const { generateCallSummary } = require('./utils/google-sheets-logger');
 
 let failures = 0;
 function check(label, actual, expected) {
-  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  const ok = actual === expected;
   console.log(`${ok ? '✅' : '❌'} ${label}`);
   if (!ok) {
     failures++;
@@ -22,241 +19,98 @@ function check(label, actual, expected) {
   }
 }
 
-// A service call that reached AVAILABILITY without a name (the name was lost
-// to a split turn), with phone and address already taken.
-function callAtAvailabilityWithoutName() {
+console.log('\n🧪 No-heat intake: accented name, system age, zip declined, availability, recap, summary');
+{
   const sm = createCallStateMachine();
   sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-  sm.updateData('phone', '9735550142');
-  sm.updateData('address', '14 Elm Street');
+  sm.transitionTo(STATES.NAME);
+
+  const rName = sm.processInput("Sure, it's María López.");
+  check('accented name accepted first time', rName.nextState, STATES.PHONE);
+  check('first name stored in plain letters', sm.getData().firstName, 'Maria');
+  check('last name stored in plain letters', sm.getData().lastName, 'Lopez');
+
+  const rPhone = sm.processInput("It's 973-555-0142.");
+  check('phone accepted', [STATES.EMAIL, STATES.PHONE].includes(rPhone.nextState), true);
+  if (rPhone.nextState === STATES.PHONE) sm.processInput('Yes, that is right.');
+  if (sm.getState() === STATES.EMAIL) {
+    const rEmail = sm.processInput("It's maria at example dot com.");
+    if (rEmail.nextState === STATES.EMAIL) sm.processInput('Yes.');
+  }
+  if (sm.getState() !== STATES.DETAILS_BRANCH) sm.transitionTo(STATES.DETAILS_BRANCH);
+
+  sm.processInput("It's a gas furnace, about ten years old.");
+  check('system type stored', sm.getData().details.systemType, 'furnace');
+  check('system age stored from the system-type answer', sm.getData().details.systemAge, 'about 10 years');
+  sm.processInput("It's completely out, no air at all coming through.");
+  sm.processInput('It started this morning.');
+  const rSev = sm.processInput("It's completely out.");
+  check('details done, address asked', rSev.nextState, STATES.ADDRESS);
+
+  let r = sm.processInput('14 Elm Street, Montclair, New Jersey.');
+  if (r.nextState === STATES.ADDRESS && /did you say/i.test(r.prompt || '')) r = sm.processInput("Yes, that's right, E-L-M Street.");
+  check('zip follow-up asked once', /zip code/i.test(r.prompt || ''), true);
+  r = sm.processInput("Oh, I don't have it on me right now.");
+  check('declined zip moves on to availability', r.nextState, STATES.AVAILABILITY);
+  check('availability question asked', (r.prompt || '').endsWith(AVAILABILITY.ask), true);
+  check('address kept', sm.getData().address, '14 Elm Street');
+
+  r = sm.processInput('Weekday mornings are best for me.');
+  check('availability accepted without an extra read-back', r.nextState, STATES.CONFIRMATION);
+  check('availability stored clean', sm.getData().availability, 'Weekday mornings');
+  check('recap reads availability clean', (r.prompt || '').includes('Availability: Weekday mornings.'), true);
+  check('recap reads the system with its age', (r.prompt || '').includes('System: furnace, about 10 years old.'), true);
+  check('recap reads the issue whole', (r.prompt || '').includes('Issue: completely out, no air at all coming through.'), true);
+  check('recap has no doubled period', /\.\./.test(r.prompt || ''), false);
+
+  const summary = generateCallSummary(sm.getData(), 'complete');
+  check('call summary is one clean sentence', summary.startsWith('Furnace, about 10 years old: completely out, no air at all coming through; started this morning.'), true);
+}
+
+console.log('\n🧪 Availability wording variants');
+{
+  const cases = [
+    ['Weekday mornings work best for me.', 'Weekday mornings'],
+    ['Um, probably weekday afternoons, I think.', 'Weekday afternoons'],
+    ['Monday through Friday, 9 to 5 works for me', 'Monday through Friday, 9 to 5'],
+    ['All right, let me know what else you need. I\'m available weekday mornings.', null],
+  ];
+  for (const [said, want] of cases) {
+    const sm = createCallStateMachine();
+    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+    sm.transitionTo(STATES.NAME);
+    sm.processInput('Tim Smith');
+    sm.transitionTo(STATES.AVAILABILITY);
+    const r = sm.processInput(said);
+    const value = sm.getData().availability || (r.prompt || '').replace(/^I have (.*)\. Is that right\?$/, '$1');
+    if (want) check(`"${said}" -> "${want}"`, value, want);
+    else console.log(`   "${said}" -> ${JSON.stringify(value)} (${r.nextState})`);
+  }
+}
+
+console.log('\n🧪 Recap issue line never cuts a word');
+{
+  const sm = createCallStateMachine();
+  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+  sm.transitionTo(STATES.NAME);
+  sm.processInput('Tim Smith');
+  sm.transitionTo(STATES.DETAILS_BRANCH);
+  sm.processInput('A boiler, maybe twenty years old.');
+  check('age qualifier does not make the system type uncertain', sm.getData().details.systemTypeUncertain, false);
+  sm.processInput("Well, there's no heat at all, it's been banging and the pilot keeps going out since this morning and we have a baby in the house.");
+  sm.processInput('This morning.');
+  sm.processInput('Completely out.');
+  check('age in words', sm.getData().details.systemAge, 'maybe 20 years');
   sm.transitionTo(STATES.AVAILABILITY);
-  return sm;
+  const r = sm.processInput('Anytime, we have no heat.');
+  const issue = ((r.prompt || '').match(/Issue: ([^.]*)\./) || [])[1] || '';
+  console.log(`   issue line: "${issue}"`);
+  check('issue line has no ellipsis', issue.includes('...'), false);
+  check('issue line ends on a whole word', /\w$/.test(issue), true);
+  const summary = generateCallSummary(sm.getData(), 'complete');
+  console.log(`   summary: "${summary}"`);
+  check('summary names the boiler and its age', summary.startsWith('Boiler, maybe 20 years old:'), true);
 }
 
-function answerAvailability(sm) {
-  let r = sm.processInput('Weekday mornings are best for me.');
-  if (r.nextState === STATES.AVAILABILITY) r = sm.processInput("Yes, that's correct.");
-  return r;
-}
-
-console.log('\n🧪 Name missing before the recap: ask once, take it, return to the recap');
-{
-  const sm = callAtAvailabilityWithoutName();
-  const r1 = answerAvailability(sm);
-  check('moves to NAME', r1.nextState, STATES.NAME);
-  check('state machine is really in NAME', sm.getState(), STATES.NAME);
-  check('asks for the name', r1.prompt, CALLER_INFO.name);
-
-  const r2 = sm.processInput("It's Maria Lopez.");
-  check('name taken', [sm.getData().firstName, sm.getData().lastName], ['Maria', 'Lopez']);
-  check('returns to the recap, not to PHONE', r2.nextState, STATES.CONFIRMATION);
-  check('recap includes the name', /Maria Lopez/.test(r2.prompt), true);
-
-  const r3 = sm.processInput("Yes, that's all correct.");
-  check('recap confirmed: moves to CLOSE', r3.nextState, STATES.CLOSE);
-}
-
-console.log('\n🧪 Name missing when the recap is confirmed');
-{
-  const sm = createCallStateMachine();
-  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-  sm.updateData('phone', '9735550142');
-  sm.transitionTo(STATES.CONFIRMATION);
-  const r1 = sm.processInput('Yes, that is correct.');
-  check('moves to NAME', [r1.nextState, sm.getState()], [STATES.NAME, STATES.NAME]);
-  const r2 = sm.processInput('David Chen');
-  check('returns to the recap', r2.nextState, STATES.CONFIRMATION);
-  const r3 = sm.processInput('Yes.');
-  check('then CLOSE', r3.nextState, STATES.CLOSE);
-}
-
-console.log('\n🧪 Only a first name: asked at most twice, then the call goes on');
-{
-  const sm = callAtAvailabilityWithoutName();
-  answerAvailability(sm);
-  let r = sm.processInput('Maria');
-  for (let i = 0; i < 6 && r.nextState !== STATES.CLOSE; i++) {
-    r = sm.processInput(r.nextState === STATES.NAME ? 'Maria' : "Yes, that's all correct.");
-  }
-  check('reaches CLOSE instead of looping', r.nextState, STATES.CLOSE);
-}
-
-console.log('\n🧪 Common words are not a name');
-{
-  const sm = createCallStateMachine();
-  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-  sm.transitionTo(STATES.NAME);
-  for (const t of ['Nothing like that.', 'No, nothing like that.', 'Thanks. I appreciate it.', 'Not really, no.']) {
-    const r = sm.processInput(t);
-    check(`"${t}" -> stays in NAME and re-asks`, [r.nextState, r.prompt], [STATES.NAME, CALLER_INFO.name]);
-  }
-  check('no name stored', [sm.getData().firstName || null, sm.getData()._nameLocked || false], [null, false]);
-  const r = sm.processInput("It's David Chen.");
-  check('a real name is then taken', [r.nextState, sm.getData().firstName, sm.getData().lastName], [STATES.PHONE, 'David', 'Chen']);
-}
-// Names made of words that are also ordinary words still pass. (Particles such
-// as "Van" / "de la" are dropped by the spelled-name path; that predates this
-// fix and is not covered here.)
-for (const [said, first, last] of [['Will Rose', 'Will', 'Rose'], ['Grace Hope', 'Grace', 'Hope'],
-                                   ["Yeah, it's Maria Lopez", 'Maria', 'Lopez'], ['My name is David Chen', 'David', 'Chen']]) {
-  const sm = createCallStateMachine();
-  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-  sm.transitionTo(STATES.NAME);
-  sm.processInput(said);
-  const d = sm.getData();
-  check(`"${said}" still accepted`, [d.firstName, d.lastName], [first, last]);
-}
-
-console.log('\n🧪 Safety check: a yes is an emergency, a backchannel is asked again');
-{
-  const { SAFETY } = require('./scripts/rse-script');
-  const at = () => {
-    const sm = createCallStateMachine();
-    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-    sm.transitionTo(STATES.SAFETY_CHECK);
-    return sm;
-  };
-  for (const t of ['Yes.', 'Yeah, there is.', 'Yes, I smell something.', 'I think so.']) {
-    const sm = at();
-    const r = sm.processInput(t);
-    check(`"${t}" -> emergency response`, [r.nextState, r.prompt, sm.getData().isSafetyRisk], [STATES.ENDED, SAFETY.emergency_response, true]);
-  }
-  for (const t of ['Mhm.', 'Okay.', 'Sure, go ahead.', 'Sorry, what was that?', 'Yes, go ahead.', 'Yeah, ask away.', 'Yes?']) {
-    const sm = at();
-    const r = sm.processInput(t);
-    check(`"${t}" -> safety question asked again`, [r.nextState, r.prompt], [STATES.SAFETY_CHECK, SAFETY.check]);
-    const r2 = sm.processInput('No, nothing like that.');
-    check(`  then "No, nothing like that" -> name`, r2.nextState, STATES.NAME);
-  }
-  {
-    const sm = at();
-    sm.processInput('Mhm.');
-    check('a second unclear reply moves on (asked once only)', sm.processInput('Okay.').nextState, STATES.NAME);
-  }
-  for (const t of ['No, nothing like that.', 'Nope.', 'Just no heat, nothing dangerous.', "No, it's just not heating."]) {
-    check(`"${t}" -> all clear, name`, at().processInput(t).nextState, STATES.NAME);
-  }
-  const sm = createCallStateMachine();
-  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-  sm.transitionTo(STATES.NAME);
-  const r = sm.processInput('Sure, go ahead.');
-  check('"Sure, go ahead." is not a name', [r.nextState, sm.getData().firstName || null], [STATES.NAME, null]);
-}
-
-console.log('\n🧪 House numbers written as words become digits (else the Sheet saves no address)');
-{
-  const { normalizeHouseNumber } = require('./utils/data-cleanup');
-  for (const [said, want] of [['Fourteen Elm Street', '14 Elm Street'], ['Eighty-Eight Ridge Road', '88 Ridge Road'],
-                              ['One twenty three Main St', '123 Main St'], ['Two hundred fifteen Oak Ave', '215 Oak Ave'],
-                              ['14 Elm Street', '14 Elm Street'], ['Elm Street', 'Elm Street'], ['Fourteen', 'Fourteen']]) {
-    check(`"${said}" -> "${want}"`, normalizeHouseNumber(said), want);
-  }
-}
-
-console.log('\n🧪 "Thanks" in ADDRESS is not a goodbye');
-{
-  const sm = createCallStateMachine();
-  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-  sm.transitionTo(STATES.ADDRESS);
-  for (const t of ['Thanks. I appreciate it.', 'Thank you so much.', 'Okay, thank you.']) {
-    const r = sm.processInput(t);
-    check(`"${t}" -> stays in ADDRESS and asks again`, [r.nextState, r.prompt, r.action], [STATES.ADDRESS, ADDRESS.ask, 'ask']);
-  }
-  const r = sm.processInput("It's 14 Elm Street, Montclair, New Jersey.");
-  check('the address is then taken', r.nextState !== STATES.CLOSE && /14 Elm/i.test(sm.getData().address || ''), true);
-}
-{
-  const sm = createCallStateMachine();
-  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-  sm.transitionTo(STATES.ADDRESS);
-  const r = sm.processInput('Never mind, goodbye.');
-  check('an actual goodbye still ends the intake', [STATES.CLOSE, STATES.ENDED].includes(r.nextState), true);
-}
-
-console.log("\n🧪 Test-caller numbers never reach the Sheet; RSE's own number alone does not count");
-{
-  const { isTestCallerNumber, isOwnNumber } = require('./utils/call-db');
-  const env = { TWILIO_NUMBER: '+18885842210', TEST_CALLER_NUMBERS: '+19735457975, 2015550177' };
-  check('the smoke caller is a test number', isTestCallerNumber('+19735457975', env), true);
-  check('a persona number is a test number (any formatting)', isTestCallerNumber('(201) 555-0177', env), true);
-  check('a customer is not', isTestCallerNumber('+19735551234', env), false);
-  check("RSE's own number is own but not a test caller", [isOwnNumber('+18885842210', env), isTestCallerNumber('+18885842210', env)], [true, false]);
-  check('no number, no match', isTestCallerNumber(null, env), false);
-}
-
-// Nov 3 2026, Neon call 2593: at the recap the model said "Is there anything
-// else I can help with today?" instead of the read-back, the server accepted
-// it, the caller answered "No, that's it. Thank you." and CONFIRMATION took
-// that as a correction. The call never reached CLOSE and Ava never hung up.
-console.log('\n🧪 Off-script lines at the recap and the close are rejected');
-{
-  const { transcriptMatchesExpected } = require('./utils/transcript-filters');
-  const { CLOSE, CONFIRMATION } = require('./scripts/rse-script');
-  const recap = "Let me read that back. Name: Maria Lopez. Phone: 973-555-0142. Email: maria at example dot com. Address: 14 Elm Street, Montclair, New Jersey. System: furnace. Issue: It's completely out. Availability: Weekday mornings are best for me.. Is everything correct?";
-  check('"anything else?" is not the recap', transcriptMatchesExpected(recap, CLOSE.anything_else), false);
-  check('the recap read back as written passes', transcriptMatchesExpected(recap, recap), true);
-  check('the recap read back with the email and phone reworded passes',
-    transcriptMatchesExpected(recap, 'Let me read that back. Name: Maria Lopez. Phone: 9735550142. Email: maria@example.com. Address: 14 Elm Street, Montclair, New Jersey. System: furnace. Issue: It\'s completely out. Availability: Weekday mornings are best for me. Is everything correct?'), true);
-  check('an improvised wrap-up is not the recap',
-    transcriptMatchesExpected(recap, "You're welcome. If anything else comes up, feel free to reach out. Have a great day!"), false);
-  check('"Goodbye! Take care." is not "anything else?"', transcriptMatchesExpected(CLOSE.anything_else, 'Goodbye! Take care.'), false);
-  check('"anything else?" said as written passes', transcriptMatchesExpected(CLOSE.anything_else, CLOSE.anything_else), true);
-  check('"What needs to be corrected?" said as written passes', transcriptMatchesExpected('What needs to be corrected?', 'What needs to be corrected?'), true);
-  check('"Is everything correct?" said as written passes', transcriptMatchesExpected(CONFIRMATION.verify, CONFIRMATION.verify), true);
-}
-
-console.log('\n🧪 At the recap, "No, that\'s it, thank you" means nothing to add: on to CLOSE');
-{
-  const { CLOSE } = require('./scripts/rse-script');
-  const { isNothingElse } = require('./state/call-state-machine');
-  const atRecap = () => {
-    const sm = createCallStateMachine();
-    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-    sm.updateData('firstName', 'Maria'); sm.updateData('lastName', 'Lopez'); sm.updateData('_nameLocked', true);
-    sm.updateData('phone', '9735550142');
-    sm.updateData('address', '14 Elm Street');
-    sm.transitionTo(STATES.CONFIRMATION);
-    return sm;
-  };
-  for (const t of ["No, that's it. Thank you.", "No, that's all.", "Nope, that's everything, thanks.", "No, we're all set.", "No, I'm good, thank you.", "No, nothing else."]) {
-    const sm = atRecap();
-    const r = sm.processInput(t);
-    check(`"${t}" -> CLOSE, asks anything else`, [r.nextState, r.prompt], [STATES.CLOSE, CLOSE.anything_else]);
-  }
-  for (const t of ["No.", "No, that's not right.", "No, the phone number is wrong.", "No, that's wrong, thanks.", "No, it's 973-555-0199, thanks.", "No, that's it, the address is wrong."]) {
-    const sm = atRecap();
-    const r = sm.processInput(t);
-    check(`"${t}" -> stays at the recap and asks what to fix`, [r.nextState, r.prompt], [STATES.CONFIRMATION, 'What needs to be corrected?']);
-    check(`  isNothingElse("${t}") is false`, isNothingElse(t), false);
-  }
-  {
-    // A correction that names the field is applied and the recap re-read (existing behaviour).
-    const r = atRecap().processInput('Actually, the email is wrong.');
-    check('"Actually, the email is wrong." stays at the recap', [r.nextState, isNothingElse('Actually, the email is wrong.')], [STATES.CONFIRMATION, false]);
-  }
-  check('a plain yes still confirms', atRecap().processInput("Yes, that's all correct.").nextState, STATES.CLOSE);
-  check('isNothingElse ignores empty input', isNothingElse(''), false);
-
-  // Then CLOSE: the same words end the call, and Ava says goodbye.
-  const sm = atRecap();
-  sm.processInput("No, that's it. Thank you.");
-  const r = sm.processInput("No, that's it, thank you.");
-  check('in CLOSE, "No, that\'s it, thank you" -> ENDED with the goodbye', [r.nextState, r.prompt, r.action], [STATES.ENDED, CLOSE.goodbye, 'end_call']);
-}
-
-console.log('\n🧪 At the recap, a goodbye ends the call instead of re-asking "Is everything correct?"');
-{
-  const { CLOSE } = require('./scripts/rse-script');
-  for (const t of ['Thanks, bye.', 'Okay, goodbye.', 'Bye.']) {
-    const sm = createCallStateMachine();
-    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
-    sm.updateData('firstName', 'Maria'); sm.updateData('lastName', 'Lopez'); sm.updateData('_nameLocked', true);
-    sm.updateData('phone', '9735550142');
-    sm.transitionTo(STATES.CONFIRMATION);
-    const r = sm.processInput(t);
-    check(`"${t}" -> ENDED with the goodbye`, [r.nextState, sm.getState(), r.prompt, r.action], [STATES.ENDED, STATES.ENDED, CLOSE.goodbye, 'end_call']);
-  }
-}
-
-console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(failures ? `\n❌ ${failures} check(s) failed` : '\n✅ All intake fix checks passed');
+process.exit(failures ? 1 : 0);

@@ -506,7 +506,8 @@ function createCallStateMachine() {
       parts.push(`Address: ${addressPart}.`);
     }
     if (data.details && data.details.systemType) {
-      parts.push(`System: ${data.details.systemType}.`);
+      const age = data.details.systemAge ? `, ${data.details.systemAge === 'new' ? 'new' : data.details.systemAge + ' old'}` : '';
+      parts.push(`System: ${data.details.systemType}${age}.`);
     }
     const issueShort = getIssueSummaryShort();
     if (issueShort) {
@@ -526,20 +527,25 @@ function createCallStateMachine() {
     const { details = {} } = data;
     
     // Try to get one key symptom or issue
-    let issue = '';
-    if (details.symptoms) {
-      issue = details.symptoms.split(/[.!?]/)[0].trim(); // First sentence only
-      // Remove filler words
-      issue = issue.replace(/\b(yeah|uh|um|er|ah|oh|there's|there is)\b/gi, '').trim();
-      if (issue.length > 50) issue = issue.substring(0, 50) + '...';
-    } else if (details.issueDescription) {
-      issue = details.issueDescription.split(/[.!?]/)[0].trim();
-      if (issue.length > 50) issue = issue.substring(0, 50) + '...';
-    } else if (details.generatorIssue) {
-      issue = details.generatorIssue.split(/[.!?]/)[0].trim();
-      if (issue.length > 50) issue = issue.substring(0, 50) + '...';
+    const source = details.symptoms || details.issueDescription || details.generatorIssue || '';
+    if (!source) return null;
+    // First sentence only, fillers and "well, it's" lead-ins removed
+    let issue = String(source).split(/[.!?]/)[0]
+      .replace(/^\s*(?:(?:yeah|yes|uh|um|er|ah|oh|well|so|okay|ok)[,\s]+)+/i, '')
+      .replace(/^\s*(?:it'?s|it\s+is|the\s+(?:system|unit|furnace|boiler|ac)\s+is|there'?s|there\s+is)\s+/i, '')
+      .replace(/\b(yeah|uh|um|er|ah|oh|there's|there is)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .replace(/^[\s,]+|[\s,]+$/g, '')
+      .trim();
+    // Keep it short for the read-back, but never cut a word in half: the
+    // recap used to say "no air at all, since this mor..." (ticket 37).
+    const MAX = 60;
+    if (issue.length > MAX) {
+      const head = issue.slice(0, MAX);
+      const cut = Math.max(head.lastIndexOf(', '), head.lastIndexOf(' and '), head.lastIndexOf('; '));
+      issue = (cut > 15 ? head.slice(0, cut) : head.slice(0, head.lastIndexOf(' ') > 15 ? head.lastIndexOf(' ') : MAX)).replace(/[\s,;]+$/g, '');
     }
-    
+
     return issue || null;
   }
   
@@ -783,6 +789,16 @@ function createCallStateMachine() {
   }
   
   function _processInputInner(transcript, lowerTranscript, analysis) {
+    // Names are kept in plain letters. The transcriber writes "María López";
+    // the name parser only knows A-Z, so the name was re-asked, and the
+    // read-back then spoke "Lpez" (review tickets 26 and 44).
+    if (currentState === STATES.NAME || pendingClarification.field === 'name') {
+      const plain = stripDiacritics(transcript);
+      if (plain !== transcript) {
+        transcript = plain;
+        lowerTranscript = plain.toLowerCase().trim();
+      }
+    }
     // End-of-call signals: caller wants to cancel or hang up
     // Fires in any state so the caller is never stuck
     const CANCEL_PATTERNS = /\b(cancel the call|end the call|hang up|i want to hang up|never mind|forget it|stop the call)\b/i;
@@ -1848,12 +1864,19 @@ function createCallStateMachine() {
             }
             if (!data.state || !data.zip) {
               data._stateZipAttempts = (data._stateZipAttempts || 0) + 1;
-              if (data._stateZipAttempts < MAX_PROMPT_ATTEMPTS) {
+              if (declinesToAnswer(lowerTranscript)) {
+                // "I don't have it" is an answer: street and town are enough
+                // (review tickets 6 and 14: the same zip question was asked
+                // again word for word after the caller said they had none).
+                console.log(`📋 Caller has no ${!data.zip ? 'zip' : 'state'} - advancing with state=${data.state || 'N/A'}, zip=${data.zip || 'N/A'}`);
+                intakeLog('field_parse', { field: 'state_zip', state: data.state, zip: data.zip, reason: 'caller_declined' });
+              } else if (data._stateZipAttempts < MAX_PROMPT_ATTEMPTS) {
                 const missing = (!data.state && !data.zip) ? 'the state and zip code' : (!data.state ? 'the state' : 'the zip code');
                 return { nextState: currentState, prompt: `Could you also provide ${missing}?`, action: 'ask' };
+              } else {
+                console.log(`📋 State/zip attempt cap reached - advancing with state=${data.state || 'N/A'}, zip=${data.zip || 'N/A'}`);
+                intakeLog('retry_cap_reached', { field: 'state_zip', attempts: data._stateZipAttempts });
               }
-              console.log(`📋 State/zip attempt cap reached - advancing with state=${data.state || 'N/A'}, zip=${data.zip || 'N/A'}`);
-              intakeLog('retry_cap_reached', { field: 'state_zip', attempts: data._stateZipAttempts });
             }
           }
           return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
@@ -1939,6 +1962,13 @@ function createCallStateMachine() {
           // CRITICAL: Check if we already have the street address but need state/zip
           // If we asked "Could you provide state and zip?" - capture that response
           if (data.address && (!data.state || !data.zip)) {
+            if (declinesToAnswer(lowerTranscript)) {
+              console.log(`📋 Caller has no state/zip - accepting address as given`);
+              intakeLog('field_parse', { field: 'state_zip', state: data.state, zip: data.zip, reason: 'caller_declined' });
+              data._addressComplete = true;
+              data._addressLocked = true;
+              return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
+            }
             // Try to extract state and zip from response
             const stateZipResult = extractStateAndZip(transcript);
             if (stateZipResult.state || stateZipResult.zip) {
@@ -2109,6 +2139,13 @@ function createCallStateMachine() {
         }
         // state/zip follow-up (when we had address+city from earlier turn)
         if (data.address && (!data.state || !data.zip)) {
+          if (declinesToAnswer(lowerTranscript)) {
+            console.log(`📋 Caller has no state/zip - accepting address as given`);
+            intakeLog('field_parse', { field: 'state_zip', state: data.state, zip: data.zip, reason: 'caller_declined' });
+            data._addressComplete = true;
+            data._addressLocked = true;
+            return { nextState: transitionTo(STATES.AVAILABILITY), prompt: withAcknowledgment(AVAILABILITY.ask), action: 'ask' };
+          }
           const stateZipResult = extractStateAndZip(transcript);
           if (stateZipResult.state || stateZipResult.zip) {
             if (stateZipResult.state) data.state = stateZipResult.state;
@@ -2257,7 +2294,11 @@ function createCallStateMachine() {
 
         if (transcript.length > 2 && looksLikeAvailability(lowerTranscript)) {
           const extracted = extractAvailability(transcript);
-          let availabilityConfidencePercent = 80; // Default; reduce for hesitation
+          // A plain answer is accepted and read back once, in the recap (the
+          // script has no availability read-back). The default used to sit
+          // below CONFIDENCE_THRESHOLD, so every answer got an extra "I have
+          // X. Is that right?" turn. Hesitation still drops it below.
+          let availabilityConfidencePercent = 90; // Default; reduce for hesitation
           if (/\b(um|uh|er|hmm|like|maybe|i think|i guess)\b/.test(lowerTranscript)) {
             availabilityConfidencePercent = adjustConfidence(availabilityConfidencePercent, 'hesitation');
             console.log(`📉 Availability confidence reduced due to hesitation: ${availabilityConfidencePercent}%`);
@@ -2431,6 +2472,17 @@ function createCallStateMachine() {
   /**
    * Detect if caller is confused or asking for clarification (NOT giving their name)
    */
+  /** "I don't have it" / "not sure" / "no idea": the caller cannot give the detail asked for. */
+  function declinesToAnswer(text) {
+    const t = String(text || '').toLowerCase();
+    return /\b(?:don'?t|do\s+not|dont|didn'?t)\s+(?:have|know|remember|recall)\b|\b(?:not|un)\s*sure\b|\bno\s+idea\b|\bcan'?t\s+(?:remember|recall|think\s+of)\b|\bi'?m\s+not\s+(?:sure|certain)\b|\bnot\s+(?:off\s+the\s+top|on\s+hand|on\s+me)\b|\bi\s+(?:wouldn'?t|don'?t)\s+know\b|\bskip\s+(?:it|that)\b/.test(t);
+  }
+
+  /** Accented letters to plain ones: "María López" -> "Maria Lopez". */
+  function stripDiacritics(text) {
+    return String(text || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
+  }
+
   function isConfusedOrAsking(text) {
     const confusedPatterns = [
       'excuse me', 'pardon', 'pardon me', 'what', 'huh', 'sorry',
@@ -3506,15 +3558,35 @@ function createCallStateMachine() {
   }
   
   function extractAvailability(text) {
-    // Clean up and normalize availability; strip meta-speech and fillers
-    let cleaned = text
-      .replace(/^(yeah|yes|oh|um|uh|so|well|okay|ok)[,.]?\s*/gi, '')
+    // Clean up and normalize availability; strip meta-speech and fillers.
+    // "Weekday mornings are best for me." -> "Weekday mornings": the raw
+    // sentence used to be read back ("I have Weekday mornings are best for
+    // me.. Is that right?") and saved as-is (review tickets 7, 13, 16).
+    let source = String(text || '');
+    // "All right, let me know what else you need. I'm available weekday
+    // mornings." -> keep the sentence that talks about availability.
+    const sentences = source.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+    if (sentences.length > 1) {
+      const about = sentences.filter((s) => looksLikeAvailability(s.toLowerCase()));
+      if (about.length && about.length < sentences.length) source = about.join(' ');
+    }
+    let cleaned = source
+      .replace(/^(yeah|yes|oh|um|uh|so|well|okay|ok|all right|alright|sure)[,.]?\s*/gi, '')
       .replace(/^(i would say|i'd say|i'd\s+say|that would be|it would be|probably|maybe)\s*/gi, '')
       .replace(/^(just|say)\s*/gi, '')  // "just weekdays", "say weekdays" -> weekdays
-      .replace(/^(i'm available|i can do|works for me|best for me is)\s*/gi, '')
+      .replace(/^(i'm available|i am available|i'm free|i can do|works for me|best for me is|let'?s say|how about|the best time (?:is|would be))\s*/gi, '')
       .replace(/\s+(just|say)\s+/gi, ' ')  // mid-phrase fillers
+      .replace(/[.!?]+\s*$/g, '')  // trailing punctuation (it was doubled in "I have X.. Is that right?")
+      .replace(/,?\s*\b(?:are|is|would be|work|works|usually work|usually works)\s+(?:the\s+)?(?:best|better|fine|good|great|ideal|easiest)\s*(?:for\s+(?:me|us))?\s*$/i, '')
+      .replace(/,?\s*\b(?:works?|is\s+(?:fine|good|best))\s+for\s+(?:me|us)\s*$/i, '')
+      .replace(/,?\s*\bfor\s+(?:me|us)\s*$/i, '')
+      .replace(/,?\s*\b(?:please|thanks|thank you)\s*$/i, '')
+      .replace(/,?\s*\b(?:i\s+think|i\s+guess|i\s+suppose|probably|maybe|or\s+so|i'?d\s+say)\s*$/i, '')
+      .replace(/[.!?,]+\s*$/g, '')
+      .replace(/\s+/g, ' ')
       .trim();
-    
+    if (cleaned) cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+
     return cleaned;
   }
 
@@ -3663,16 +3735,65 @@ function createCallStateMachine() {
     return cleaned;
   }
   
+  /**
+   * "about ten years old" / "10 years" / "a couple of years old" -> "about 10 years".
+   * Returns null when the answer says nothing about age.
+   */
+  const SYSTEM_AGE_RE = /\b(?:(about|around|roughly|approximately|almost|over|nearly|maybe|at least)\s+)?(\d{1,2}|(?:twenty|thirty|forty|fifty)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|a couple(?: of)?|a few|several)\s*(?:-|\s)?\s*(?:years?|yrs?)(?:[\s-]+old)?\b/i;
+
+  /** The answer without its age phrase: "a gas furnace, about ten years old" -> "a gas furnace". */
+  function withoutSystemAge(text) {
+    return String(text || '').replace(SYSTEM_AGE_RE, '').replace(/\s*,\s*(?=[,.!?]|$)/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  function extractSystemAge(text) {
+    const t = String(text || '').toLowerCase();
+    const words = {
+      one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+      eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+      eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50,
+    };
+    const m = t.match(SYSTEM_AGE_RE);
+    if (!m) {
+      if (/\b(brand new|pretty new|fairly new|just installed|new system|new unit)\b/.test(t)) return 'new';
+      return null;
+    }
+    const qualifier = m[1] ? m[1] : '';
+    let n = m[2];
+    if (/^\d+$/.test(n)) n = String(parseInt(n, 10));
+    else if (/^a couple/.test(n)) n = 'a couple of';
+    else if (n === 'a few' || n === 'several') n = n;
+    else if (n.includes('-') || n.includes(' ')) {
+      const [tens, ones] = n.split(/[\s-]/);
+      n = String((words[tens] || 0) + (words[ones] || 0));
+    } else n = String(words[n]);
+    if (n === 'a couple of' || n === 'a few' || n === 'several') return `${n} years`;
+    const years = n === '1' ? 'year' : 'years';
+    return `${qualifier ? qualifier + ' ' : ''}${n} ${years}`.trim();
+  }
+
   function storeDetailAnswer(text, analysis) {
     const questions = getDetailQuestions();
     const currentQuestion = questions[detailsQuestionIndex];
     
     if (data.intent === INTENT_TYPES.HVAC_SERVICE) {
+      // "It's a gas furnace, about ten years old": the age was dropped
+      // whichever question it came with (review ticket 5, nine calls).
+      if (!data.details.systemAge) {
+        const age = extractSystemAge(text);
+        if (age) {
+          data.details.systemAge = age;
+          console.log(`📋 System age: ${age}`);
+        }
+      }
       if (currentQuestion === DETAILS.hvac_service.system_type) {
-        // Normalize system type: "Oh, it's central here" → "central air"
-        data.details.systemType = normalizeSystemType(text);
+        // Normalize system type: "Oh, it's central here" → "central air".
+        // The age phrase is set aside first: "a boiler, maybe twenty years
+        // old" is sure about the boiler, unsure about the years.
+        const typeText = withoutSystemAge(text) || text;
+        data.details.systemType = normalizeSystemType(typeText);
         const uncertainPhrases = /\b(not\s+too?\s+sure|i'?d\s+take|maybe|i\s+think|unsure|not\s+sure|don'?t\s+know|might\s+be)\b/i;
-        data.details.systemTypeUncertain = uncertainPhrases.test(text);
+        data.details.systemTypeUncertain = uncertainPhrases.test(typeText);
         if (data.details.systemTypeUncertain && /\b(not\s+sure|don'?t\s+know|unsure|not\s+too?\s+sure)\b/i.test(data.details.systemType || '')) {
           data.details.systemType = null;
         }
