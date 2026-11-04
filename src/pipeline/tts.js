@@ -147,7 +147,7 @@ class BaseTts extends EventEmitter {
 // ---------------------------------------------------------------------------
 
 class ElevenLabsTts extends BaseTts {
-  constructor({ apiKey, voiceId, modelId = 'eleven_turbo_v2_5', stability = 0.5, similarityBoost = 0.8, speed = 1.0 } = {}) {
+  constructor({ apiKey, voiceId, modelId = 'eleven_turbo_v2_5', stability = 0.65, similarityBoost = 0.75, speed = 0.92 } = {}) {
     super();
     if (!apiKey) throw new Error('ELEVENLABS_API_KEY is not set');
     if (!voiceId) throw new Error('ELEVENLABS_VOICE_ID is not set');
@@ -462,9 +462,12 @@ function createTts({ provider, env = process.env } = {}) {
     // free plan use a premade one such as Sarah EXAVITQu4vr4xnSDxMaL.
     voiceId: env.ELEVENLABS_VOICE_ID || 'kdnRe2koJdOK4Ovxn2DI',
     modelId: env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5',
-    stability: env.ELEVENLABS_STABILITY ? Number(env.ELEVENLABS_STABILITY) : 0.5,
-    similarityBoost: env.ELEVENLABS_SIMILARITY ? Number(env.ELEVENLABS_SIMILARITY) : 0.8,
-    speed: env.ELEVENLABS_SPEED ? Number(env.ELEVENLABS_SPEED) : 1.0,
+    // Calmer and a touch slower than the defaults (0.5 / 0.8 / 1.0): on Tim's
+    // first Eryn call (Nov 3 2026) she spoke a bit fast and came across as
+    // curt, most of all in the recap. Speed 0.92 is about 9 % longer.
+    stability: env.ELEVENLABS_STABILITY ? Number(env.ELEVENLABS_STABILITY) : 0.65,
+    similarityBoost: env.ELEVENLABS_SIMILARITY ? Number(env.ELEVENLABS_SIMILARITY) : 0.75,
+    speed: env.ELEVENLABS_SPEED ? Number(env.ELEVENLABS_SPEED) : 0.92,
   });
 }
 

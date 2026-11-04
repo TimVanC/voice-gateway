@@ -47,7 +47,8 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
-const { saveCall: saveCallToDb, createTranscriptRecorder } = require('./utils/call-db');
+const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder } = require('./utils/call-db');
+const { TrackRecorder } = require('./utils/track-recorder');
 
 const { createStt, resolveSttProvider } = require('./pipeline/stt');
 const { createTts, resolveTtsProvider } = require('./pipeline/tts');
@@ -74,6 +75,16 @@ const TTS_FALLBACK = (() => {
   return process.env.OPENAI_API_KEY ? 'openai' : null;
 })();
 const AMBIENCE_LEVEL_DB = Number(process.env.AMBIENCE_LEVEL_DB || -50);
+// Call recording (CALL_RECORDING=on), as in server-rse.js: both sides of every
+// call, as the bytes travelled on the Twilio stream, stored in Neon at hang-up
+// and played back in the web app. Pruned at boot after CALL_RECORDING_KEEP_DAYS.
+const CALL_RECORDING = (process.env.CALL_RECORDING || '').toLowerCase() === 'on';
+const CALL_RECORDING_KEEP_DAYS = Number(process.env.CALL_RECORDING_KEEP_DAYS || 30);
+// A reply never starts sooner than this after the caller stopped. Cached
+// prompts come back in 10-30 ms, so Ava was answering about 0.8 s after the
+// STT's end of turn, on top of the caller's last word (Tim's staging call,
+// Nov 3 2026: "almost answering too quick"). A person leaves about a second.
+const REPLY_MIN_GAP_MS = Number(process.env.REPLY_MIN_GAP_MS ?? 1000);
 
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
@@ -226,6 +237,8 @@ class CallSession {
     this.baseUrl = BASE_URL || (req?.headers?.host ? `${req.headers.host.includes('localhost') ? 'http' : 'https'}://${req.headers.host}` : null);
     this.stateMachine = createCallStateMachine();
     this.transcriptRecorder = createTranscriptRecorder();
+    this.recorder = CALL_RECORDING && process.env.DATABASE_URL ? new TrackRecorder() : null; // both sides' audio, stored at hang-up
+    this.recordingStartedAt = null; // time base for the recording (the stream's start event)
     this.stt = null;
     this.tts = null;
     this.ambience = AMBIENCE === 'office' ? new RoomTone({ levelDb: AMBIENCE_LEVEL_DB }) : null;
@@ -283,9 +296,12 @@ class CallSession {
       case 'start':
         this.onStart(msg.start);
         break;
-      case 'media':
-        if (this.stt) this.stt.sendAudio(Buffer.from(msg.media.payload, 'base64'));
+      case 'media': {
+        const frame = Buffer.from(msg.media.payload, 'base64');
+        if (this.recorder && this.recordingStartedAt) this.recorder.add('caller', Date.now() - this.recordingStartedAt, frame);
+        if (this.stt) this.stt.sendAudio(frame);
         break;
+      }
       case 'dtmf': {
         const digit = msg.dtmf?.digit;
         console.log(`🔢 DTMF digit pressed: ${digit}`);
@@ -308,6 +324,7 @@ class CallSession {
     this.streamSid = start.streamSid;
     this.callSid = start.callSid;
     this.callStartAt = Date.now();
+    this.recordingStartedAt = this.callStartAt;
     activeCalls.add(this);
     console.log(`📞 Stream started: ${this.streamSid}`);
     console.log(`📞 Call SID: ${this.callSid}`);
@@ -352,11 +369,15 @@ class CallSession {
     if (!this.streamSid || this.twilioWs.readyState !== WebSocket.OPEN) return;
     let frame;
     let audible = false;
-    if (this.playBuffer.length >= FRAME_BYTES) {
+    // Hold a reply that would start sooner than REPLY_MIN_GAP_MS after the
+    // caller stopped (not the greeting: nobody spoke before it).
+    const holdReply = this.current && this.current.firstFrameAt == null && this.current.kind !== 'greeting'
+      && this.lastCallerStopAt && Date.now() - this.lastCallerStopAt < REPLY_MIN_GAP_MS;
+    if (!holdReply && this.playBuffer.length >= FRAME_BYTES) {
       frame = this.playBuffer.subarray(0, FRAME_BYTES);
       this.playBuffer = this.playBuffer.subarray(FRAME_BYTES);
       audible = true;
-    } else if (this.playBuffer.length > 0) {
+    } else if (!holdReply && this.playBuffer.length > 0) {
       frame = Buffer.concat([this.playBuffer, SILENCE_FRAME.subarray(this.playBuffer.length)]);
       this.playBuffer = Buffer.alloc(0);
       audible = true;
@@ -371,6 +392,7 @@ class CallSession {
       console.log(`🔊 First audio for "${this.current.text.slice(0, 40)}..." ${sinceStart} ms after request${sinceCaller != null ? `, ${sinceCaller} ms after the caller stopped` : ''}${this.current.cached ? ' (cached)' : ''}`);
     }
     if (this.ambience) frame = this.ambience.mixFrame(frame);
+    if (this.recorder && this.recordingStartedAt) this.recorder.add('ava', Date.now() - this.recordingStartedAt, Buffer.from(frame));
     try {
       this.twilioWs.send(JSON.stringify({ event: 'media', streamSid: this.streamSid, media: { payload: frame.toString('base64') } }));
     } catch (err) {
@@ -757,7 +779,10 @@ class CallSession {
 
     const shortUtterance = transcript.trim().length < 35;
     const explicitRepeat = /\b(repeat|say that again|say again|come again|didn'?t hear|can'?t hear|anybody there|anyone there)\b/i.test(lower);
-    const repeatRequest = (shortUtterance && /\b(hello\??|hey\??|hi\??)\b/i.test(lower)) || explicitRepeat;
+    // Only a bare "hello?" / "hi, hello?" is a repeat request: "Hi. I'm having
+    // HVAC issue." (staging call Nov 3 2026) got the whole greeting again.
+    const bareHello = /^\W*(hello|hey|hi|hiya)(\W+(hello|hey|hi|there|ava|anybody|anyone))*\W*$/i.test(lower);
+    const repeatRequest = (shortUtterance && bareHello) || explicitRepeat;
     if (repeatRequest && ![STATES.CONFIRMATION, STATES.CLOSE, STATES.ENDED].includes(currentState)) {
       const promptToRepeat = this.currentPromptText || sm.getNextPrompt();
       if (promptToRepeat) {
@@ -1037,6 +1062,8 @@ class CallSession {
         endedAt,
         environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || 'local',
         transcript: this.transcriptRecorder.turns(),
+      }).then(async (saved) => {
+        if (saved && saved.id && this.recorder) await saveRecording(saved.id, this.recorder, 'server');
       }).catch((err) => console.error('❌ Call DB save rejected unexpectedly:', err.message));
     }
 
@@ -1096,7 +1123,15 @@ server.listen(PORT, () => {
   console.log(`🗣️ TTS: ${TTS_PROVIDER} (${ttsDetail})`);
   console.log(`💬 LLM: ${llm ? llm.name : 'none'} (free-form parts only)`);
   console.log(`🎚️ Ambience: ${AMBIENCE === 'office' ? `office room tone at ${AMBIENCE_LEVEL_DB} dBFS` : 'off (AMBIENCE=office to enable)'}`);
-  console.log(`🧷 Turn hold ${TURN_HOLD_MS} ms after end of turn (merge if the caller keeps going)`);
+  console.log(`🧷 Turn hold ${TURN_HOLD_MS} ms after end of turn (merge if the caller keeps going); replies start no sooner than ${REPLY_MIN_GAP_MS} ms after the caller stops`);
+  if (CALL_RECORDING && !process.env.DATABASE_URL) {
+    console.warn('⚠️ CALL_RECORDING is on but DATABASE_URL is not set: nothing will be recorded');
+  } else if (CALL_RECORDING) {
+    console.log(`🎙️ Call recording on: both sides of every call are stored in Neon at hang-up and kept ${CALL_RECORDING_KEEP_DAYS} days`);
+    pruneOldRecordings(CALL_RECORDING_KEEP_DAYS).catch((err) => console.error('❌ Recording prune failed:', err.message));
+  } else {
+    console.log('🎙️ Call recording off (set CALL_RECORDING=on to store both sides of every call in Neon)');
+  }
   console.log(`⏱️ Barge-in grace ${BARGE_GRACE_MS} ms (${BARGE_GRACE_CONFIRM_MS} ms during the recap), watchdog ${WATCHDOG_MS} ms, re-prompt ${REPROMPT_MS} ms`);
   console.log(`📍 Webhook: https://<your-domain>/twilio/voice`);
   console.log('🎧 Waiting for calls...');

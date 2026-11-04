@@ -27,6 +27,18 @@
  */
 
 const { EventEmitter } = require('events');
+
+// Words a heating-and-cooling caller says that a general model mishears
+// ("mini split" came through as "when you split", staging call Nov 3 2026).
+// Deepgram keyterm prompting (Nova-3 and Flux) boosts them; up to 100 terms.
+const DEFAULT_KEYTERMS = [
+  'Ava', 'RSE Energy', 'HVAC', 'mini split', 'mini-split', 'ductless', 'heat pump', 'furnace', 'boiler',
+  'air handler', 'condenser', 'compressor', 'thermostat', 'central air', 'AC unit', 'air conditioner',
+  'humidifier', 'water heater', 'oil burner', 'gas furnace', 'ductwork', 'zone', 'blower', 'pilot light',
+  'Generac', 'Cummins', 'Kohler', 'generator', 'transfer switch', 'propane', 'natural gas',
+  'Mitsubishi', 'Daikin', 'Fujitsu', 'Carrier', 'Trane', 'Lennox', 'Rheem', 'Goodman', 'Bryant', 'Navien',
+  'maintenance plan', 'membership', 'tune-up', 'zip code', 'New Jersey', 'Montclair', 'Madison', 'Morristown',
+];
 const WebSocket = require('ws');
 const { muLawToPcm16 } = require('../g711');
 
@@ -404,7 +416,7 @@ function createStt({ provider, env = process.env } = {}) {
       eotThreshold: Number(env.DEEPGRAM_EOT_THRESHOLD || 0.7),
       eagerEotThreshold: Number(env.DEEPGRAM_EAGER_EOT_THRESHOLD || 0.5),
       eotTimeoutMs: Number(env.DEEPGRAM_EOT_TIMEOUT_MS || 3000),
-      keyterms: String(env.DEEPGRAM_KEYTERMS || 'Ava,RSE Energy,HVAC,Generac,Cummins,furnace,mini split').split(',').map((s) => s.trim()).filter(Boolean),
+      keyterms: String(env.DEEPGRAM_KEYTERMS || DEFAULT_KEYTERMS.join(',')).split(',').map((s) => s.trim()).filter(Boolean),
     });
   }
   return new OpenAiStt({
