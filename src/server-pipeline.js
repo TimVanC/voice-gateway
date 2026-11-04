@@ -75,6 +75,8 @@ const TTS_FALLBACK = (() => {
   return process.env.OPENAI_API_KEY ? 'openai' : null;
 })();
 const AMBIENCE_LEVEL_DB = Number(process.env.AMBIENCE_LEVEL_DB || -50);
+// Bump to throw away every stored render (v2: Nov 3 2026, a stretched take of the availability question was on staging's volume).
+const PROMPT_CACHE_VERSION = 2;
 // Call recording (CALL_RECORDING=on), as in server-rse.js: both sides of every
 // call, as the bytes travelled on the Twilio stream, stored in Neon at hang-up
 // and played back in the web app. Pruned at boot after CALL_RECORDING_KEEP_DAYS.
@@ -151,7 +153,7 @@ async function warmPromptCache() {
   try {
     cacheTts = createTts();
     promptCache.tts = cacheTts;
-    promptCache.diskKey = cacheTts.cacheKey;
+    promptCache.diskKey = `${cacheTts.cacheKey}:v${PROMPT_CACHE_VERSION}`;
     await cacheTts.open();
     const prompts = collectFixedPrompts([TRANSFER_OFFER_PROMPT]);
     const concurrency = Number(process.env.PROMPT_CACHE_CONCURRENCY || 2);

@@ -25,7 +25,24 @@ const ACKNOWLEDGEMENTS = [
   'Got it.', 'Okay.', 'Thanks.', 'Thank you.',
   "I'm sorry to hear that.", "I'm sorry you're dealing with that.", 'Thanks for letting me know.',
 ];
-const ACK_GAP = Buffer.alloc(8000 * 0.12, 0xff); // 120 ms pause between acknowledgement and question
+// Pause between the acknowledgement and the question. 120 ms ran "Okay." and
+// "What's the best phone number..." together (Tim, Nov 3 2026: "goes right
+// into the next question way too fast"); a person takes about half a second.
+const ACK_GAP_MS = Number(process.env.ACK_GAP_MS || 500);
+const ACK_GAP = Buffer.alloc(8 * ACK_GAP_MS, 0xff);
+
+// A render that runs well past what its text warrants is a stretched one
+// (ElevenLabs held "tiiiime" on the availability question, staging, Nov 3
+// 2026: fresh takes of that line came out 2.1 s, 2.3 s and 5.4 s) and would
+// replay on every call from the cache: it is rendered again and the shorter
+// take kept. Measured on 57 Eryn renders at speed 0.92: about 0.35 s plus
+// 0.07 s per character, within 15 %.
+const RENDER_RETRIES = 2;
+function expectedSeconds(text) { return 0.35 + 0.07 * String(text || '').length; }
+function looksStretched(text, buf) {
+  if (!buf || !buf.length || !text) return false;
+  return buf.length / 8000 > expectedSeconds(text) * 1.25 + 0.3;
+}
 
 /** Every fixed line Ava can say, deduplicated, in the order the script lists them. */
 function collectFixedPrompts(extra = []) {
@@ -126,6 +143,18 @@ ${text}`).digest('hex');
     try { fs.mkdirSync(CACHE_DIR, { recursive: true }); fs.writeFileSync(p, buf); } catch (_) { /* best effort */ }
   }
 
+  /** One render, done again (up to RENDER_RETRIES times) when it comes out stretched; the shortest take wins. */
+  async renderChecked(text, log = console.log) {
+    let best = await this.tts.render(text);
+    for (let i = 0; i < RENDER_RETRIES && looksStretched(text, best); i++) {
+      log(`⚠️ Prompt cache: "${text.slice(0, 40)}..." rendered ${(best.length / 8000).toFixed(1)} s for ${text.length} chars - rendering again`);
+      this.stretched = (this.stretched || 0) + 1;
+      const again = await this.tts.render(text);
+      if (again.length && again.length < best.length) best = again;
+    }
+    return best;
+  }
+
   /** Render every fixed prompt through the TTS provider, a few at a time. */
   async warm(prompts = collectFixedPrompts(), { concurrency = 2, log = console.log } = {}) {
     const t0 = Date.now();
@@ -134,9 +163,10 @@ ${text}`).digest('hex');
       while (queue.length) {
         const text = queue.shift();
         const onDisk = this.readDisk(text);
-        if (onDisk) { this.fixed.set(text, onDisk); this.seconds += onDisk.length / 8000; this.fromDisk++; continue; }
+        if (onDisk && !looksStretched(text, onDisk)) { this.fixed.set(text, onDisk); this.seconds += onDisk.length / 8000; this.fromDisk++; continue; }
+        if (onDisk) log(`⚠️ Prompt cache: the stored render of "${text.slice(0, 40)}..." is ${(onDisk.length / 8000).toFixed(1)} s for ${text.length} chars - rendering it again`);
         try {
-          const buf = await this.tts.render(text);
+          const buf = await this.renderChecked(text, log);
           if (buf.length) { this.fixed.set(text, buf); this.seconds += buf.length / 8000; this.writeDisk(text, buf); }
           else this.failed++;
         } catch (err) {
@@ -164,8 +194,8 @@ ${text}`).digest('hex');
   }
 
   summary() {
-    return { ready: this.ready, fixed: this.fixed.size, dynamic: this.dynamic.size, seconds: Math.round(this.seconds), from_disk: this.fromDisk, hits: this.hits, composed: this.composed, misses: this.misses, failed: this.failed };
+    return { ready: this.ready, fixed: this.fixed.size, dynamic: this.dynamic.size, seconds: Math.round(this.seconds), from_disk: this.fromDisk, hits: this.hits, composed: this.composed, misses: this.misses, failed: this.failed, stretched: this.stretched || 0 };
   }
 }
 
-module.exports = { PromptCache, collectFixedPrompts, ACKNOWLEDGEMENTS };
+module.exports = { PromptCache, collectFixedPrompts, ACKNOWLEDGEMENTS, ACK_GAP_MS, expectedSeconds, looksStretched };

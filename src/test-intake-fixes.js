@@ -349,7 +349,7 @@ console.log('\n🧪 Phone: a 9-digit number is read back, "I just said that" off
   check('9 digits: stays in PHONE', r1.nextState, STATES.PHONE);
   check('9 digits: asks for the last digit, not the whole question again', r1.prompt, 'Sorry, I think I missed the last digit. What was it?');
   const r2 = sm.processInput('Yeah. It just said that.');
-  check('"it just said that": offers the number they are calling from', /calling from, 973, 885, 2528/.test(r2.prompt), true);
+  check('"it just said that": offers the number they are calling from', /calling from, 9 7 3, 8 8 5, 2 5 2 8/.test(r2.prompt), true);
   check('still in PHONE while asking', r2.nextState, STATES.PHONE);
   const r3 = sm.processInput('Yes.');
   check('yes: the caller ID is the phone', sm.getData().phone, '973-885-2528');
@@ -374,7 +374,7 @@ console.log('\n🧪 Phone: a 9-digit number is read back, "I just said that" off
   const sm5 = atPhone();
   sm5.processInput('973222222');
   const r7 = sm5.processInput('2');
-  check('the missing digit is stitched on and read back once', r7.prompt, 'Got it, 973, 222, 2222. Is that right?');
+  check('the missing digit is stitched on and read back once', r7.prompt, 'Got it, 9 7 3, 2 2 2, 2 2 2 2. Is that right?');
   const r8 = sm5.processInput('Yes.');
   check('yes: 973-222-2222 stored and on to EMAIL', [sm5.getData().phone, r8.nextState], ['973-222-2222', STATES.EMAIL]);
 
@@ -382,7 +382,7 @@ console.log('\n🧪 Phone: a 9-digit number is read back, "I just said that" off
   const r9 = sm6.processInput('97322222');
   check('8 digits: asks for the last two', r9.prompt, 'Sorry, I missed the last two digits. What were they?');
   const r10 = sm6.processInput('22');
-  check('two digits complete it', /973, 222, 2222/.test(r10.prompt), true);
+  check('two digits complete it', /9 7 3, 2 2 2, 2 2 2 2/.test(r10.prompt), true);
 
   const sm7 = atPhone();
   const r11 = sm7.processInput('9732222');
@@ -394,6 +394,21 @@ console.log('\n🧪 Phone: a 9-digit number is read back, "I just said that" off
   sm8.processInput('973222222');
   const r13 = sm8.processInput('Nine seven three two two two two two two two');
   check('a full number said again, in words the pipeline did not normalise, is not stitched on', r13.nextState, STATES.PHONE);
+}
+
+console.log('\n🧪 Prompt cache: a stretched render ("tiiiime", staging Nov 3 2026) is caught; the phone is read back digit by digit');
+{
+  const { looksStretched, expectedSeconds, ACK_GAP_MS } = require('./pipeline/prompt-cache');
+  const { formatPhoneForReadback } = require('./utils/confidence-estimator');
+  const buf = (sec) => Buffer.alloc(Math.round(sec * 8000), 0xff);
+  const q = 'What days and times usually work best for you?';
+  check('a 2.3 s render of the availability question is normal', looksStretched(q, buf(2.3)), false);
+  check('the 5.4 s take ElevenLabs produced for it is stretched', looksStretched(q, buf(5.39)), true);
+  check('"Okay." at 0.74 s is normal', looksStretched('Okay.', buf(0.74)), false);
+  check('the 10.5 s greeting is normal', looksStretched('Hi, thanks for calling RSE Energy. This is Ava, an AI assistant. Press 0 at any time to speak with a team member, or just tell me how I can help you.', buf(10.5)), false);
+  check('expected length of the availability question is about 3.6 s', Math.round(expectedSeconds(q) * 10) / 10, 3.6);
+  check('half a second between "Okay." and the question', ACK_GAP_MS, 500);
+  check('phone read back digit by digit', formatPhoneForReadback('973-222-2222'), '9 7 3, 2 2 2, 2 2 2 2');
 }
 
 console.log(failures === 0 ? '\n✅ All intake fix checks passed' : `\n❌ ${failures} check(s) failed`);

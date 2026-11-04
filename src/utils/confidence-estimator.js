@@ -349,11 +349,15 @@ const CLARIFICATION_PROMPTS = {
   }
 };
 
+// Digit by digit in groups of three, "9 7 3, 2 2 2, 2 2 2 2": "973, 222, 2222"
+// was read as numbers ("nine seventy-three, two twenty-two...") at speed
+// (Tim, Nov 3 2026: "read it as fast as the speed of light").
 function formatPhoneForReadback(phone) {
   const digits = phone.replace(/\D/g, '');
   if (digits.length >= 10) {
     const last10 = digits.slice(-10);
-    return `${last10.slice(0,3)}, ${last10.slice(3,6)}, ${last10.slice(6)}`;
+    const spaced = (s) => s.split('').join(' ');
+    return `${spaced(last10.slice(0, 3))}, ${spaced(last10.slice(3, 6))}, ${spaced(last10.slice(6))}`;
   }
   return phone;
 }
