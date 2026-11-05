@@ -2950,6 +2950,17 @@ if (SMOKE_CALL.enabled && SMOKE_CALL.problems.length) {
 } else {
   console.log('📞 Daily smoke call off (set DAILY_SMOKE_CALL=on to phone Ava once a day)');
 }
+// Logged so the deploy log proves which numbers are treated as test calls
+// (Nov 5 2026: the owner's phone was missing from production's list and its
+// calls reached the Sheet and the live call log).
+{
+  const testNumbers = String(process.env.TEST_CALLER_NUMBERS || '').split(',').map((n) => n.replace(/\D/g, '')).filter(Boolean);
+  if (testNumbers.length) {
+    console.log(`🧪 Test caller numbers (never the Sheet, the inbox or the live call log): ${testNumbers.map((n) => `…${n.slice(-4)}`).join(', ')}`);
+  } else {
+    console.warn('⚠️ TEST_CALLER_NUMBERS is empty: calls from RSE\'s own phones will be treated as real callers');
+  }
+}
 // After a restart, /health reports the newest stored smoke call until the next one runs.
 smokeCall.loadLastResultFromDb().catch(() => {});
 
