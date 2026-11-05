@@ -372,12 +372,10 @@ function cleanCallSummary(summary) {
   // Clean up multiple spaces
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
   
-  // Rephrase common patterns into operational language
+  // The caller's own words are kept. This used to rewrite "no air coming
+  // out" as "no warm air" and "not working" as "not functioning", which the
+  // call reviewer flagged as misstating the symptom (ticket 12).
   cleaned = cleaned
-    .replace(/\b(no|not|isn'?t|isn't|doesn'?t|doesn't|won'?t|won't)\s+(hot|warm|air|heat|cooling)\s+(coming|blowing|out)\b/gi, 'no warm air')
-    .replace(/\b(blowing|pushing)\s+(out|out of)\s+(lukewarm|warm|cold|hot)\s+air\b/gi, 'blowing warm air')
-    .replace(/\b(just|only)\s+(blowing|heating|cooling|working|running)\b/gi, 'operating')
-    .replace(/\b(not|no)\s+(working|heating|cooling|running)\b/gi, 'not functioning')
     .replace(/\b(issue|problem|trouble)\s+with\b/gi, 'issue with')
     .replace(/\b(reported|said|mentioned)\s+that\b/gi, 'reported');
   
@@ -525,6 +523,9 @@ function tidySummaryFragment(text) {
     .replace(/^(?:(?:yeah|yes|yep|uh|um|er|ah|oh|well|so|okay|ok|right|sure|honestly|basically)[,\s]+)+/i, '')
     .replace(/^(?:it'?s|it\s+is|the\s+(?:system|unit|furnace|boiler|heat\s+pump|ac|air\s+conditioner)\s+(?:is|has\s+been)|there'?s|there\s+is|i\s+(?:think|guess|believe)\s+(?:it'?s|it\s+is)?)\s+/i, '')
     .replace(/\s*[.!?;]+\s*(?=\S)/g, ', ')
+    // A sentence break became a comma: lower-case what follows it, minus any
+    // lead-in ("It's completely out. No heat at all." -> "completely out, no heat at all").
+    .replace(/,\s+(?:(?:it'?s|it\s+is|there'?s|there\s+is|and|but)\s+)?([A-Z])/g, (m, c) => `, ${c.toLowerCase()}`)
     .replace(/[.!?;,\s]+$/g, '')
     .replace(/^[,\s]+/g, '')
     .replace(/,\s*,/g, ',')
@@ -591,24 +592,24 @@ function generateCallSummary(callData, callStatus) {
     // answers together verbatim ("Caller reported completely out.  No air
     // at all. ; furnace system - completely out") and rewrote "no air
     // coming out" as "no warm air" (review ticket 12, seven calls).
+    // Fragments are compared clause by clause so that "completely out, no
+    // heat at all" after "completely out, no air coming out at all" adds
+    // only "no heat at all" (the severity answer usually repeats the
+    // symptom answer).
     const fragments = [];
+    const seenClauses = new Set();
+    const keyOf = (clause) => clause.toLowerCase().replace(/\b(it'?s|it\s+is|the|a|an|just|really|at\s+all)\b/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
     const addFragment = (text) => {
       const f = tidySummaryFragment(text);
       if (!f) return;
-      const words = new Set(f.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2));
-      // Skip a fragment that only repeats an earlier one ("completely out"
-      // after "completely out, no air at all").
-      const repeated = fragments.some((g) => {
-        const gw = new Set(g.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2));
-        return [...words].every((w) => gw.has(w)) || [...gw].every((w) => words.has(w)) && gw.size >= words.size;
-      });
-      if (repeated) {
-        // Keep the longer of the two.
-        const i = fragments.findIndex((g) => g.length < f.length && [...new Set(g.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2))].every((w) => words.has(w)));
-        if (i >= 0) fragments[i] = f;
-        return;
+      const kept = [];
+      for (const clause of f.split(/,\s*/)) {
+        const k = keyOf(clause);
+        if (!k || seenClauses.has(k)) continue;
+        seenClauses.add(k);
+        kept.push(clause);
       }
-      fragments.push(f);
+      if (kept.length) fragments.push(kept.join(', '));
     };
     addFragment(issueText);
     addFragment(severityText);

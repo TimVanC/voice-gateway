@@ -47,7 +47,7 @@ console.log('\n🧪 No-heat intake: accented name, system age, zip declined, ava
   const rSev = sm.processInput("It's completely out.");
   check('details done, address asked', rSev.nextState, STATES.ADDRESS);
 
-  let r = sm.processInput('14 Elm Street, Montclair, New Jersey.');
+  let r = sm.processInput("Sure, it's 14 Elm Street, Montclair, New Jersey.");
   if (r.nextState === STATES.ADDRESS && /did you say/i.test(r.prompt || '')) r = sm.processInput("Yes, that's right, E-L-M Street.");
   check('zip follow-up asked once', /zip code/i.test(r.prompt || ''), true);
   r = sm.processInput("Oh, I don't have it on me right now.");
