@@ -113,8 +113,7 @@ console.log('\n🧪 Recap issue line never cuts a word');
 }
 
 
-console.log('
-🧪 A "yes" to a recap the caller did not hear is not a confirmation');
+console.log('\n🧪 A "yes" to a recap the caller did not hear is not a confirmation');
 {
   const sm = createCallStateMachine();
   sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
