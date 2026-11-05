@@ -3418,11 +3418,13 @@ function createCallStateMachine() {
       }
     }
     
-    // Remove common prefixes and filler phrases
+    // Remove common prefixes and filler phrases. "Sure, it's 14 Elm Street"
+    // was stored whole on Nov 5 2026, and the Sheet's address check (which
+    // wants a leading house number) then saved no address at all.
     address = address
-      .replace(/^(yeah|yes|oh|um|uh|so|well|okay|ok)[,.]?\s*/gi, '')
+      .replace(/^(?:(?:yeah|yes|yep|oh|um|uh|so|well|okay|ok|sure|all\s+right|alright|absolutely|of\s+course|right)[,.]?\s+)+/gi, '')
       .replace(/^(it would be|that would be|it'?d be|that'?d be)\s*/gi, '')
-      .replace(/^(that'?s|it'?s|it\s+is|the\s+address\s+is|address\s+is|my\s+address\s+is)\s*/gi, '')
+      .replace(/^(that'?s|it'?s|it\s+is|the\s+(?:service\s+)?address\s+is|address\s+is|my\s+address\s+is|we'?re\s+at|i'?m\s+at|it'?s\s+at|the\s+house\s+is\s+at)\s*/gi, '')
       .trim();
     
     // Remove "as in" and similar phrases (e.g., "1111, as in 1111 Elf")
