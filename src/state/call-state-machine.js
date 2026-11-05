@@ -2343,9 +2343,18 @@ function createCallStateMachine() {
         };
         
       case STATES.CONFIRMATION:
+        // The server says the recap was interrupted before it played out: a
+        // bare "yes" / "that's it" confirms nothing the caller heard, so read
+        // it back again (once; the server stops asking after one replay). A
+        // correction is still taken as a correction.
+        if (analysis && analysis.recapCutShort && (isConfirmation(lowerTranscript) || isNothingElse(lowerTranscript)) && !isCorrection(lowerTranscript)) {
+          console.log(`📋 Recap was cut short; "${transcript.substring(0, 40)}" is not a confirmation yet - reading it back again`);
+          intakeLog('state_event', { event: 'recap_replayed', transcript: transcript.substring(0, 60) });
+          return { nextState: currentState, prompt: getConfirmationPrompt(), action: 'confirm', recapReplayed: true };
+        }
         // Mark that confirmation prompt was delivered (for completion tracking)
         data._confirmationDelivered = true;
-        
+
         // RECAP IS READ-ONLY: Do not parse transcript for any field updates during confirmation.
         // The agent's recap speech must never be treated as user input (would corrupt first_name with "Tim and last name is...").
         // Only respond to yes/no/correction. If user says "no" or "something's wrong", we ask what to correct and handle in a follow-up.
