@@ -112,5 +112,27 @@ console.log('\n🧪 Recap issue line never cuts a word');
   check('summary names the boiler and its age', summary.startsWith('Boiler, maybe 20 years old:'), true);
 }
 
+
+console.log('\n🧪 A "yes" to a recap the caller did not hear is not a confirmation');
+{
+  const sm = createCallStateMachine();
+  sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+  sm.transitionTo(STATES.NAME);
+  sm.processInput('Tim Smith');
+  sm.transitionTo(STATES.CONFIRMATION);
+  const cut = sm.processInput("Yes, that's all correct.", { recapCutShort: true });
+  check('recap read back again', cut.recapReplayed === true && cut.nextState === STATES.CONFIRMATION, true);
+  check('replay is the full recap', /^Let me read that back\./.test(cut.prompt || ''), true);
+  const corr = sm.processInput("No, the name is Tim Jones.", { recapCutShort: true });
+  check('a correction during a cut recap is still a correction', corr.recapReplayed, undefined);
+  const sm2 = createCallStateMachine();
+  sm2.setIntent(INTENT_TYPES.HVAC_SERVICE);
+  sm2.transitionTo(STATES.NAME);
+  sm2.processInput('Tim Smith');
+  sm2.transitionTo(STATES.CONFIRMATION);
+  const ok = sm2.processInput("Yes, that's all correct.");
+  check('a yes after a full recap moves on', ok.nextState !== STATES.CONFIRMATION || ok.recapReplayed !== true, true);
+}
+
 console.log(failures ? `\n❌ ${failures} check(s) failed` : '\n✅ All intake fix checks passed');
 process.exit(failures ? 1 : 0);

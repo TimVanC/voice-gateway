@@ -454,6 +454,13 @@ wss.on("connection", (twilioWs, req) => {
   // in silence until the 20 s keep-alive noticed (review ticket 46: 31 s).
   const SILENCE_RECOVERY_MS = 12000;
   let silenceRepromptedFor = null; // currentPromptText already re-asked once
+  // The recap ("Let me read that back...") was interrupted by the caller
+  // before it had played out. A bare "yes" to a recap the caller never
+  // heard is not a confirmation: the state machine reads it back again,
+  // once (review ticket 57, Nov 5 2026: the caller said "Yes, that's all
+  // correct" one second into the recap and Ava closed on it).
+  let recapCutShort = false;
+  let recapReplays = 0;
   
   // ============================================================================
   // CONFIRMATION RECOVERY (for when user doesn't respond to yes/no questions)
@@ -534,6 +541,7 @@ wss.on("connection", (twilioWs, req) => {
           // The last frame of a finished prompt just went out: from here the
           // caller is expected to answer. Re-ask once if nothing comes.
           if (bytesConsumedFromBuffer > 0 && playBuffer.length === 0 && audioDoneReceived) {
+            if (stateMachine.getState() === STATES.CONFIRMATION) recapCutShort = false; // the recap played out
             startSilenceRecoveryTimer();
           }
         }
@@ -1483,6 +1491,12 @@ wss.on("connection", (twilioWs, req) => {
         if (playBuffer.length > 0 || responseInProgress) {
           // Strict isolation: always hard-stop assistant playback on barge-in (except ENDED/goodbye)
           console.log("🛑 Barge-in: stopping assistant audio");
+          // More than 2 s of the recap still unplayed (or still being generated): whatever
+          // the caller says next was said to a recap they did not hear in full.
+          if (currentStateForBargeIn === STATES.CONFIRMATION && (!audioDoneReceived || playBuffer.length > 16000)) {
+            recapCutShort = true;
+            console.log(`📋 Recap cut short by barge-in (${(playBuffer.length / 8000).toFixed(1)}s unplayed${audioDoneReceived ? '' : ', still generating'})`);
+          }
           cancelResponseAudio("barge_in", currentResponseId, {
             sendCancelToOpenAI: true,
             stopTwilioPlayback: true
@@ -2346,10 +2360,17 @@ STRICT RULES:
     } else if (currentData.intent) {
       console.log(`📋 Intent already locked: ${currentData.intent} - skipping classification`);
     }
-    
+    if (currentState === STATES.CONFIRMATION && recapCutShort && recapReplays < 1) {
+      analysis.recapCutShort = true;
+    }
+
     // Process through state machine
     const result = stateMachine.processInput(transcript, analysis);
-    
+    if (result.recapReplayed) {
+      recapReplays++;
+      recapCutShort = false;
+    }
+
     console.log(`📍 State machine result: nextState=${result.nextState}, action=${result.action}`);
     
     // Generate appropriate response based on state machine result
