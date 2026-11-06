@@ -717,11 +717,38 @@ async function loadLastResultFromDb({ log = console } = {}) {
   return lastResult;
 }
 
+// A call that never connected (Twilio says busy, failed or no-answer before
+// any media stream opened) is placed once more after this pause. Nov 6 2026:
+// Railway's edge answered Twilio's webhook with a 404 for about five seconds
+// at 8:30:04, the call rang busy, and the morning report said FAIL while Ava
+// was fine. One retry rides out a blip like that; a real outage still fails.
+const RETRY_DELAY_MS = 30_000;
+
+function neverConnected(result) {
+  return /^never connected/.test(String((result && result.endedHow) || ''));
+}
+
+/** Places one call and stores it; { result, detail }. */
+async function placeOnce({ full, twilioClient, config, log }) {
+  if (full) {
+    const fullCall = require('./smoke-full-call');
+    const result = await fullCall.runFullSmokeCall({ twilioClient, config, log });
+    const store = await fullCall.storeFullRun(result, { log });
+    return { result, detail: fullCall.describeFull(result, store) };
+  }
+  const result = await runSmokeCall({ twilioClient, config, log });
+  const store = await storeSmokeRun(result, { log });
+  return { result, detail: describe(result, store) };
+}
+
 /**
  * The check the daily check runs: places the call (once a day when it
- * passes), stores the result, returns { name, status, detail }.
+ * passes), stores the result, returns { name, status, detail }. A call that
+ * never connected is tried once more after RETRY_DELAY_MS; both attempts are
+ * stored, and the detail names the first one.
+ * `place` and `retryDelayMs` exist for tests.
  */
-async function smokeCheck({ twilioClient = null, log = console, config = smokeCallConfig() } = {}) {
+async function smokeCheck({ twilioClient = null, log = console, config = smokeCallConfig(), place = placeOnce, retryDelayMs = RETRY_DELAY_MS } = {}) {
   const full = config.mode === 'full';
   const name = full ? 'Ava handles a full call' : 'Ava answers the phone';
   const today = etDay(Date.now());
@@ -729,17 +756,13 @@ async function smokeCheck({ twilioClient = null, log = console, config = smokeCa
     return { name, status: 'pass', detail: `${lastPass.detail} (from the ${lastPass.time} call; one call a day)` };
   }
   try {
-    let result;
-    let detail;
-    if (full) {
-      const fullCall = require('./smoke-full-call');
-      result = await fullCall.runFullSmokeCall({ twilioClient, config, log });
-      const store = await fullCall.storeFullRun(result, { log });
-      detail = fullCall.describeFull(result, store);
-    } else {
-      result = await runSmokeCall({ twilioClient, config, log });
-      const store = await storeSmokeRun(result, { log });
-      detail = describe(result, store);
+    let { result, detail } = await place({ full, twilioClient, config, log });
+    if (!result.passed && neverConnected(result)) {
+      const firstReason = result.reason || result.endedHow;
+      log.warn(`⚠️ Smoke call: ${firstReason}; placing it once more in ${Math.round(retryDelayMs / 1000)} s`);
+      await sleep(retryDelayMs);
+      ({ result, detail } = await place({ full, twilioClient, config, log }));
+      detail = `${detail} (first try: ${firstReason}; placed again after ${Math.round(retryDelayMs / 1000)} s)`;
     }
     if (result.passed) lastPass = { day: today, time: etTime(result.dialedAt), detail };
     lastResult = { at: new Date(result.dialedAt || Date.now()).toISOString(), passed: result.passed, summary: detail, source: 'live' };

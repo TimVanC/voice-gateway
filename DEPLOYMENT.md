@@ -304,6 +304,11 @@ phone, email, details, address, availability, recap, goodbye).
   calls still go to Neon, flagged as tests. If Ava tries to transfer the
   smoke call she ends it instead of ringing the live line, and the check
   fails with that reason.
+- **One retry:** if the call never connects (Twilio reports busy, failed or
+  no answer before a media stream opens, as on Nov 6 2026 when Railway's edge
+  answered Twilio with a 404 for a few seconds), the server waits 30 s and
+  places it once more. Both attempts are stored in the Test calls tab; the
+  report line names the first one. A real outage still fails the second call.
 - **Where it shows:** the daily check line `Ava handles a full call`, the
   server log (`✅ Daily full smoke call PASS` / `❌ ... FAIL` plus the
   transcript), and the web app's Test calls tab (scenario `daily-full-call`,
