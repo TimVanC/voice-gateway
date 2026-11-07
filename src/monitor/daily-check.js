@@ -479,6 +479,15 @@ function etTimeOf(iso) {
   return new Intl.DateTimeFormat('en-US', { timeZone: REPORT_TIME_ZONE, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso));
 }
 
+// The server's own 8:30 AM check is still running (call, retry, email) until
+// about now; a backup run that starts before this must not call a day with no
+// result yet a failure.
+const MORNING_CALL_DONE_BY = '08:45';
+
+function etClockOf(iso) {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: REPORT_TIME_ZONE, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(iso));
+}
+
 function smokeCallRelayCheck(healthJson, now = new Date()) {
   const result = { name: 'Ava answers the phone', status: 'fail', detail: '' };
   const sc = healthJson && healthJson.smoke_call;
@@ -498,12 +507,30 @@ function smokeCallRelayCheck(healthJson, now = new Date()) {
   }
   const verdict = sc.last.passed ? 'PASS' : 'FAIL';
   if (etDayOf(sc.last.at) !== etDayOf(now.toISOString())) {
+    if (etClockOf(now.toISOString()) < MORNING_CALL_DONE_BY) {
+      result.status = 'info';
+      result.detail = `today's 8:30 AM call is not finished yet; the last one, ${etTimeOf(sc.last.at)}, was a ${verdict}: ${sc.last.summary}`;
+      return result;
+    }
     result.detail = `no smoke call today; the last one, ${etTimeOf(sc.last.at)}, was a ${verdict}: ${sc.last.summary}`;
     return result;
   }
-  result.status = sc.last.passed ? 'pass' : 'fail';
-  result.detail = `${etTimeOf(sc.last.at)} call, reported by the server: ${sc.last.summary}`;
+  if (sc.last.passed) {
+    result.status = 'pass';
+    result.detail = `${etTimeOf(sc.last.at)} call, reported by the server: ${sc.last.summary}`;
+    return result;
+  }
+  // The server emailed this failure itself when it happened (Nov 6 2026: the
+  // 8:30 AM FAIL arrived again at 3:02 PM from the GitHub backup, which
+  // starts hours late). It is relayed as a note, not a second alarm.
+  result.status = 'info';
+  result.detail = `${etTimeOf(sc.last.at)} call FAILED, reported and emailed by the server at the time: ${sc.last.summary}`;
   return result;
+}
+
+/** Every check passed; a relayed note (status "info") does not count against the day. */
+function isAllGood(checks) {
+  return checks.every((c) => c.status === 'pass' || c.status === 'info');
 }
 
 // ============================================================================
@@ -512,6 +539,7 @@ function smokeCallRelayCheck(healthJson, now = new Date()) {
 function statusLabel(status) {
   if (status === 'pass') return 'PASS';
   if (status === 'warning') return 'WARNING';
+  if (status === 'info') return 'NOTE';
   return 'FAIL';
 }
 
@@ -653,8 +681,14 @@ async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) 
     checks.push(await checkTwilioBalance());
   }
   checks.push(await checkGoogleSheets());
-  checks.push(await checkEmailToPresence());
-  checks.push(await checkTransferNumber());
+  // These two read the values this process was started with. On GitHub
+  // Actions those are the repo's secrets, not Railway's, and they go stale
+  // (Nov 6 2026: the backup reported an old transfer number and one recipient
+  // fewer than production). The server checks the real ones twice a day.
+  if (!process.env.GITHUB_ACTIONS) {
+    checks.push(await checkEmailToPresence());
+    checks.push(await checkTransferNumber());
+  }
   const health = await checkServerHealth(healthUrl);
   checks.push(health);
   // The smoke call line: live when this run places the call (extraChecks),
@@ -693,8 +727,9 @@ async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) 
   }
 
   // "All good" requires every check to pass. A WARNING (e.g. low balance) or a
-  // FAIL both count as attention needed.
-  const allGood = checks.every((c) => c.status === 'pass');
+  // FAIL both count as attention needed; a NOTE (a failure the server already
+  // emailed) does not.
+  const allGood = isAllGood(checks);
 
   const email = await sendReport(checks, allGood);
   if (email.sent) {
@@ -711,7 +746,7 @@ async function runDailyCheck({ healthUrl = HEALTH_URL, extraChecks = [] } = {}) 
   return { checks, allGood, email, ok };
 }
 
-module.exports = { runDailyCheck, smokeCallRelayCheck, formatTicketsDigest };
+module.exports = { runDailyCheck, smokeCallRelayCheck, isAllGood, statusLabel, formatTicketsDigest };
 
 // One-shot mode (GitHub Actions backup / `node src/monitor/daily-check.js`).
 // When required by the server nothing runs until the schedule fires.

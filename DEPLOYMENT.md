@@ -265,10 +265,15 @@ email/transfer config and the public `/health` endpoint, then emails one report.
 - **Backup:** `.github/workflows/daily-check.yml` still runs on GitHub's cron
   (8:30 AM and 4 PM targets, in practice hours late). Scheduled runs email only
   when something fails (`MONITOR_EMAIL_ONLY_ON_FAILURE`); it exists to catch the
-  one thing the server cannot report: the server being down. A manual
-  "Run workflow" always emails the full report, which is how to test the email
-  path. Each run re-enables the workflow, because GitHub switches off cron in
-  public repositories after 60 days without a push.
+  one thing the server cannot report: the server being down. A smoke-call
+  failure the server already emailed is relayed as a NOTE, not a FAIL, so the
+  backup never re-sends it hours later (it did until Nov 6 2026). The backup
+  also skips the `EMAIL_TO` and `TRANSFER_PHONE_NUMBER` lines: on GitHub they
+  would read the repo's secrets, which go stale; the server checks production's
+  real values twice a day. A manual "Run workflow" always emails the full
+  report, which is how to test the email path. Each run re-enables the
+  workflow, because GitHub switches off cron in public repositories after 60
+  days without a push.
 - **Daily smoke call:** see the next section. When it is on, its line
   (`Ava answers the phone`) is part of this report.
 - **Run by hand:** `node src/monitor/daily-check.js` (exit 0 means all good).
@@ -366,9 +371,11 @@ phone, email, details, address, availability, recap, goodbye).
   reloaded from Neon after a restart). Any daily-check run that did not place
   the call itself, which is the GitHub Actions backup and any server with the
   smoke call off, reads that and adds the `Ava answers the phone` line from
-  it: PASS/FAIL for today's call, FAIL when there was no call today, WARNING
-  when the smoke call is off. GitHub's run starts hours after 8:30 AM, so by
-  then the day's call has happened.
+  it: PASS for today's call; NOTE when today's call failed (the server already
+  emailed that failure, so the backup does not raise it again); FAIL when
+  there was no call today, except before 8:45 AM when the morning call may
+  still be running (NOTE); WARNING when the smoke call is off. GitHub's run
+  starts hours after 8:30 AM, so by then the day's call has happened.
 - **Cost:** about 30 s of Twilio outbound + inbound legs and two media
   streams (roughly 3 to 5 cents), one 15 s transcription (well under a cent)
   and Ava's own Realtime session for the greeting (a few cents). Budget
