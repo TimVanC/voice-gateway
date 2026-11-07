@@ -4,7 +4,7 @@ import TopBar from "@/components/TopBar";
 import { getCallReview } from "@/lib/tickets";
 import { FlagBadges, StatusBadge } from "@/components/Badges";
 import { requireSession } from "@/lib/auth";
-import { formatDateTime, formatDuration, formatIntent, formatPhone, formatTime, fullName } from "@/lib/format";
+import { formatDateTime, formatDuration, formatIntent, formatPhone, formatTime, formatTimeMs, fullName } from "@/lib/format";
 import { getCall, isSmokeRun } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -271,7 +271,14 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
           </div>
         )}
 
-        <h2>Transcript</h2>
+        <h2>
+          Transcript
+          {turns.length > 0 && (
+            <a className="small" style={{ marginLeft: 12, fontWeight: 400 }} href={`/calls/${call.id}/transcript`} download={`call-${call.id}-transcript.txt`}>
+              download .txt
+            </a>
+          )}
+        </h2>
         {turns.length === 0 ? (
           <div className="card empty">
             {call.source === "sheets" ? "No transcript: this call was imported from the Google Sheet, which never stored one." : "No transcript was captured for this call."}
@@ -282,7 +289,7 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
               <li key={t.id} className={`turn ${t.speaker}`}>
                 <span className="who">
                   {t.speaker === "ava" ? "Ava" : "Caller"}
-                  <span className="when">{formatTime(t.at)}</span>
+                  <span className="when">{formatTimeMs(t.at)}</span>
                 </span>
                 <p>{t.text}</p>
               </li>
