@@ -1908,6 +1908,21 @@ function createCallStateMachine() {
           }
         }
         
+        // "It's a gas furnace." ... "about ten years old.": the caller paused
+        // mid-answer, the second half arrived as the answer to the symptoms
+        // question and the recap read "Issue: about ten years old" (demo call
+        // Nov 9 2026). An age on its own is kept as the age and the question
+        // is asked again.
+        if (data.intent === INTENT_TYPES.HVAC_SERVICE && currentQuestion === DETAILS.hvac_service.symptoms && isOnlySystemAge(transcript)) {
+          if (!data.details.systemAge) data.details.systemAge = extractSystemAge(transcript);
+          console.log(`📋 System age on its own (${data.details.systemAge}) - asking for the symptoms again`);
+          return {
+            nextState: currentState,
+            prompt: withAcknowledgment(currentQuestion),
+            action: 'ask'
+          };
+        }
+
         // Normal flow: store the detail answer
         const answeredQuestion = currentQuestion;
         storeDetailAnswer(transcript, analysis);
@@ -3903,6 +3918,15 @@ function createCallStateMachine() {
   /** The answer without its age phrase: "a gas furnace, about ten years old" -> "a gas furnace". */
   function withoutSystemAge(text) {
     return String(text || '').replace(SYSTEM_AGE_RE, '').replace(/\s*,\s*(?=[,.!?]|$)/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  /** "about ten years old." / "it's maybe 15 years old": an age and nothing else. */
+  function isOnlySystemAge(text) {
+    if (!SYSTEM_AGE_RE.test(String(text || ''))) return false;
+    const rest = withoutSystemAge(text).toLowerCase()
+      .replace(/\b(it'?s|it is|its|i think|i'?d say|i guess|maybe|probably|and|yeah|yes|oh|uh|um|so|well|the (system|unit|furnace|boiler|one)|is|old|or so)\b/g, '')
+      .replace(/[^a-z0-9]/g, '');
+    return rest === '';
   }
 
   function extractSystemAge(text) {

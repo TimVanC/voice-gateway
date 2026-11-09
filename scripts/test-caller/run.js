@@ -264,7 +264,7 @@ async function main() {
 
   // Intake -----------------------------------------------------------------
   let result = null;
-  const callId = leg.streamSid;
+  let callId = leg.streamSid;
   if (serverLogPath) {
     log(`Waiting for Ava's call summary in ${path.relative(process.cwd(), serverLogPath)}...`);
     result = await report.waitForServerLog(() => report.readFileSafe(serverLogPath), callId, 45000);
@@ -273,8 +273,12 @@ async function main() {
   }
   if (!result && process.env.DATABASE_URL) {
     log('Looking for the Neon row...');
-    const r = await report.waitForNeonRow(process.env.DATABASE_URL, callId, 45000);
-    if (r.row) result = report.intakeFromNeonRow(r.row);
+    const phone = args.mode === 'phone' ? { callerNumber: process.env.TEST_CALLER_FROM || String(process.env.TEST_CALLER_NUMBERS || '').split(',')[0].trim(), since: call.t0 - 20000 } : null;
+    const r = await report.waitForNeonRow(process.env.DATABASE_URL, callId, 45000, phone);
+    if (r.row) {
+      result = report.intakeFromNeonRow(r.row);
+      if (r.row.call_id !== callId) { log(`  Ava's row is ${r.row.id} (call_id ${r.row.call_id})`); callId = r.row.call_id; }
+    }
     else log(`  ${r.error}`);
   }
   if (!result) {

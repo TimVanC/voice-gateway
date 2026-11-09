@@ -105,6 +105,18 @@ function isProductionEnvironment(name) {
   return String(name || '').toLowerCase() === 'production';
 }
 
+/**
+ * True when a call must stay out of RSE's Sheet and inbox: a test caller's
+ * number, an Ava outside Railway (unless LOCAL_SIDE_EFFECTS=on), or a Railway
+ * environment other than production. Same rule as server-rse.js.
+ */
+function skipsOfficeSideEffects(callerNumber, env = process.env) {
+  const railwayEnv = env.RAILWAY_ENVIRONMENT_NAME;
+  return isTestCallerNumber(callerNumber, env)
+    || (!railwayEnv && env.LOCAL_SIDE_EFFECTS !== 'on')
+    || (Boolean(railwayEnv) && !isProductionEnvironment(railwayEnv));
+}
+
 /** Why a call to this environment is a test call, or null for production. */
 function environmentTestReason(name) {
   if (isProductionEnvironment(name)) return null;
@@ -434,6 +446,7 @@ module.exports = {
   isOwnNumber,
   isTestCallerNumber,
   isProductionEnvironment,
+  skipsOfficeSideEffects,
   environmentTestReason,
   buildCallRow,
   lastTenDigits,

@@ -23,9 +23,10 @@ const { SYSTEM_PROMPT, GREETING, STATES, CLOSE, SAFETY, OUT_OF_SCOPE } = require
 const { classifyIntent, detectRealPersonRequest } = require('./utils/intent-classifier');
 const { cleanCallData } = require('./utils/data-cleanup');
 const { logCallIntake } = require('./utils/google-sheets-logger');
-const { saveCall: saveCallToDb, createTranscriptRecorder } = require('./utils/call-db');
+const { saveCall: saveCallToDb, createTranscriptRecorder, skipsOfficeSideEffects } = require('./utils/call-db');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
 const { startCallRecording, ingestCallRecordingsByPolling } = require('./utils/twilio-recording');
+const { isSmokeCaller } = require('./monitor/smoke-call');
 
 // ElevenLabs voice string for Twilio: VOICE_ID-MODEL-SPEED_STABILITY_SIMILARITY
 // (v3/v4 models take STABILITY_SIMILARITY only). Default: Eryn hyper-real on
@@ -40,9 +41,18 @@ const RELAY_EOT_THRESHOLD = process.env.RELAY_EOT_THRESHOLD || '0.8';
 // them ("171 Main Street," + "Madison, New Jersey." were answered apart).
 // Same idea as the pipeline's TURN_HOLD_MS.
 const RELAY_TURN_HOLD_MS = Number(process.env.RELAY_TURN_HOLD_MS ?? 700);
+// A turn that ends like a finished sentence ("Sure. It's Daniel Brooks.") is
+// held only this long; the full hold is for turns that trail off ("171 Main
+// Street,", "What's the"). The full hold on every turn made each reply 700 ms
+// late (demo call Nov 9 2026: 1.6 s median from caller to Ava).
+const RELAY_TURN_HOLD_SHORT_MS = Number(process.env.RELAY_TURN_HOLD_SHORT_MS ?? 250);
 const RELAY_INTERRUPT_SENSITIVITY = process.env.RELAY_INTERRUPT_SENSITIVITY || 'medium';
 const HINTS = 'Ava,RSE Energy,HVAC,mini split,ductless,heat pump,furnace,boiler,thermostat,generator,Generac,Cummins,maintenance plan,membership,New Jersey,Montclair,Madison,Morristown';
-const GOODBYE_FAILSAFE_MS = 15000;
+// Twilio's tokens-played does not always arrive (demo call Nov 9 2026: the
+// line stayed open 8 s after the goodbye). The fail-safe is sized to the
+// goodbye itself: time for the voice to start, the words, and a beat.
+const GOODBYE_FAILSAFE_MAX_MS = 15000;
+const goodbyeFailsafeMs = (text) => Math.min(GOODBYE_FAILSAFE_MAX_MS, 1500 + String(text || '').length * 60 + 1200);
 const BACKCHANNEL = /^(mm+-?hm+|mhm+|uh-?huh|yeah|yep|ok(ay)?|right|sure|got it|i see|alright|hm+)[.!?,]*$/i;
 const TRANSFER_OFFER_PROMPT = "I'm sorry, it sounds like we're having a communication issue. I can transfer you to a live agent if you'd like. Would you like me to transfer you now?";
 const SAME_PROMPT_LIMIT = 3;
@@ -177,7 +187,8 @@ class RelaySession {
       this.held = { text: t, timer: null };
     }
     if (!RELAY_TURN_HOLD_MS) return this.flushHeld();
-    this.held.timer = setTimeout(() => this.flushHeld(), RELAY_TURN_HOLD_MS);
+    const finished = /[.!?]["')\]]*$/.test(this.held.text);
+    this.held.timer = setTimeout(() => this.flushHeld(), finished ? Math.min(RELAY_TURN_HOLD_SHORT_MS, RELAY_TURN_HOLD_MS) : RELAY_TURN_HOLD_MS);
   }
 
   flushHeld() {
@@ -237,7 +248,7 @@ class RelaySession {
       this.transcript.add('ava', goodbye);
       this.say(goodbye);
       // Twilio reports tokens-played when the goodbye has been heard; end then, or at the fail-safe.
-      this.goodbyeTimer = setTimeout(() => this.endCall('goodbye_failsafe'), goodbye === SAFETY.emergency_response ? 4000 : GOODBYE_FAILSAFE_MS);
+      this.goodbyeTimer = setTimeout(() => this.endCall('goodbye_failsafe'), goodbye === SAFETY.emergency_response ? 4000 : goodbyeFailsafeMs(goodbye));
       return;
     }
     if (result.action === 'wait') return;
@@ -334,8 +345,13 @@ class RelaySession {
     data = await cleanCallData(data);
     console.log(`📋 Relay call done: state ${currentState}, ${this.turns} caller turns, ${Math.round((Date.now() - this.startedAt) / 1000)} s`);
     const callId = this.callSid || `RELAY-${Date.now()}`;
-    logCallIntake(data, currentState, { callId, callerNumber: this.callerNumber, wasTransferred: this.transferRequested })
-      .catch((err) => console.error('❌ Failed to log to Google Sheets:', err.message));
+    // Test calls (staging, a laptop, the test caller's numbers) go to Neon only, never to RSE's Sheet.
+    if (skipsOfficeSideEffects(this.callerNumber) || isSmokeCaller(this.callerNumber)) {
+      console.log('🧪 Test call: skipping the Google Sheets row');
+    } else {
+      logCallIntake(data, currentState, { callId, callerNumber: this.callerNumber, wasTransferred: this.transferRequested })
+        .catch((err) => console.error('❌ Failed to log to Google Sheets:', err.message));
+    }
     const endedAt = Date.now();
     const recordingWanted = this.record && this.twilioClient && this.twilioAuth && this.callSid;
     await saveCallToDb(data, currentState, {

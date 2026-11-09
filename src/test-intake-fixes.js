@@ -536,6 +536,17 @@ console.log('\n🧪 Relay call Nov 4 2026 (Joseph Chiusano): lead-ins before a n
 
   sm = atName(); sm.transitionTo(STATES.DETAILS_BRANCH); sm.processInput('Furnish.');
   check('"Furnish" is a furnace', sm.getData().details.systemType, 'furnace');
+
+  // Demo call Nov 9 2026: the caller paused after the system type and the age arrived as the symptom.
+  sm = atName(); sm.transitionTo(STATES.DETAILS_BRANCH); sm.processInput("It's a gas furnace.");
+  r = sm.processInput('about ten years old.');
+  check('an age on its own is the age, not the symptom', [sm.getData().details.systemAge, sm.getData().details.symptoms], ['about 10 years', null]);
+  check('and the symptoms question is asked again', (r.prompt || '').endsWith('What symptoms are you noticing?'), true);
+  r = sm.processInput("It's completely out, no air at all.");
+  check('the real symptom is then stored', sm.getData().details.symptoms, "It's completely out, no air at all.");
+  sm = atName(); sm.transitionTo(STATES.DETAILS_BRANCH); sm.processInput('A boiler.');
+  sm.processInput("It's been leaking for about two years and now there's no heat.");
+  check('a symptom that mentions years is still a symptom', sm.getData().details.symptoms, "It's been leaking for about two years and now there's no heat.");
 }
 
 console.log(failures ? `\n❌ ${failures} check(s) failed` : '\n✅ All intake fix checks passed');

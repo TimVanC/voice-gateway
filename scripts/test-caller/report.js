@@ -101,7 +101,7 @@ async function waitForServerLog(readText, streamSid, timeoutMs) {
 // Intake: from the Neon row (PR #3's calls table)
 // ---------------------------------------------------------------------------
 
-async function waitForNeonRow(databaseUrl, callId, timeoutMs) {
+async function waitForNeonRow(databaseUrl, callId, timeoutMs, phone = null) {
   let Pool;
   try {
     ({ Pool } = require('pg'));
@@ -120,7 +120,18 @@ async function waitForNeonRow(databaseUrl, callId, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   try {
     while (Date.now() < deadline) {
-      const res = await pool.query('SELECT * FROM calls WHERE call_id = $1', [callId]);
+      let res = await pool.query('SELECT * FROM calls WHERE call_id = $1', [callId]);
+      // Phone mode: Ava's row carries her own leg's id (stream SID or, on a
+      // relay call, call SID), never ours. Take the row Ava wrote for a call
+      // from our number that started when ours did.
+      if (!res.rows.length && phone && phone.callerNumber) {
+        res = await pool.query(
+          `SELECT * FROM calls WHERE source = 'server' AND started_at >= $1
+             AND right(regexp_replace(coalesce(caller_number, ''), '[^0-9]', '', 'g'), 10) = $2
+           ORDER BY started_at DESC LIMIT 1`,
+          [new Date(phone.since), String(phone.callerNumber).replace(/[^0-9]/g, '').slice(-10)],
+        );
+      }
       if (res.rows.length) return { row: res.rows[0] };
       await sleep(2000);
     }

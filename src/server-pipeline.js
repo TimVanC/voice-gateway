@@ -47,7 +47,8 @@ const { createTwilioSignatureValidator } = require('./utils/twilio-security');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { sendCallSummaryEmail } = require('./utils/email-sender');
 const { cleanCallData } = require('./utils/data-cleanup');
-const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder } = require('./utils/call-db');
+const { saveCall: saveCallToDb, saveRecording, pruneOldRecordings, createTranscriptRecorder, skipsOfficeSideEffects } = require('./utils/call-db');
+const { isSmokeCaller } = require('./monitor/smoke-call');
 const { TrackRecorder } = require('./utils/track-recorder');
 
 const { createStt, resolveSttProvider } = require('./pipeline/stt');
@@ -1076,8 +1077,14 @@ class CallSession {
     console.log(`📋 Final state: ${currentState}`);
 
     const callId = this.streamSid || `CALL-${Date.now()}`;
-    logCallIntake(data, currentState, { callId, callerNumber: this.callerNumber, wasTransferred: this.transferRequested })
-      .catch((err) => console.error('❌ Failed to log to Google Sheets:', err.message));
+    // Test calls (staging, a laptop, the test caller's numbers) go to Neon only, never to RSE's Sheet or inbox.
+    const isTestCall = skipsOfficeSideEffects(this.callerNumber) || isSmokeCaller(this.callerNumber);
+    if (isTestCall) {
+      console.log('🧪 Test call: skipping the Google Sheets row and the summary email');
+    } else {
+      logCallIntake(data, currentState, { callId, callerNumber: this.callerNumber, wasTransferred: this.transferRequested })
+        .catch((err) => console.error('❌ Failed to log to Google Sheets:', err.message));
+    }
 
     if (!this.dbSaveStarted) {
       this.dbSaveStarted = true;
@@ -1096,7 +1103,7 @@ class CallSession {
       }).catch((err) => console.error('❌ Call DB save rejected unexpectedly:', err.message));
     }
 
-    try {
+    if (!isTestCall) try {
       await sendCallSummaryEmail(data, currentState, {
         callId,
         callerNumber: this.callerNumber,
