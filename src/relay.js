@@ -25,6 +25,7 @@ const { cleanCallData } = require('./utils/data-cleanup');
 const { logCallIntake } = require('./utils/google-sheets-logger');
 const { saveCall: saveCallToDb, createTranscriptRecorder, skipsOfficeSideEffects } = require('./utils/call-db');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
+const { shapeForSpeech } = require('./pipeline/speech-shaping');
 const { startCallRecording, ingestCallRecordingsByPolling } = require('./utils/twilio-recording');
 const { isSmokeCaller } = require('./monitor/smoke-call');
 
@@ -130,7 +131,9 @@ class RelaySession {
     if (!text) return;
     const sinceCaller = this.lastCallerAt ? Date.now() - this.lastCallerAt : null;
     console.log(`🗣️ Relay says${sinceCaller != null ? ` (${sinceCaller} ms after the caller's text)` : ''}: "${text}"`);
-    this.send(interruptible ? { type: 'text', token: text, last } : { type: 'text', token: text, last, interruptible: false, preemptible: false });
+    // The voice gets the spoken form (the recap as sentences, digits one at a time); logs and the transcript keep the text.
+    const token = shapeForSpeech(text);
+    this.send(interruptible ? { type: 'text', token, last } : { type: 'text', token, last, interruptible: false, preemptible: false });
   }
 
   onMessage(data) {
