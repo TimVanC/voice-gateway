@@ -126,11 +126,11 @@ class RelaySession {
   }
 
   /** Say one line (one TTS cycle). */
-  say(text, { last = true } = {}) {
+  say(text, { last = true, interruptible = true } = {}) {
     if (!text) return;
     const sinceCaller = this.lastCallerAt ? Date.now() - this.lastCallerAt : null;
     console.log(`🗣️ Relay says${sinceCaller != null ? ` (${sinceCaller} ms after the caller's text)` : ''}: "${text}"`);
-    this.send({ type: 'text', token: text, last });
+    this.send(interruptible ? { type: 'text', token: text, last } : { type: 'text', token: text, last, interruptible: false, preemptible: false });
   }
 
   onMessage(data) {
@@ -159,6 +159,15 @@ class RelaySession {
         break;
       case 'interrupt':
         console.log(`🛑 Caller interrupted after ${msg.durationUntilInterruptMs} ms: "${(msg.utteranceUntilInterrupt || '').slice(0, 60)}"`);
+        // The goodbye is sent uninterruptible; if it was cut off anyway, say it once more.
+        if (this.callCompleted && !this.transferRequested && this.goodbyeText && !this.goodbyeRepeated) {
+          this.goodbyeRepeated = true;
+          if (this.goodbyeTimer) clearTimeout(this.goodbyeTimer);
+          this.goodbyeTimer = setTimeout(() => {
+            this.say(this.goodbyeText, { interruptible: false });
+            this.goodbyeTimer = setTimeout(() => this.endCall('goodbye_failsafe'), goodbyeFailsafeMs(this.goodbyeText));
+          }, 1200);
+        }
         break;
       case 'dtmf':
         console.log(`🔢 DTMF ${msg.digit}`);
@@ -187,7 +196,8 @@ class RelaySession {
       this.held = { text: t, timer: null };
     }
     if (!RELAY_TURN_HOLD_MS) return this.flushHeld();
-    const finished = /[.!?]["')\]]*$/.test(this.held.text);
+    // "No." + "That's it." + "Thanks so much.": a one- or two-word turn is often only the start (second demo call).
+    const finished = /[.!?]["')\]]*$/.test(this.held.text) && this.held.text.split(/\s+/).length >= 3;
     this.held.timer = setTimeout(() => this.flushHeld(), finished ? Math.min(RELAY_TURN_HOLD_SHORT_MS, RELAY_TURN_HOLD_MS) : RELAY_TURN_HOLD_MS);
   }
 
@@ -246,7 +256,9 @@ class RelaySession {
       this.callCompleted = true;
       sm.intakeLog('prompt', { prompt: goodbye.substring(0, 120) });
       this.transcript.add('ava', goodbye);
-      this.say(goodbye);
+      // The caller's "thanks so much" cut the goodbye off after 11 ms and the call ended in silence (second demo call).
+      this.goodbyeText = goodbye;
+      this.say(goodbye, { interruptible: false });
       // Twilio reports tokens-played when the goodbye has been heard; end then, or at the fail-safe.
       this.goodbyeTimer = setTimeout(() => this.endCall('goodbye_failsafe'), goodbye === SAFETY.emergency_response ? 4000 : goodbyeFailsafeMs(goodbye));
       return;
