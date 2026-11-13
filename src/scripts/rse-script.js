@@ -14,7 +14,8 @@
 const GREETING = {
   // SHORTENED: OpenAI Realtime has issues with long utterances (>8 seconds)
   // Original was 173 chars, new is ~85 chars (~5 seconds of speech)
-  primary: "Hi, thanks for calling RSE Energy. This is Ava, an AI assistant. Press 0 at any time to speak with a team member, or just tell me how I can help you.",
+  // Tightened Nov 13 2026 (testers found Ava wordy): same facts, fewer words.
+  primary: "Thanks for calling RSE Energy, this is Ava, an AI assistant. Press 0 anytime for a team member, or just tell me what's going on.",
   silence_fallback: "Hi there, what can I help you with today?"
 };
 
@@ -134,9 +135,9 @@ const AVAILABILITY = {
 // CONFIRMATION - WITH SPELLING REQUIREMENTS
 // ============================================================================
 const CONFIRMATION = {
-  intro: "Let me read that back.",
+  intro: "Let me make sure I have this right.",
   verify: "Is everything correct?",
-  correction_reread: "I've updated that. Let me read that back again.",
+  correction_reread: "Okay, updated. Here's what I have now.",
   // Immediate confirmation (right after answer, when confidence < threshold). Recap never uses these.
   immediate_name: "Did I get your last name right.",  // Append: " {lastNameSpelled}." e.g. "V A N C A U W E N B E R G E."
   immediate_address_street: "Did you say the street name was",  // Append: " {spelled} {type}?" e.g. "E L F road."
@@ -152,7 +153,7 @@ const CONFIRMATION = {
 // ============================================================================
 const CLOSE = {
   anything_else: "Is there anything else I can help with today?",
-  goodbye: "Thanks for calling RSE Energy Group. Someone will be in touch with you soon. Have a great day.",
+  goodbye: "Thanks for calling RSE Energy, someone will be in touch soon. Have a good one.",
   out_of_scope_close: "Thanks for calling. Have a great day."
 };
 
@@ -470,9 +471,11 @@ When you receive a response.create with a specific prompt in quotes, you MUST:
 This is a strict phone intake script. Follow prompts EXACTLY.
 
 === SPEECH STYLE ===
-- Normal conversational pace
-- Use contractions: "I'm", "what's", "you're"
-- Keep responses SHORT: max two sentences
+- Brisk, friendly phone manner: a receptionist who has done this a thousand times, not a narrator
+- Always use contractions: "I'm", "what's", "you're", "that's"
+- One short sentence when one will do, two at most. Fewer words beats more words every time
+- No filler openers: never "Absolutely", "I understand", "Thank you for sharing that", "I appreciate that"
+- Never repeat back what the caller just said; just move on
 - Sound natural, not scripted
 
 === ACKNOWLEDGEMENT RULES ===

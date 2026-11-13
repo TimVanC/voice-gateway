@@ -549,5 +549,36 @@ console.log('\n🧪 Relay call Nov 4 2026 (Joseph Chiusano): lead-ins before a n
   check('a symptom that mentions years is still a symptom', sm.getData().details.symptoms, "It's been leaking for about two years and now there's no heat.");
 }
 
+console.log('\n🧪 Nov 13 2026: questions the caller already answered are not asked; sorry is said once');
+{
+  const atName = () => {
+    const sm = createCallStateMachine();
+    sm.setIntent(INTENT_TYPES.HVAC_SERVICE);
+    sm.updateData('phone', '+19738852528');
+    sm.transitionTo(STATES.NAME);
+    return sm;
+  };
+  let sm = atName(); sm.transitionTo(STATES.DETAILS_BRANCH); sm.processInput('A gas furnace.');
+  let r = sm.processInput("It's completely out, no air at all.");
+  check("after an outright 'completely out', the start-time question is next", (r.prompt || '').endsWith('When did this start?'), true);
+  check('and the sorry is said there', /^(Oh no, sorry|Sorry) to hear that\./.test(r.prompt || ''), true);
+  r = sm.processInput('It started last night.');
+  check('the severity question is skipped', (r.prompt || '').endsWith("What's the service address?"), true);
+  check('with the severity taken from the symptoms', sm.getData().details.severity, 'completely out');
+  check('the sorry is not said a second time', /sorry/i.test(r.prompt || ''), false);
+
+  sm = atName(); sm.transitionTo(STATES.DETAILS_BRANCH); sm.processInput('Central air.');
+  r = sm.processInput('No cooling since yesterday, it just blows warm air.');
+  check("a symptom with a start time skips 'When did this start?'", /When did this start/.test(r.prompt || ''), false);
+  check('and the severity question is skipped too', (r.prompt || '').endsWith("What's the service address?"), true);
+  check('start time taken from the symptoms', sm.getData().details.startTime, 'since yesterday');
+
+  sm = atName(); sm.transitionTo(STATES.DETAILS_BRANCH); sm.processInput('A boiler.');
+  r = sm.processInput('It makes a banging noise.');
+  check('a vague symptom still gets the start-time question', (r.prompt || '').endsWith('When did this start?'), true);
+  r = sm.processInput('A week ago.');
+  check('and the severity question', (r.prompt || '').endsWith('Is the system completely out, or still running?'), true);
+}
+
 console.log(failures ? `\n❌ ${failures} check(s) failed` : '\n✅ All intake fix checks passed');
 process.exit(failures ? 1 : 0);

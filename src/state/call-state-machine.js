@@ -169,11 +169,14 @@ function createCallStateMachine() {
   
   // Neutral acknowledgments only - no "Great!" or "Perfect!" (inappropriate when caller has an issue)
   const ACKNOWLEDGMENTS = ['Got it.', 'Okay.', 'Thanks.'];
+  // Said once per call at most: testers (Nov 13 2026) heard "Thanks for
+  // letting me know" / "I'm sorry you're dealing with that" before question
+  // after question and found Ava wordy. A person says it once and moves on.
   const EMPATHETIC_ACKNOWLEDGMENTS = [
-    "I'm sorry to hear that.",
-    "I'm sorry you're dealing with that.",
-    "Thanks for letting me know."
+    "Oh no, sorry to hear that.",
+    "Sorry to hear that."
   ];
+  let empathyUsed = false;
   // Keywords that indicate the caller is describing an urgent or distressing situation
   const URGENCY_KEYWORDS = /\b(no heat|freezing|emergency|completely out|not working|not turning on|no hot|no cold|no air|broken|dangerous|smoke|gas smell|sparks|flooding|leaking|out of service)\b/i;
   let lastAcknowledgmentIndex = -1;
@@ -187,7 +190,8 @@ function createCallStateMachine() {
    */
   function getAcknowledgment() {
     // Check if last user transcript contains urgency/distress keywords
-    if (_lastUserTranscript && URGENCY_KEYWORDS.test(_lastUserTranscript)) {
+    if (_lastUserTranscript && !empathyUsed && URGENCY_KEYWORDS.test(_lastUserTranscript)) {
+      empathyUsed = true;
       let index;
       do {
         index = Math.floor(Math.random() * EMPATHETIC_ACKNOWLEDGMENTS.length);
@@ -356,6 +360,35 @@ function createCallStateMachine() {
     return null;
   }
   
+  // "It's completely out. No air at all." answers the severity question
+  // before it is asked, and "since last night" answers "When did this start?".
+  // Asking anyway sounded robotic to the Nov 13 2026 testers. The answer is
+  // copied into the field the skipped question would have filled.
+  const SEVERITY_IN_SYMPTOMS = /\b((completely|totally|fully|all the way) (out|dead|down|off)|not (working|turning on|running|coming on|starting|kicking on|blowing)|won'?t (turn on|start|come on|kick on|run|fire)|isn'?t (working|running|turning on|coming on)|stopped working|no (heat|air|cooling|power|heat at all)|dead|still (running|working|on|runs|works))\b/i;
+  // The time phrase alone is kept ("since yesterday"), not the whole symptom: the Sheet summary joins symptom and start time and would say it twice.
+  const START_TIME_IN_SYMPTOMS = /\b((?:since|started|began)\s+[^,.;]+|yesterday|last night|this morning|last week|(?:a few|couple|two|three|\d+) (?:hours?|days?|weeks?|months?) ago|all (?:day|week)|(?:this|last) (?:weekend|afternoon|evening))\b/i;
+  function skipDetailQuestionsAlreadyAnswered() {
+    if (data.intent !== INTENT_TYPES.HVAC_SERVICE) return;
+    const symptoms = data.details.symptoms || '';
+    if (!symptoms) return;
+    const questions = getDetailQuestions();
+    for (;;) {
+      const next = questions[detailsQuestionIndex];
+      const started = START_TIME_IN_SYMPTOMS.exec(symptoms);
+      const severe = SEVERITY_IN_SYMPTOMS.exec(symptoms);
+      if (next === DETAILS.hvac_service.start_time && !data.details.startTime && started) {
+        data.details.startTime = started[1].trim();
+        console.log('📋 Start time already in the symptoms - skipping "When did this start?"');
+      } else if (next === DETAILS.hvac_service.severity && !data.details.severity && severe) {
+        data.details.severity = severe[0];
+        console.log('📋 Severity already in the symptoms - skipping "completely out, or still running?"');
+      } else {
+        return;
+      }
+      detailsQuestionIndex++;
+    }
+  }
+
   /**
    * Get all detail questions for current intent
    */
@@ -1891,6 +1924,7 @@ function createCallStateMachine() {
             console.log(`📋 Address stored: ${data.address}, ${data.city || 'N/A'}, ${data.state || 'N/A'} ${data.zip || 'N/A'}`);
             // Continue with remaining detail questions if any
             detailsQuestionIndex++;
+            skipDetailQuestionsAlreadyAnswered();
             const nextDetailPrompt = getDetailsPrompt();
             if (nextDetailPrompt) {
               return {
@@ -1936,6 +1970,8 @@ function createCallStateMachine() {
         } else {
           detailsQuestionIndex++;
         }
+
+        skipDetailQuestionsAlreadyAnswered();
 
         const nextDetailPrompt = getDetailsPrompt();
         if (nextDetailPrompt) {
