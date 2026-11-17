@@ -1,0 +1,29 @@
+{
+  "name": "hours-question",
+  "description": "Asks about Saturday hours in the middle of the intake.",
+  "callerNumber": "+19735550142",
+  "persona": {
+    "voice": "coral",
+    "silenceMs": 700,
+    "interruptible": false,
+    "instructions": "You are Dana Whitlock. Your central air is not cooling since yesterday; it still runs. No smoke, gas smell or sparks. Address 14 Birch Lane, Chatham, New Jersey 07928. Phone 973-555-0471. Email dana whitlock at example dot com. Available Saturday morning. Open with: 'Hi, my AC isn't cooling.' When the assistant asks for your phone number, do not give it yet: first ask 'Are you guys open on Saturday?' After she answers, give the number. When your details are read back, confirm if right, correct what is wrong. When asked if there is anything else, say 'No, that's it, thanks.' You are on the phone: speak naturally, no stage directions. Answer only what is asked, one or two short sentences. Never ask to speak to a person. If the assistant's sentence is cut off or you did not catch it, say 'Sorry, what was that?' and wait. When the assistant says goodbye, say 'Thanks, bye.' and nothing more. Once you have said goodbye, do not say anything else."
+  },
+  "interjections": [],
+  "maxCallSeconds": 360,
+  "expect": {
+    "outcome": "confirmation",
+    "fields": {
+      "intent": "hvac_service",
+      "firstName": "Dana",
+      "lastName": "Whitlock",
+      "phone": "9735550471",
+      "address": "14 Birch"
+    },
+    "required": [
+      "intent",
+      "firstName",
+      "lastName",
+      "phone"
+    ]
+  }
+}

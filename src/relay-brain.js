@@ -351,6 +351,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   let helloTurns = 0;
   let phonePieces = 0;
   let messageIntro = false;
+  let talkedOver = false;
+  let helloWaited = false;
   let outOfScopeTurns = 0;
   const declined = new Set();
   const prepared = new Map(); // transcript -> promise of a model read started while the turn was still held
@@ -942,6 +944,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
 
     // "Um." / "Sure." / "Hold on, let me find it.": the caller is not done. Say nothing (or "take your
     // time", once) and keep what they started, so "it's 973, uh" joins the digits that follow.
+    talkedOver = overlap;
     const waiting = waitKind(said);
     // Twice per question at most: a caller who answers every question with "yeah" is answering, not thinking.
     if (waiting && !pendingTransferOffer && (waits[lastSlot] = (waits[lastSlot] || 0) + 1) <= 2) {
@@ -976,6 +979,11 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       if (/\b(yes|yeah|yep|sure|please|ok|okay|s[ií]|por favor|claro)\b/i.test(lower) && !/\b(no|nope)\b/.test(lower)) return transfer('offer_accepted');
     }
 
+    if (callerTurns === 1 && !helloWaited && stage === 'intake' && HELLO_ONLY.test(lower.replace(/\b(good (morning|afternoon|evening)|there)\b/g, '').trim())) {
+      helloWaited = true;
+      callerTurns = 0; // the greeting is not the caller's first real turn
+      return { wait: true, nudgeMs: 1800, nudge: GREETING.silence_fallback };
+    }
     let turn = fastPath(t);
     if (!turn) {
       try {
@@ -1253,7 +1261,9 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     const has = (f) => flags.has(f);
     const realChanges = changed.filter((c) => c !== 'intent');
     // "Thank you." right after the read-back is the tail of the confirmation, not an answer to "anything else?".
-    if (closeTurns === 0 && !realChanges.length && (THANKS_ONLY.test(lower) || (isConfirmation(lower) && lower.split(/\s+/).length <= 5 && !/\?/.test(lower)))) return { wait: true };
+    if (closeTurns === 0 && !realChanges.length && (THANKS_ONLY.test(lower) || (isConfirmation(lower) && lower.split(/\s+/).length <= 5 && !/\?/.test(lower)))) {
+      return talkedOver ? say(CLOSE.anything_else) : { wait: true, nudgeMs: 3000, nudge: CLOSE.anything_else };
+    }
     closeTurns++;
     if (realChanges.length) {
       lastQuestion = 'Anything else?';
