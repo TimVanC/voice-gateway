@@ -4218,23 +4218,31 @@ function createCallStateMachine() {
  */
 function detectSafetyEmergency(text) {
   if (!text || typeof text !== 'string') return false;
-  const emergencyKeywords = [
-    'smoke', 'fire', 'gas smell', 'smells like gas', 'sparks',
-    'sparking', 'burning', 'flames', 'carbon monoxide', 'co detector',
-    'total shutdown', 'completely out', 'emergency', 'dangerous'
-  ];
-  // "I smell gas" / "gas leak" / "odor of gas" — the common phrasings the
-  // keyword list misses: gas + smell/leak/odor/fumes in the same clause.
+  // Hazards only. "Completely out", "total shutdown" and "emergency" used to
+  // be here: a caller with a dead furnace ("No, it's just completely out")
+  // was told to hang up and call 911 (simulated calls, Nov 17 2026).
+  const hazard = /\b(smoke|smoking|smoky|fire\b(?!\s+up)|on fire|sparks?|sparking|burning|flames?|carbon monoxide|co detector|co alarm|dangerous)/;
+  // "I smell gas" / "gas leak" / "odor of gas": gas + smell/leak/odor/fumes in the same clause.
   const gasWord = /\bgas\b/;
   const gasSignal = /\b(smell|smells|smelling|smelled|leak|leaking|leaks|odor|odour|fumes)\b/;
   const negation = /\b(no|not|nothing|none|never|neither|nor|without|don'?t|doesn'?t|didn'?t|isn'?t|aren'?t|ain'?t|wasn'?t|weren'?t|can'?t|couldn'?t|won'?t|haven'?t|hasn'?t)\b/;
   // ASR may emit curly apostrophes; normalize so the contraction patterns match.
   const normalized = text.toLowerCase().replace(/[‘’]/g, "'");
-  const clauses = normalized.split(/[,.;!?]+|\bbut\b/);
-  return clauses.some(clause => {
-    if (negation.test(clause)) return false;
-    if (emergencyKeywords.some(kw => clause.includes(kw))) return true;
-    return gasWord.test(clause) && gasSignal.test(clause);
+  // A negation covers the rest of its clause, list items included: "No,
+  // there's no smoke, gas smell, or sparks" repeats the question's own words
+  // and is a denial. (Splitting at every comma read "gas smell" as a clause
+  // of its own and sent that caller to 911.) A clause ends at a full stop, at
+  // "but"/"although"/"except", or at a comma that starts a new statement
+  // ("no smoke, there's a gas smell" / "no smoke, a little gas smell").
+  const clauses = normalized
+    .split(/[.;!?]+|\b(?:but|although|though|however|except)\b/)
+    .flatMap((s) => s.split(/,\s*(?=(?:and\s+|so\s+|well\s+)?(?:there'?s|there\s+(?:is|are|was|were)|i\b|i'[a-z]+|it\b|it'?s|we\b|we'[a-z]+|my\b|the\b|just\b|only\b|yes\b|yeah\b|yep\b|actually\b|maybe\b|something\b|a\b|some\b))/));
+  return clauses.some((raw) => {
+    // "No, ..." / "Well, ..." in front of a statement is a reply word, not the statement's negation.
+    const clause = raw.replace(/^(?:\s*(?:no|nope|nah|yes|yeah|yep|well|um+|uh+|oh|so|okay|ok)\s*,)+/, ' ');
+    const neg = clause.search(negation);
+    const affirmed = neg === -1 ? clause : clause.slice(0, neg); // what comes after a negation is denied
+    return hazard.test(affirmed) || (gasWord.test(affirmed) && gasSignal.test(affirmed));
   });
 }
 

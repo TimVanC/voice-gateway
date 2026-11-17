@@ -128,11 +128,11 @@ function removeFillerPhrases(text) {
   // Common filler phrases to remove
   const fillerPatterns = [
     /^(yeah\s*,?\s*)?(it'?s|it\s+is|that'?s|that\s+is|that\s+would\s+be|so\s+the|the)\s+/gi,
-    /^(um|uh|er|ah|oh|well|so|like)\s*,?\s*/gi,
-    /^(okay|ok|alright|right|sure|yeah|yes|yep|yup)\s*,?\s*/gi,
+    /^(um|uh|er|ah|oh|well|so|like)\b\s*,?\s*/gi,
+    /^(okay|ok|alright|right|sure|yeah|yes|yep|yup)\b\s*,?\s*/gi,
     /\s+(um|uh|er|ah|oh|well|so|like)\s*$/gi,
     /\s+(okay|ok|alright|right|sure|yeah|yes|yep|yup)\s*$/gi,
-    /^(i\s+think|i\s+guess|i\s+mean|you\s+know)\s*,?\s*/gi,
+    /^(i\s+think|i\s+guess|i\s+mean|you\s+know)\b\s*,?\s*/gi,
     /\s+(i\s+think|i\s+guess|i\s+mean|you\s+know)\s*$/gi,
     // Additional filler phrases
     /\b(to\s+be\s+honest|let\s+me\s+think|let\s+me\s+see|i\s+don'?t\s+know|i'?m\s+not\s+sure)\b\s*,?\s*/gi,
@@ -534,6 +534,8 @@ function tidySummaryFragment(text) {
 }
 
 function generateCallSummary(callData, callStatus) {
+  // Relay-brain calls write their own summary from fields the turn reader already cleaned.
+  if (callData && callData._brain && callData._brainSummary && callData.isSafetyRisk !== true) return callData._brainSummary;
   const {
     intent,
     details = {}
@@ -760,6 +762,14 @@ function normalizeIntent(intent, callData = {}) {
  */
 function buildServiceAddress(callData) {
   const { address, city, state, zip } = callData;
+
+  // Relay-brain calls store street, unit, town, state and zip as separate, validated fields.
+  // (The checks below reject real streets such as "1 Furnace Brook Road" because of the word "furnace".)
+  if (callData._brain) {
+    if (!address || !/^\s*\d/.test(address)) return '';
+    const zipDigits = String(zip || '').replace(/\D/g, '');
+    return [String(address).trim(), callData.unit, city, state, zipDigits.length === 5 ? zipDigits : null].filter(Boolean).join(', ');
+  }
   
   // Validate and normalize the street address
   const normalizedAddress = address ? validateAndNormalizeAddress(address) : '';
@@ -897,6 +907,9 @@ function normalizeSystemType(systemType) {
 function determineCallStatus(currentState, callData, metadata = {}) {
   void currentState;
   if (Boolean(metadata.wasTransferred)) return 'transferred';
+  // Relay-brain calls know how they ended: a caller who hung up or cancelled before the read-back
+  // is not a finished intake, whatever was collected on the way.
+  if (callData && callData._brain && !callData.isSafetyRisk && !callData._detailsConfirmed) return 'incomplete';
   if (hasMeaningfulData(callData)) return 'complete';
   return 'incomplete';
 }
@@ -964,8 +977,8 @@ function transformCallDataToRow(callData, currentState, metadata = {}) {
         last: lastName ? String(lastName) : ''
       }
     : { first: firstName || '', last: lastName || '' };
-  const cleanFirstName = nameForCSV.first ? cleanName(nameForCSV.first) : '';
-  const cleanLastName = nameForCSV.last ? cleanName(nameForCSV.last) : '';
+  const cleanFirstName = nameForCSV.first ? (callData._brain ? String(nameForCSV.first).trim() : cleanName(nameForCSV.first)) : '';
+  const cleanLastName = nameForCSV.last ? (callData._brain ? String(nameForCSV.last).trim() : cleanName(nameForCSV.last)) : '';
   
   // For all calls (complete and incomplete): Log all collected data
   // Only leave fields blank if they were never collected or failed validation

@@ -170,18 +170,29 @@ function classifyIntent(text) {
  * @param {string} [state] - current call state name
  */
 function detectRealPersonRequest(transcript, state) {
-  const lowerTranscript = String(transcript || '').toLowerCase();
+  const lowerTranscript = String(transcript || '').toLowerCase().replace(/[‘’]/g, "'");
+  // A request has a verb aimed at a person. Words on their own used to count:
+  // "Hello, is anybody there?" and "am I talking to a real person or a
+  // computer?" were transferred to the office, and so would "my transfer
+  // switch is broken" or "a team member said they'd call" (simulated calls,
+  // Nov 17 2026).
+  const WHO = "(?:(?:a|an|the|your|some|one of your)\\s+)?(?:(?:real|live|actual)\\s+)?(?:person|human(?:\\s+being)?|agent|representative|rep|operator|team member|staff member|manager|supervisor|owner|receptionist)";
+  const ANYONE = `(?:${WHO}|somebody|someone|anybody|anyone|a real one|people)`;
   const realPersonPatterns = [
-    /\b(real person|human|speak to someone|talk to someone|talk to a person|speak to a person)\b/,
-    /\b(agent|representative|operator|live person|live agent)\b/,
-    /\b(transfer|connect me|put me through|can i speak)\b/,
-    /\b(not a robot|not ai|not automated|actual person)\b/,
-    /\b(team member|a team member|speak to a team member|talk to a team member)\b/,
-    /\b(get me a person|get me someone|someone real|speak with someone|talk with someone)\b/,
-    /\b(don'?t want (a computer|a machine|a robot|to talk to a computer|to talk to a machine))\b/,
-    /\b(i want (a person|a human|to talk to (a person|someone|a human)))\b/,
-    /\b(rather (speak|talk) to (a person|someone|a human|a real person))\b/,
-    /\b(is (there |anyone |anybody )(there|available|i can talk to))\b/,
+    // "talk to a real person", "speak with someone", "talk to the office"
+    new RegExp(`\\b(?:speak|talk|chat)\\s+(?:to|with)\\s+(?:${ANYONE}|(?:the|your)\\s+(?:office|front desk|service department|dispatch))\\b`),
+    // "get me a person", "connect me to an agent", "put me through to someone"
+    new RegExp(`\\b(?:get|give|connect|transfer|put|pass|patch)\\s+me\\s+(?:(?:to|through to|through|over to|on with|with)\\s+)?${ANYONE}\\b`),
+    // "I want a human", "I'd like an agent" (not "I need someone to come look at it")
+    new RegExp(`\\bi(?:'d| would)?\\s+(?:want|need|like|prefer)\\s+${WHO}\\b(?!\\s+to\\s+(?:come|look|fix|check|see|service))`),
+    // "is there a person I can talk to", "is there someone I could speak with"
+    new RegExp(`\\bis there\\s+${ANYONE}\\s+(?:i|we)\\s+(?:can|could)\\s+(?:talk|speak)\\b`),
+    // "transfer me", "can you transfer my call", "put me through"
+    /\b(?:transfer me|transfer (?:my|this|the) call|be transferred|get transferred|(?:can|could|will|would) you (?:please )?transfer|please transfer|put me through|connect me)\b/,
+    // "I don't want to talk to a computer"
+    /\b(?:don'?t|do not) want (?:to (?:talk|speak) (?:to|with) )?(?:a|an|the|this) (?:computer|machine|robot|bot|ai|recording|automated)\b/,
+    // "representative", "agent please", "a real person", "customer service"
+    new RegExp(`^\\W*(?:${WHO}|customer service)(?:[\\s,]+please)?\\W*$`),
   ];
 
   if (realPersonPatterns.some(pattern => pattern.test(lowerTranscript))) return true;
@@ -191,9 +202,13 @@ function detectRealPersonRequest(transcript, state) {
   const isEarlyState = !state || state === 'greeting' || state === 'intent';
   if (isEarlyState) {
     const RSE_STAFF_NAMES = /\b(ronald|ron|zelda|raymond|andrew|shamyah|kai)\b/i;
-    const REACH_PATTERNS = /\b(get a hold of|reach|trying to reach|speak to|talk to|looking for|get through to)\b/i;
+    const REACH_PATTERNS = /\b(get a hold of|reach|trying to reach|speak to|speak with|talk to|talk with|looking for|get through to)\b/i;
+    const STAFF_REACH = /\b(get a hold of|reach|trying to reach|speak to|speak with|talk to|talk with|looking for|get through to|calling for|is \w+ (there|in|available|around))\b/i;
     const PERSON_REFERENCE = /\b(someone|somebody|anyone|anybody|a person|person|people|human|staff|manager|owner|receptionist|the office)\b/i;
-    if (RSE_STAFF_NAMES.test(lowerTranscript)) return true;
+    // A staff name counts when the caller is asking for that person ("is Ron
+    // there?", "can I speak to Zelda"), not when it is the caller's own name
+    // ("Hi, this is Andrew Miller, my furnace is out").
+    if (RSE_STAFF_NAMES.test(lowerTranscript) && STAFF_REACH.test(lowerTranscript) && !/\b(this is|my name is|i'?m|it'?s)\s+(ronald|ron|zelda|raymond|andrew|shamyah|kai)\b/i.test(lowerTranscript)) return true;
     // Reach phrasing counts as a transfer request only when aimed at a person
     // and not carrying a service need (service needs go through intake).
     if (REACH_PATTERNS.test(lowerTranscript) &&

@@ -190,3 +190,34 @@ audio) and "first audible" (the caller could actually hear something), the
 dead-air gaps, and the barge-in count (Ava cut herself off because she heard
 the caller). The caller side has its own VAD delay (`silenceMs`, default
 700 ms), so compare runs with the same scenario settings.
+
+## Text-level simulator for relay calls (`relay-sim.js`)
+
+On a ConversationRelay call Twilio does the audio, so Ava's side only ever
+sees finished caller turns as text. `relay-sim.js` plays Twilio in text: it
+drives `src/relay.js` in the same process with a caller played by a small
+model following a persona. A whole intake call takes about fifteen seconds
+and costs a fraction of a cent, so the full set (`sim-scenarios.json`, 88
+callers) runs in a few minutes. It finds logic bugs (loops, dead air, wrong or
+invented fields, a question asked twice, a wrong transfer); it cannot hear the
+voice. Phone mode of `run.js` is still the test for that.
+
+```bash
+node scripts/test-caller/relay-sim.js --all --concurrency 8        # every caller
+node scripts/test-caller/relay-sim.js --scenario correct-phone-at-recap
+node scripts/test-caller/relay-sim.js --all --only solar,gas-smell --repeat 3
+node scripts/test-caller/relay-sim.js --scenario no-heat-basic --remote wss://<host>/relay   # a deployed server
+```
+
+Each call leaves `<id>.txt` (the transcript, what Ava stored, the row the
+office would see), `<id>.json` and `<id>.log` under
+`scripts/test-caller/out/sim-<stamp>/`, plus `summary.md`. Automatic flags
+cover dead air, a call that never ends, a line said three times, forbidden
+words, slow replies and the `expect` block of the scenario. Everything else
+needs a reader: hand the `.txt` files to a reviewer.
+
+A scenario can garble the transcript Ava receives (`"noise": "light" | "heavy"
+| "tv"`: an accent, a bad line, a television), split answers in two
+(`split`), cut into the read-back (`interruptRecap`), press 0 (`dtmfAt`), drop
+the line (`hangupAt`), go quiet mid-call (`silentAt`) or never speak at all
+(`neverSpeaks`). Simulated calls never write to Neon or the Sheet.

@@ -54,6 +54,7 @@ const { TrackRecorder } = require('./utils/track-recorder');
 const { createStt, resolveSttProvider } = require('./pipeline/stt');
 const { createTts, resolveTtsProvider } = require('./pipeline/tts');
 const { createLlm, resolveLlmProvider } = require('./pipeline/llm');
+const { createExtractor } = require('./pipeline/extractor');
 const { PromptCache, collectFixedPrompts } = require('./pipeline/prompt-cache');
 const { RoomTone } = require('./pipeline/ambience');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
@@ -154,6 +155,9 @@ let processTtsDegraded = false;
 const promptCache = new PromptCache({ tts: null });
 let llm = null;
 try { llm = createLlm(); } catch (err) { console.error(`⚠️ LLM unavailable (${err.message}); free-form replies will use scripted fallbacks`); }
+// Reads each caller turn on relay calls (src/relay-brain.js). Without it the relay falls back to the pattern-matching state machine.
+let extractor = null;
+try { extractor = createExtractor(); } catch (err) { console.error(`⚠️ Turn reader unavailable (${err.message}); relay calls use the pattern-matching state machine`); }
 const activeCalls = new Set();
 
 async function warmPromptCache() {
@@ -195,6 +199,7 @@ app.get('/health', (req, res) => {
     service: 'RSE Voice Gateway (pipeline prototype)',
     pipeline: {
       stt: STT_PROVIDER, tts: TTS_PROVIDER, llm: llm ? llm.name : 'none',
+      relay_brain: RELAY ? (relay.RELAY_BRAIN === 'llm' && extractor ? extractor.name : 'rules') : 'off',
       ambience: AMBIENCE || 'off',
       tts_fallback: TTS_FALLBACK || 'off',
       tts_degraded: processTtsDegraded,
@@ -1144,8 +1149,21 @@ wss.on('connection', (twilioWs, req) => {
     console.log('📞 New ConversationRelay connection');
     // Callbacks go to this host, whatever PUBLIC_BASE_URL says: staging's pointed at production once.
     const host = req.headers && req.headers.host;
+    // Twilio signs the WebSocket handshake the same way it signs webhooks (X-Twilio-Signature over the
+    // wss URL). Without the check anyone who finds this address can open a session: model calls, and
+    // on production a Sheet row and an email per fake call. RELAY_SIGNATURE=log (default) only reports
+    // the result, so a real call can prove the check before RELAY_SIGNATURE=enforce turns strangers away.
+    const signatureMode = (process.env.RELAY_SIGNATURE || 'log').toLowerCase();
+    if (signatureMode !== 'off') {
+      const signature = req.headers && req.headers['x-twilio-signature'];
+      let signed = false;
+      try { signed = Boolean(signature && TWILIO_AUTH_TOKEN && twilio.validateRequest(TWILIO_AUTH_TOKEN, signature, `wss://${host}${req.url}`, {})); } catch (_) { signed = false; }
+      if (signed) console.log('🔏 Relay connection signed by Twilio');
+      else if (signatureMode === 'enforce') { console.warn(`⛔ Relay connection without a valid Twilio signature refused (${signature ? 'bad signature' : 'no signature'})`); twilioWs.close(1008, 'unsigned'); return; }
+      else console.warn(`⚠️ Relay connection without a valid Twilio signature (${signature ? 'bad signature' : 'no signature'}); allowed because RELAY_SIGNATURE is not "enforce"`);
+    }
     const baseUrl = host ? `${host.includes('localhost') || host.startsWith('127.') ? 'http' : 'https'}://${host}` : BASE_URL;
-    new relay.RelaySession(twilioWs, { llm, transferNumber: TRANSFER_PHONE_NUMBER, twilioClient, baseUrl, record: CALL_RECORDING && Boolean(process.env.DATABASE_URL), twilioAuth: TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN ? { accountSid: TWILIO_ACCOUNT_SID, authToken: TWILIO_AUTH_TOKEN } : null }); // eslint-disable-line no-new
+    new relay.RelaySession(twilioWs, { llm, extractor, transferNumber: TRANSFER_PHONE_NUMBER, twilioClient, baseUrl, record: CALL_RECORDING && Boolean(process.env.DATABASE_URL), twilioAuth: TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN ? { accountSid: TWILIO_ACCOUNT_SID, authToken: TWILIO_AUTH_TOKEN } : null }); // eslint-disable-line no-new
     return;
   }
   console.log('📞 New connection');
@@ -1179,6 +1197,7 @@ server.listen(PORT, () => {
   console.log(`⏱️ Barge-in grace ${BARGE_GRACE_MS} ms (${BARGE_GRACE_CONFIRM_MS} ms during the recap), watchdog ${WATCHDOG_MS} ms, re-prompt ${REPROMPT_MS} ms`);
   console.log(`📍 Webhook: https://<your-domain>/twilio/voice`);
   if (RELAY) console.log(`🔀 ConversationRelay ON: Twilio does STT (Flux) and TTS (ElevenLabs ${relay.RELAY_VOICE}); the media-stream path above is idle`);
+  if (RELAY) console.log(`🧠 Relay brain: ${relay.RELAY_BRAIN === 'llm' && extractor ? `turn reader ${extractor.name}` : 'pattern-matching state machine (RELAY_BRAIN=rules or no model key)'}`);
   console.log('🎧 Waiting for calls...');
   warmPromptCache();
 });

@@ -28,6 +28,19 @@ const { normalizeSpokenNumbers } = require('./pipeline/numbers');
 const { shapeForSpeech } = require('./pipeline/speech-shaping');
 const { startCallRecording, ingestCallRecordingsByPolling } = require('./utils/twilio-recording');
 const { isSmokeCaller } = require('./monitor/smoke-call');
+const { createRelayBrain } = require('./relay-brain');
+
+// Who reads the caller's turns: "llm" (src/relay-brain.js: a short model call
+// per turn, the script still decides what is asked) or "rules" (the old
+// pattern-matching state machine, kept as the way back: RELAY_BRAIN=rules).
+const RELAY_BRAIN = (process.env.RELAY_BRAIN || 'llm').toLowerCase();
+// The caller says nothing after Ava finishes: nudge after this long, again
+// after the same wait, and hang up on the third silence. ConversationRelay
+// sends nothing while the line is quiet, so the timer is ours.
+const RELAY_SILENCE_MS = Number(process.env.RELAY_SILENCE_MS ?? 9000);
+// Roughly how long the voice takes to say a line (v4 turbo, measured Nov 2026).
+const SPEECH_MS_PER_CHAR = Number(process.env.RELAY_SPEECH_MS_PER_CHAR ?? 75);
+const estimateSpeakMs = (text) => (SPEECH_MS_PER_CHAR ? 500 + String(text || '').length * SPEECH_MS_PER_CHAR : 0);
 
 // ElevenLabs voice string for Twilio: VOICE_ID-MODEL-SPEED_STABILITY_SIMILARITY
 // (v3/v4 models take STABILITY_SIMILARITY only). Default: Eryn hyper-real on
@@ -48,7 +61,8 @@ const RELAY_TURN_HOLD_MS = Number(process.env.RELAY_TURN_HOLD_MS ?? 700);
 // late (demo call Nov 9 2026: 1.6 s median from caller to Ava).
 const RELAY_TURN_HOLD_SHORT_MS = Number(process.env.RELAY_TURN_HOLD_SHORT_MS ?? 250);
 const RELAY_INTERRUPT_SENSITIVITY = process.env.RELAY_INTERRUPT_SENSITIVITY || 'medium';
-const HINTS = 'Ava,RSE Energy,HVAC,mini split,ductless,heat pump,furnace,boiler,thermostat,generator,Generac,Cummins,maintenance plan,membership,New Jersey,Montclair,Madison,Morristown';
+// Words the transcriber should expect: the trade's vocabulary and the towns callers live in.
+const HINTS = 'Ava,RSE Energy,HVAC,mini split,ductless,heat pump,furnace,boiler,thermostat,generator,Generac,Cummins,maintenance plan,membership,Home Comfort Plan,Energy Efficiency Program,New Jersey,Montclair,Madison,Morristown,Chatham,Summit,Livingston,Millburn,Short Hills,Maplewood,West Orange,Verona,Caldwell,West Caldwell,Glen Ridge,Bloomfield,Parsippany,Florham Park,Mendham,Bernardsville,Basking Ridge,Denville,Randolph,Boonton,Mountain Lakes,Fairfield,Dover,Chester';
 // Twilio's tokens-played does not always arrive (demo call Nov 9 2026: the
 // line stayed open 8 s after the goodbye). The fail-safe is sized to the
 // goodbye itself: time for the voice to start, the words, and a beat.
@@ -83,9 +97,10 @@ function relayEndedTwiml({ handoffData, callerNumber, transferNumber }) {
   try { handoff = handoffData ? JSON.parse(handoffData) : {}; } catch (_) { /* not ours */ }
   if (handoff.reason === 'transfer' && transferNumber) {
     const callerId = callerNumber ? ` callerId="${esc(callerNumber)}"` : '';
+    // Ava has already said she is connecting the call when handoff.spoken is set; Twilio's own voice stays out of it.
+    const announce = handoff.spoken ? '' : '\n  <Say>Transferring you to a team member now.</Say>';
     return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>Transferring you to a team member now.</Say>
+<Response>${announce}
   <Dial${callerId}>${esc(transferNumber)}</Dial>
 </Response>`;
   }
@@ -93,7 +108,7 @@ function relayEndedTwiml({ handoffData, callerNumber, transferNumber }) {
 }
 
 class RelaySession {
-  constructor(ws, { llm = null, transferNumber = null, twilioClient = null, baseUrl = null, record = false, twilioAuth = null } = {}) {
+  constructor(ws, { llm = null, extractor = null, transferNumber = null, twilioClient = null, baseUrl = null, record = false, twilioAuth = null } = {}) {
     this.twilioAuth = twilioAuth; // { accountSid, authToken } for pulling the recording file
     this.ws = ws;
     this.llm = llm;
@@ -102,7 +117,15 @@ class RelaySession {
     this.baseUrl = baseUrl;
     this.record = record;
     this.held = null; // { text, timer }: a finished turn waiting RELAY_TURN_HOLD_MS for a continuation
-    this.sm = createCallStateMachine();
+    // The brain keeps the same getData/getState/intakeLog surface as the state machine, so saving the call is unchanged.
+    this.brain = RELAY_BRAIN === 'llm' && extractor ? createRelayBrain({ extractor }) : null;
+    this.sm = this.brain || createCallStateMachine();
+    this.reading = null; // { text, stale }: a turn the brain is still reading
+    this.silences = 0;
+    this.silenceTimer = null;
+    this.lastWasRecap = false;
+    this.recapInterrupted = false;
+    this.interruptedSinceSay = false; // Twilio reported the caller talking over Ava's last line
     this.transcript = createTranscriptRecorder();
     this.callSid = null;
     this.sessionId = null;
@@ -145,6 +168,8 @@ class RelaySession {
         this.sessionId = msg.sessionId;
         this.callerNumber = msg.customParameters?.callerNumber || msg.from || null;
         if (this.callerNumber) this.sm.updateData('phone', this.callerNumber);
+        // Twilio speaks the greeting; if the caller says nothing after it, nudge.
+        this.armSilence(GREETING.primary);
         console.log(`📞 Relay session ${this.sessionId} call ${this.callSid} from ${(this.callerNumber || '').replace(/(\d{3})\d{4}(\d{4})/, '$1***$2')} voice ${RELAY_VOICE}`);
         if (this.record && this.twilioClient && this.baseUrl) {
           // The audio never reaches us on a relay call: have Twilio record it; src/utils/twilio-recording.js stores it at the end.
@@ -156,12 +181,20 @@ class RelaySession {
         }
         break;
       case 'prompt':
+        // Any speech from the caller, finished or not, means the line is not silent.
+        this.silences = 0;
+        this.clearSilence();
         if (!msg.last) return; // partial prompts are off; be safe
         this.lastCallerAt = Date.now();
         this.holdTurn(String(msg.voicePrompt || ''));
         break;
       case 'interrupt':
         console.log(`🛑 Caller interrupted after ${msg.durationUntilInterruptMs} ms: "${(msg.utteranceUntilInterrupt || '').slice(0, 60)}"`);
+        // Cut into the read-back before its end: after the correction the whole read-back is said again.
+        if (this.lastWasRecap && !/(right|correct)\?\s*$/i.test(String(msg.utteranceUntilInterrupt || '').trim())) this.recapInterrupted = true;
+        this.interruptedSinceSay = true;
+        // The caller is talking; if no words follow (a cough, a door), the silence timer still nudges.
+        if (!this.callCompleted) this.armSilence('');
         // The goodbye is sent uninterruptible; if it was cut off anyway, say it once more.
         if (this.callCompleted && !this.transferRequested && this.goodbyeText && !this.goodbyeRepeated) {
           this.goodbyeRepeated = true;
@@ -174,7 +207,11 @@ class RelaySession {
         break;
       case 'dtmf':
         console.log(`🔢 DTMF ${msg.digit}`);
-        if (msg.digit === '0' && !this.transferRequested) this.transfer('dtmf');
+        if (msg.digit === '0' && !this.transferRequested && !this.callCompleted) {
+          this.clearSilence();
+          if (this.brain) this.deliver({ say: 'Sure, one moment while I connect you.', transfer: true });
+          else this.transfer('dtmf');
+        }
         break;
       case 'tokens-played':
         if (this.callCompleted && !this.transferRequested) this.endCall('goodbye_played');
@@ -199,6 +236,8 @@ class RelaySession {
       this.held = { text: t, timer: null };
     }
     if (!RELAY_TURN_HOLD_MS) return this.flushHeld();
+    // Start reading the turn now: by the time the hold is over the answer is usually ready.
+    if (this.brain && !this.callCompleted && !this.reading) this.brain.prepare(this.held.text);
     // "No." + "That's it." + "Thanks so much.": a one- or two-word turn is often only the start (second demo call).
     const finished = /[.!?]["')\]]*$/.test(this.held.text) && this.held.text.split(/\s+/).length >= 3;
     this.held.timer = setTimeout(() => this.flushHeld(), finished ? Math.min(RELAY_TURN_HOLD_SHORT_MS, RELAY_TURN_HOLD_MS) : RELAY_TURN_HOLD_MS);
@@ -212,9 +251,104 @@ class RelaySession {
     this.handleTurn(text);
   }
 
+  /** A caller turn on a brain call: read it, then say what the brain decided. */
+  brainTurn(text) {
+    const said = text.trim();
+    if (!said) return;
+    console.log(`📝 User said: "${said}"`);
+    this.transcript.add('caller', said);
+    if (this.callCompleted) return;
+    this.turns++;
+    this.clearSilence();
+    // The caller went on while the last piece was still being read: drop that read and take the whole thing.
+    let whole = said;
+    if (this.reading) { this.reading.stale = true; whole = `${this.reading.text} ${said}`; console.log(`🧷 Caller kept going during the read - merged: "${whole.slice(0, 80)}"`); }
+    const job = { text: whole, stale: false };
+    this.reading = job;
+    const interruptedRecap = this.recapInterrupted;
+    this.recapInterrupted = false;
+    const overlap = this.interruptedSinceSay;
+    this.interruptedSinceSay = false;
+    this.brain.handle(whole, { interruptedRecap, overlap, stale: () => job.stale })
+      .then((out) => {
+        if (job.stale || (out && out.stale)) return;
+        this.reading = null;
+        // "Um." / "Hold on.": the caller is not done. Say nothing; the silence timer nudges if nothing follows.
+        if (out && out.wait) { console.log('⏳ Caller is mid-thought: waiting'); this.armSilence(''); return; }
+        this.deliver(out);
+      })
+      .catch((err) => {
+        if (job.stale) return;
+        this.reading = null;
+        console.error(`❌ Brain turn failed: ${err.stack || err.message}`);
+        this.deliver({ say: 'Sorry, could you say that once more?' });
+      });
+  }
+
+  /** Speak a brain decision; end or transfer the call when it says so. */
+  deliver(out) {
+    if (!out || !out.say || this.callCompleted) return;
+    const text = out.say;
+    this.currentPromptText = text;
+    this.sm.intakeLog('prompt', { prompt: text.substring(0, 120) });
+    this.transcript.add('ava', text);
+    this.lastWasRecap = Boolean(out.recap);
+    if (out.transfer) {
+      this.callCompleted = true;
+      this.say(text, { interruptible: false });
+      // Let her finish the sentence, then hand the call to the office line.
+      this.goodbyeTimer = setTimeout(() => this.transfer('asked', { spoken: true }), estimateSpeakMs(text));
+      return;
+    }
+    if (out.end) {
+      this.callCompleted = true;
+      this.goodbyeText = text;
+      this.say(text, { interruptible: false });
+      this.goodbyeTimer = setTimeout(() => this.endCall('goodbye_failsafe'), text === SAFETY.emergency_response ? 4000 : goodbyeFailsafeMs(text));
+      return;
+    }
+    this.say(text);
+    this.armSilence(shapeForSpeech(text));
+  }
+
+  // ----- The caller says nothing -----
+  armSilence(spoken) {
+    this.clearSilence();
+    if (!RELAY_SILENCE_MS || this.callCompleted) return;
+    this.silenceTimer = setTimeout(() => this.onSilence(), estimateSpeakMs(spoken) + RELAY_SILENCE_MS);
+  }
+
+  clearSilence() {
+    if (this.silenceTimer) { clearTimeout(this.silenceTimer); this.silenceTimer = null; }
+  }
+
+  onSilence() {
+    this.silenceTimer = null;
+    if (this.callCompleted || this.held || this.reading) return;
+    this.silences++;
+    console.log(`🔇 Caller silent (${this.silences} in a row)`);
+    if (this.brain) return this.deliver(this.brain.onSilence(this.silences));
+    this.sm.intakeLog('state_event', { event: 'silence', count: this.silences });
+    if (this.silences >= 3) {
+      const bye = "I'm not able to hear you, so I'll hang up for now. Please call us back anytime. Goodbye.";
+      this.callCompleted = true;
+      this.goodbyeText = bye;
+      this.transcript.add('ava', bye);
+      this.say(bye, { interruptible: false });
+      this.goodbyeTimer = setTimeout(() => this.endCall('goodbye_failsafe'), goodbyeFailsafeMs(bye));
+      return;
+    }
+    const question = this.turns === 0 ? GREETING.silence_fallback : `Are you still there? ${this.sm.getNextPrompt() || this.currentPromptText || ''}`.trim();
+    this.transcript.add('ava', question);
+    this.say(question);
+    this.armSilence(question);
+  }
+
   handleTurn(text) {
+    if (this.brain) return this.brainTurn(text);
     let transcript = text.trim();
     if (!transcript) return;
+    this.clearSilence();
     console.log(`📝 User said: "${transcript}"`);
     this.sm.intakeLog('transcript', { transcript: transcript.substring(0, 100) });
     this.transcript.add('caller', transcript);
@@ -296,6 +430,7 @@ class RelaySession {
     this.sm.intakeLog('prompt', { prompt: prompt.substring(0, 120) });
     this.transcript.add('ava', prompt);
     this.say(prompt);
+    this.armSilence(shapeForSpeech(prompt));
   }
 
   async naturalReply(userInput, action) {
@@ -334,16 +469,18 @@ class RelaySession {
     }
   }
 
-  transfer(why) {
+  transfer(why, { spoken = false } = {}) {
     if (this.transferRequested) return;
     this.transferRequested = true;
     this.callCompleted = true;
+    this.clearSilence();
     this.sm.intakeLog('state_event', { event: 'transfer', reason: why });
     console.log(`📞 Transfer requested (${why}) -> ending relay with hand-off`);
-    this.send({ type: 'end', handoffData: JSON.stringify({ reason: 'transfer', callerNumber: this.callerNumber }) });
+    this.send({ type: 'end', handoffData: JSON.stringify({ reason: 'transfer', callerNumber: this.callerNumber, spoken }) });
   }
 
   endCall(why) {
+    this.clearSilence();
     if (this.goodbyeTimer) { clearTimeout(this.goodbyeTimer); this.goodbyeTimer = null; }
     console.log(`📞 Ending relay (${why})`);
     this.sm.intakeLog('state_event', { event: 'hangup_executed', reason: why });
@@ -355,9 +492,12 @@ class RelaySession {
     this.cleanedUp = true;
     if (this.goodbyeTimer) clearTimeout(this.goodbyeTimer);
     if (this.held && this.held.timer) clearTimeout(this.held.timer);
+    this.clearSilence();
+    if (this.reading) this.reading.stale = true;
     let data = this.sm.getData();
     const currentState = this.sm.getState();
-    data = await cleanCallData(data);
+    // Brain calls store fields already cleaned by the turn reader; the post-call clean-up pass is for the old path.
+    if (!this.brain) data = await cleanCallData(data);
     console.log(`📋 Relay call done: state ${currentState}, ${this.turns} caller turns, ${Math.round((Date.now() - this.startedAt) / 1000)} s`);
     const callId = this.callSid || `RELAY-${Date.now()}`;
     // Test calls (staging, a laptop, the test caller's numbers) go to Neon only, never to RSE's Sheet.
@@ -389,4 +529,4 @@ class RelaySession {
   }
 }
 
-module.exports = { relayTwiml, relayEndedTwiml, RelaySession, RELAY_VOICE };
+module.exports = { relayTwiml, relayEndedTwiml, RelaySession, RELAY_VOICE, RELAY_BRAIN };
