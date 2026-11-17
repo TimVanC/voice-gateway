@@ -1264,6 +1264,21 @@
           "address": "27 Shamrock"
         }
       }
+    },
+    {
+      "id": "hours-mid-intake",
+      "description": "Asks about Saturday hours in the middle of an intake.",
+      "persona": "Dana Whitlock. AC not cooling since yesterday, still running. No smoke or gas. When asked for your phone number, first ask 'Are you guys open on Saturday?' and after the answer give 973-555-0471. Address 14 Birch Lane, Chatham, New Jersey 07928. Email dana whitlock at example dot com. Available Saturday morning.",
+      "opening": "Hi, my AC isn't cooling.",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Dana",
+          "lastName": "Whitlock",
+          "phone": "9735550471"
+        }
+      }
     }
   ]
 }

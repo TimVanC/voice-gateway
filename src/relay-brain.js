@@ -122,7 +122,8 @@ Ava's answer to a QUESTION the caller asked in this turn. Leave it empty ("") in
 Rules for replies:
 - Ava takes details for the office. She cannot see schedules, book visits, promise times, or say when someone will come or call. Only when the caller asks about timing, say she can't give a time and the team will be in touch as soon as they can. Never say "technician", "tech", "appointment" or "schedule".
 - Plan prices are public: when asked what a plan costs, say the price. Home Comfort Plan, monthly: $31.25 for 1 unit, $42 for 2, $50 for 3, $58 for 4, $80 for multiple properties. Yearly: $375 for 1 unit, $450 for 2, $550 for 3, $650 for 4, $900 for multiple properties. Generator Service Plan (the maintenance plan for a generator): $275 a year. No other prices: for a service call, a repair or an installation, say the team will go over pricing when they call. For what a plan includes or covers: "A team member can confirm all the details."
-- Hours, location, service area, warranty, brands, financing, eligibility for the Energy Efficiency Program: Ava does not have that information. Say so plainly and that the team can confirm it. Never say yes to "do you service my town".
+- Office hours are public: Monday to Friday 9 AM to 5 PM, Saturday 9 AM to 12 PM, closed Sunday. When asked about hours, opening or closing times, or whether the office is open on a given day, answer from these hours.
+- Location, service area, warranty, brands, financing, eligibility for the Energy Efficiency Program: Ava does not have that information. Say so plainly and that the team can confirm it. Never say yes to "do you service my town".
 - Asked whether she is a real person: "I'm an AI assistant for RSE Energy, and I'll get your details to the team."
 - RSE does heating, cooling, generators, the Energy Efficiency Program and maintenance plans. It does not do solar, plumbing, water heaters or electrical work. For those, say so kindly ("Sorry, we don't handle water heaters, you'd want a plumber for that.") and do not offer a follow-up.
 - A frustrated or angry caller gets one short, sincere acknowledgement ("I'm sorry about that, I'll make sure the team sees it."), never an argument.
@@ -154,6 +155,9 @@ const ASKS_SOMETHING = /\?|^(what|when|where|who|why|how|do|does|did|is|are|can|
 const ASKS_TIMING = /\b(when|how soon|how long|today|tomorrow|tonight|come out|be here|get here|call (me )?back|earliest|slot|right away|asap|soon)\b/i;
 const ASKS_PRICE = /\b(how much|cost|costs|price|prices|pricing|rate|rates|charge|fee|fees|what (do|does|is|are) .{0,30}(run|cost))\b/i;
 const PLAN_WORDS = /\b(plan|plans|membership|memberships|maintenance (plan|agreement|contract)|home comfort|service (plan|agreement|contract))\b/i;
+// Office hours, as RSE publishes them (Nov 2026).
+const OFFICE_HOURS_LINE = "The office is open Monday to Friday, 9 to 5, and Saturday 9 to noon. We're closed Sunday.";
+const ASKS_HOURS = /\b(what time (do|does|are|will) (you|y'?all|the office|they)( guys| all| folks)? (open|close|closing)|when (do|does|are|will) (you|y'?all|the office|they)( guys| all| folks)? (open|close|closed|closing)|(open|close|closing) (today|tonight|tomorrow)|open (until|till)|(what|what're|what are) (your|the) (office |business )?hours|are (you|y'?all|they) (guys )?(open|closed)( (on|this|today|tomorrow|now|right now|saturday|sunday|weekends?))?|(open|closed) (on )?(saturdays?|sundays?|weekends?)|hours of operation|how late are you)\b/i;
 const HOLD_ON = /\b(hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|minute|moment)|give me a (sec|second|minute|moment)|let me (see|think|check|look|find|grab|get)|bear with me)\b/i;
 const FILLER_ONLY = /^(um+|uh+|er+|hmm+|mm+|well|so|oh|okay|ok|sure|yeah|yes|yep|right|alright|and|it'?s|the|my)([\s,.]+(um+|uh+|er+|so|well|okay|ok|and|it'?s|the|my))*[\s,.!]*$/i;
 const FILLER_STRICT = /^(um+|uh+|er+|hmm+|mm+|well|so|oh)([\s,.]+(um+|uh+|er+|so|well))*[\s,.!]*$/i;
@@ -757,8 +761,10 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     // even when it was not phrased as one ("I'd like to know what they cost").
     const priced = ASKS_PRICE.test(lower) && aboutPlan;
     if (priced) r = planPriceLine(lower);
+    const hours = ASKS_HOURS.test(lower);
+    if (hours) r = OFFICE_HOURS_LINE;
     if (!r) return '';
-    if (!(asked || priced || UPSET.test(lower) || SMALL_TALK.test(lower) || flags.has('asks_if_human'))) return '';
+    if (!(asked || priced || hours || UPSET.test(lower) || SMALL_TALK.test(lower) || flags.has('asks_if_human'))) return '';
     if (/\b(technician|tech|appointment|schedule[ds]?|booked)\b/i.test(r)) return '';
     let sentences = r.split(/(?<=[.!?])\s+/).filter((s) => s && !/\?\s*$/.test(s));
     // "The team will be in touch" is an answer to "when?", not a filler line.
