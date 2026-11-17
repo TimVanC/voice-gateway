@@ -1,0 +1,29 @@
+{
+  "name": "recap-correction",
+  "description": "Gives one phone number, corrects it at the read-back.",
+  "callerNumber": "+19735550142",
+  "persona": {
+    "voice": "coral",
+    "silenceMs": 700,
+    "interruptible": false,
+    "instructions": "You are Nina Alvarez. Your central air is not cooling since Sunday; it still runs. No smoke, gas smell or sparks. Address 18 Cedar Lane, Summit, New Jersey 07901. When first asked for your phone number say 973-555-0115. Email nina at example dot com. Available Friday mornings. Open with: 'Hi, my AC isn't cooling the house.' When the assistant reads your details back, say exactly: 'Actually the phone number is wrong, it should be 973-555-0175.' After she fixes it and it is right, say 'Yes, that's right.' When asked if there is anything else, say 'No, that's it, thanks.' You are on the phone: speak naturally, no stage directions. Answer only what is asked, one or two short sentences. Never ask to speak to a person. If the assistant's sentence is cut off or you did not catch it, say 'Sorry, what was that?' and wait. When the assistant says goodbye, say 'Thanks, bye.' and nothing more. Once you have said goodbye, do not say anything else."
+  },
+  "interjections": [],
+  "maxCallSeconds": 360,
+  "expect": {
+    "outcome": "confirmation",
+    "fields": {
+      "intent": "hvac_service",
+      "firstName": "Nina",
+      "lastName": "Alvarez",
+      "phone": "9735550175",
+      "address": "18 Cedar"
+    },
+    "required": [
+      "intent",
+      "firstName",
+      "lastName",
+      "phone"
+    ]
+  }
+}

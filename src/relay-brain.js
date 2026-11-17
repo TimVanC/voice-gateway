@@ -144,7 +144,8 @@ const NOT_RUNNING = /\b(not|isn'?t|won'?t|doesn'?t|no longer|stopped)\s+(\w+\s+)
 const SMELL_MENTION = /\b(just|only|bit of|little|slight|some|kind of|faint|always|usual)\b[^.?!]*\b(smell|odor|odour|fumes)\b|\b(smell|odor|odour|fumes)\b[^.?!]*\b(when|sometimes|always|earlier|before|at start)\b|\b(oil|musty|dusty|burnt|funny|weird|strange) (smell|odor|odour)\b/i;
 const ROUTINE =/\b(tune[- ]?up|maintenance|check[- ]?up|cleaning|cleaned|inspection|annual (service|check)|yearly (service|check)|seasonal (service|check)|preventive|preventative|(runs?|works?|working|running) fine|nothing('?s| is) wrong|no (problems?|issues?|symptoms?))\b/i;
 const PROBLEM = /\b(not working|isn'?t working|broken|no heat|no cool|not cool|not heat|leak|noise|won'?t|went out|is out|dead|smell)/i;
-const TIME_WORDS = /\b(any ?time|always|morning|afternoon|evening|night|noon|weekday|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|tonight|asap|soon|now|after|before|between|a\.?m\.?|p\.?m\.?|o'?clock|all day|all week|business hours|week|whenever|flexible|open|free|\d)\b/i;
+// "Saturdays", "Mornings", "any day": plurals and the plain forms people actually say.
+const TIME_WORDS = /\b(any ?time|any ?day|every ?day|always|mornings?|afternoons?|evenings?|nights?|noon|weekdays?|weekends?|mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|sundays?|today|tomorrow|tonight|asap|soon|now|after|before|between|a\.?m\.?|p\.?m\.?|o'?clock|all day|all week|business hours|weeks?|days?|whenever|flexible|open|free|home|around|\d)\b/i;
 const START_WORDS = /\b(ago|yesterday|today|morning|night|week|month|year|day|days|since|monday|tuesday|wednesday|thursday|friday|saturday|sunday|last|this|just|recently|while|hour|hours|always|\d)\b/i;
 const UPSET = /\b(third time|second time|ridiculous|unacceptable|terrible|awful|fed up|sick of|damn|hell|crap|pissed|angry|furious|frustrat\w*|you people|useless|stupid|worst|rip.?off|waste of)\b/i;
 const SMALL_TALK = /\b(how are you|how'?s it going|how'?s your day|how (are )?you doing|good (morning|afternoon|evening))\b/i;
@@ -277,9 +278,10 @@ function grounding(transcript) {
       const [local, domain] = String(v).split('@');
       const before = lower.split(/\bat\b/)[0];
       let l = local;
-      if (!/\b(dot|period|point)\b/.test(before)) l = l.replace(/\./g, '');
-      if (!/\bunderscore\b/.test(before)) l = l.replace(/_/g, '');
-      if (!/\b(dash|hyphen)\b/.test(before)) l = l.replace(/-/g, '');
+      // Said as a word, or already written that way by the transcriber ("gloria.benson at example dot com").
+      if (!/\b(dot|period|point)\b|[a-z0-9]\.[a-z0-9]/.test(before)) l = l.replace(/\./g, '');
+      if (!/\bunderscore\b|[a-z0-9]_[a-z0-9]/.test(before)) l = l.replace(/_/g, '');
+      if (!/\b(dash|hyphen)\b|[a-z0-9]-[a-z0-9]/.test(before)) l = l.replace(/-/g, '');
       return `${l}@${domain}`;
     },
     text,
@@ -551,6 +553,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         case 'system_type': set('system', d, 'systemType', noDot(v).toLowerCase()); d.systemTypeUncertain = /\b(i think|maybe|not sure|probably|i guess|might be)\b/.test(g.lower); break;
         case 'system_age': set('system', d, 'systemAge', noDot(v).toLowerCase().replace(/\s+old$/, '')); break;
         case 'symptoms': {
+          if (pendingKey === 'safety') break;
           const s = noDot(v);
           const old = d.symptoms;
           // A second symptom adds to the first ("rumbling noise" then "oil smell"); at the read-back it replaces it.
@@ -558,7 +561,11 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
           else if (!old || stage !== 'intake' || s.length > old.length) set('issue', d, 'symptoms', s);
           break;
         }
-        case 'start_time': set('issue', d, 'startTime', noDot(v).replace(/^(it\s+)?(started|began|since)\s+/i, '')); break;
+        case 'start_time': {
+          const st = noDot(v).replace(/^(it\s+)?(started|began|since)\s+/i, '');
+          if (st && !/^(since|ago|this|last|just|started|began)$/i.test(st)) set('issue', d, 'startTime', st);
+          break;
+        }
         case 'severity': {
           // Two standard wordings, so the read-back does not say "no heat, no heat at all".
           let sev = noDot(v).toLowerCase();
@@ -611,7 +618,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       }
     }
     if (data.intent === INTENT_TYPES.OUT_OF_SCOPE && SYSTEM_WORDS.some(([, re]) => re.test(lower)) && (ROUTINE.test(lower) || PROBLEM.test(lower))) data.intent = INTENT_TYPES.HVAC_SERVICE;
-    if (data.intent === INTENT_TYPES.HVAC_SERVICE && !routine && ROUTINE.test(lower) && !PROBLEM.test(lower) && !d.symptoms) routine = true;
+    if (data.intent === INTENT_TYPES.HVAC_SERVICE && !routine && ROUTINE.test(lower) && !PROBLEM.test(lower) && !PROBLEM.test(d.symptoms || '')) routine = true;
     if (data.intent === INTENT_TYPES.GENERATOR && !d.generatorType) {
       if (/\b(install\w*|new generator|getting a|get a|buy|purchase|quote|interested in|looking (to|into|for))\b/.test(lower)) d.generatorType = 'new';
       else if (/\b(my|our) generator\b|\b(won'?t|didn'?t|doesn'?t|isn'?t|not) (start|come on|turn on|run|running|working|kick)\w*\b|\b(servic\w*|repair\w*|maintenance|tune)\b/.test(lower)) d.generatorType = 'existing';
@@ -738,9 +745,10 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     const asked = ASKS_SOMETHING.test(t.trim()) || t.split(/[.!?]\s+/).some((s) => ASKS_SOMETHING.test(s.trim()));
     // Plan prices come from the price list, not from the model's memory of it.
     const aboutPlan = PLAN_WORDS.test(lower) || (data.intent === INTENT_TYPES.MEMBERSHIP && !/\b(service call|repair\w*|install\w*|visit|diagnos\w*)\b/.test(lower));
-    if (ASKS_PRICE.test(lower) && aboutPlan && !/\$/.test(r)) r = planPriceLine(lower);
+    let priced = false;
+    if (ASKS_PRICE.test(lower) && aboutPlan && !/\$/.test(r)) { r = planPriceLine(lower); priced = true; }
     if (!r) return '';
-    if (!(asked || UPSET.test(lower) || SMALL_TALK.test(lower) || flags.has('asks_if_human'))) return '';
+    if (!(asked || priced || UPSET.test(lower) || SMALL_TALK.test(lower) || flags.has('asks_if_human'))) return '';
     if (/\b(technician|tech|appointment|schedule[ds]?|booked)\b/i.test(r)) return '';
     let sentences = r.split(/(?<=[.!?])\s+/).filter((s) => s && !/\?\s*$/.test(s));
     // "The team will be in touch" is an answer to "when?", not a filler line.
@@ -975,7 +983,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       outcome = 'emergency';
       return finish(SAFETY.emergency_response, 'emergency');
     }
-    if (has('hazard_unsure') || has('hazard_now') || (hazardWords && !safetyPending)) {
+    if (hazardWords || (safetyPending && (has('hazard_unsure') || has('hazard_now')))) {
       const n = `possible hazard mentioned: "${t.slice(0, 80)}"`;
       if (!notes.some((x) => x.startsWith('possible hazard'))) notes.push(n);
       safety = 'recheck';
@@ -988,9 +996,10 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     const personWords = /\b(person|human|agent|representative|operator|manager|supervisor|owner|receptionist|transfer(red)?|team member|(speak|talk) (to|with) (someone|somebody|anyone|anybody|the office|a |an |your ))\b/i.test(lower);
     const salesWords = /\b(marketing|seo|search engine|google (business )?listing|business listing|advertis\w*|your website|web design|decision maker|business owner|owner of the business|speak (to|with) the owner about|merchant services|credit card processing|business (loan|funding)|extended warranty|warranty specialist|this is an important message|final notice|press (one|two|1|2|\d) to|special offer|limited time)\b/i.test(lower);
     if (has('wrong_number') && /\b(wrong number|wrong place|misdial|mis-dial|didn'?t mean to call|meant to (call|dial)|wrong business|sorry,? wrong)\b/i.test(lower)) { outcome = 'wrong_number'; return finish('No problem. Have a good one.', 'wrong_number'); }
-    if (has('sales_call') && salesWords && !IN_SCOPE.has(data.intent) && callerTurns <= 4) { apply(turn.fields, t, pendingKey); outcome = 'sales_call'; return finish('Sorry, this line is for customer service only. Have a good day.', 'sales_call'); }
+    if (salesWords && !IN_SCOPE.has(data.intent) && callerTurns <= 4) { apply(turn.fields, t, pendingKey); outcome = 'sales_call'; return finish('Sorry, this line is for customer service only. Have a good day.', 'sales_call'); }
     if ((detectRealPersonRequest(t, getState()) && !has('asks_if_human') && !has('sales_call')) || (has('wants_human') && personWords && !has('asks_if_human'))) { apply(turn.fields, t, pendingKey); assist(lower); return transfer('asked'); }
-    if (has('not_english') && !englishOfferMade) {
+    const englishWords = (lower.match(/\b(the|is|it|it's|my|not|and|to|i|i'm|a|no|yes|have|need|working|can|you|hi|hello)\b/g) || []).length;
+    if (has('not_english') && !englishOfferMade && englishWords < 3) {
       englishOfferMade = true;
       pendingTransferOffer = true;
       apply(turn.fields, t, pendingKey);
@@ -1023,7 +1032,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     if (has('use_caller_id') && !phoneGiven && callerNumber && normalizePhone(callerNumber)) { data.phone = normalizePhone(callerNumber); phoneGiven = true; }
     if (has('no_email')) declined.add('email');
     if (data.intent && IN_SCOPE.has(data.intent)) outOfScopeSaid = false;
-    const reply = gateReply(turn.reply, t, flags);
+    let reply = gateReply(turn.reply, t, flags);
+    if (!reply && /\b(why (do|would|does) (you|she|they) (need|want)|what (do|would) you need (that|it|my \w+) for|who('?s| is) going to see)\b/i.test(lower)) reply = "It's only so the team can reach you about your request.";
 
     if (stage === 'recap') return recapTurn(t, lower, reply, flags, changed, same, interruptedRecap);
     if (stage === 'close') return closeTurn(t, lower, reply, flags, changed);
@@ -1055,6 +1065,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         if (attempts.safety >= 3 && hazardFlag) { data.isSafetyRisk = true; outcome = 'emergency'; return finish(SAFETY.emergency_response, 'emergency'); }
       }
     }
+    if (has('declined') && !data.intent && (lastSlot === 'name' || lastSlot === 'phone') && !data.firstName) { outcome = 'no_request'; return finish('No problem. Thanks for calling RSE Energy. Have a good one.', 'no_request'); }
+    if (has('declined') && before && before.key === lastSlot && lastSlot === 'street') notes.push('caller preferred to give the address on the callback');
     if (has('declined') && before && before.key === lastSlot) {
       declined.add(lastSlot);
       if (lastSlot === 'system_type') { data.details.systemType = 'unknown'; data.details.systemTypeUncertain = true; }
