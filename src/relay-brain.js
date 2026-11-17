@@ -1036,6 +1036,10 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       return finish("No problem at all, glad it's sorted. Thanks for calling RSE Energy.", 'cancelled');
     }
 
+    // "No..." then "none of that": the tail of the safety answer landed on the name question and was
+    // read as a refusal to give a name (real call, Nov 17 2026). The name and the number are only given
+    // up when the caller plainly refuses, and never on words spoken over Ava's question.
+    if (has('declined') && (overlap || ((lastSlot === 'name' || lastSlot === 'last_name' || lastSlot === 'phone') && !/\b(rather not|prefer not|don'?t want|do not want|not (going to|gonna|giving)|won'?t (give|tell|say)|none of your|no thanks|skip)\b/i.test(lower)))) flags.delete('declined');
     const before = plan()[0];
     let { changed, same } = apply(turn.fields, t, pendingKey);
     if (has('routine_maintenance') && !PROBLEM.test(lower)) routine = true;
