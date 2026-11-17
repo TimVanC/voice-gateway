@@ -287,7 +287,7 @@ class RelaySession {
         if (job.stale || (out && out.stale)) return;
         this.reading = null;
         // "Okay." is already on its way: the answer does not open with a second acknowledgement.
-        if (job.acked && out && out.say) out = { ...out, spoken: out.say.replace(/^(Got it|Okay|Thanks|Thank you)\.\s+/, '') };
+        if (job.acked && out && out.say) out = { ...out, spoken: out.say.replace(/^(Got it|Okay|Thanks|Thank you)[.,]\s+/, '').replace(/^./, (c) => c.toUpperCase()) };
         // "Um." / "Hold on.": the caller is not done. Say nothing; the silence timer nudges if nothing follows.
         if (out && out.wait) {
           console.log('⏳ Caller is mid-thought: waiting');
