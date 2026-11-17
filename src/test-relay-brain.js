@@ -30,7 +30,6 @@ const f = (k, v) => ({ k, v });
   {
     const { brain, used } = brainWith([
       { fields: [f('intent', 'hvac_service'), f('system_type', 'furnace'), f('symptoms', 'no heat'), f('start_time', 'this morning'), f('severity', 'completely out')] },
-      { fields: [f('first_name', 'Maria'), f('last_name', 'Lopez')] },
       { fields: [f('email', 'maria@example.com')] },
       { fields: [f('street', '14 Elm Street'), f('city', 'Montclair'), f('state', 'NJ'), f('zip', '07042')] },
       { fields: [f('availability', 'weekday mornings')] },
@@ -42,7 +41,7 @@ const f = (k, v) => ({ k, v });
     o = await brain.handle('Maria Lopez.');
     check('then the phone', has(o.say, 'phone number'), true);
     o = await brain.handle("It's 973-555-0142.");
-    check('ten digits need no model call (2 reads so far)', used(), 2);
+    check('a plain name and ten digits need no model call (1 read so far)', used(), 1);
     check('then the email', has(o.say, 'email'), true);
     o = await brain.handle('maria at example dot com');
     check('system, symptoms, start and severity were given up front: straight to the address', has(o.say, 'service address'), true);
@@ -85,7 +84,6 @@ const f = (k, v) => ({ k, v });
   {
     const { brain } = brainWith([
       { fields: [f('intent', 'hvac_service'), f('system_type', 'central air'), f('symptoms', 'not cooling'), f('start_time', 'on Sunday'), f('severity', 'still running')] },
-      { fields: [f('first_name', 'Nina'), f('last_name', 'Alvarez')] },
       { flags: ['no_email'] },
       { fields: [f('street', '18 Cedar Lane'), f('city', 'Summit'), f('zip', '07901')] },
       { fields: [f('availability', 'Friday mornings')] },
@@ -124,7 +122,7 @@ const f = (k, v) => ({ k, v });
     check('and the office sees the mention', brain.getData()._brainSummary.includes('possible hazard mentioned'), true);
   }
   {
-    const { brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'not heating well')] }, { fields: [f('first_name', 'Sharon'), f('last_name', 'Pike')] }, { flags: ['hazard_now'] }]);
+    const { brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'not heating well')] }, { flags: ['hazard_now'] }]);
     await brain.handle("My furnace isn't heating very well.");
     await brain.handle('No, nothing like that.');
     await brain.handle('Sharon Pike.');
@@ -160,7 +158,7 @@ const f = (k, v) => ({ k, v });
     check('a cancel flag without the words does not end the call', o.end, undefined);
   }
   {
-    const { brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'not cooling')] }, { fields: [f('first_name', 'Megan'), f('last_name', 'Doyle')] }, { flags: ['cancel'] }]);
+    const { brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'not cooling')] }, { flags: ['cancel'] }]);
     await brain.handle("My AC isn't cooling.");
     await brain.handle('No.');
     await brain.handle('Megan Doyle.');
@@ -172,7 +170,7 @@ const f = (k, v) => ({ k, v });
 
   console.log('\n🧪 Waiting, repeating, silence');
   {
-    const { brain, used } = brainWith([{ fields: [f('intent', 'hvac_service'), f('system_type', 'furnace'), f('symptoms', 'not heating')] }, { fields: [f('first_name', 'Andre'), f('last_name', 'Mitchell')] }, { fields: [f('phone', '9735550187')] }]);
+    const { brain, used } = brainWith([{ fields: [f('intent', 'hvac_service'), f('system_type', 'furnace'), f('symptoms', 'not heating')] }, { fields: [f('phone', '9735550187')] }]);
     await brain.handle("My furnace isn't heating the house.");
     await brain.handle('No.');
     let o = await brain.handle('Sure.');

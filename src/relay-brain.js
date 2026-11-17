@@ -158,6 +158,8 @@ const PLAN_WORDS = /\b(plan|plans|membership|memberships|maintenance (plan|agree
 // Office hours, as RSE publishes them (Nov 2026).
 const OFFICE_HOURS_LINE = "The office is open Monday to Friday, 9 to 5, and Saturday 9 to noon. We're closed Sunday.";
 const ASKS_HOURS = /\b(what time (do|does|are|will) (you|y'?all|the office|they)( guys| all| folks)? (open|close|closing)|when (do|does|are|will) (you|y'?all|the office|they)( guys| all| folks)? (open|close|closed|closing)|(open|close|closing) (today|tonight|tomorrow)|open (until|till)|(what|what're|what are) (your|the) (office |business )?hours|are (you|y'?all|they) (guys )?(open|closed)( (on|this|today|tomorrow|now|right now|saturday|sunday|weekends?))?|(open|closed) (on )?(saturdays?|sundays?|weekends?)|hours of operation|how late are you)\b/i;
+const NOT_A_NAME = new Set(["it's", "i'm", "that's", "name's", 'name', 'this', 'that', 'here', 'there', 'mr', 'mrs', 'ms', 'dr', 'no', 'not', 'yes', 'sure', 'okay', 'the', 'my', 'it', 'its', 'i', 'a', 'an', 'and', 'but', 'hold', 'hang', 'wait', 'sorry', 'what', 'why', 'who', 'hello', 'hi', 'thanks', 'thank', 'you', 'nothing', 'none', 'just', 'well', 'new', 'jersey', 'street', 'road', 'avenue', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'air', 'heat', 'furnace', 'boiler', 'central', 'still', 'running', 'completely', 'out', 'right', 'now', 'on', 'in', 'at', 'is', 'are', 'can', 'do', 'please', 'call', 'me', 'back']);
+const IN_SCOPE_TOPIC = /\b(energy efficiency|efficiency program|heat\w*|cool\w*|furnace|boiler|air condition\w*|a\.?c\.?|hvac|heat pump|mini[- ]?split|thermostat|generator|maintenance plan|membership|home comfort|tune[- ]?up)\b/i;
 const HOLD_ON = /\b(hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|minute|moment)|give me a (sec|second|minute|moment)|let me (see|think|check|look|find|grab|get)|bear with me)\b/i;
 const FILLER_ONLY = /^(um+|uh+|er+|hmm+|mm+|well|so|oh|okay|ok|sure|yeah|yes|yep|right|alright|and|it'?s|the|my)([\s,.]+(um+|uh+|er+|so|well|okay|ok|and|it'?s|the|my))*[\s,.!]*$/i;
 const FILLER_STRICT = /^(um+|uh+|er+|hmm+|mm+|well|so|oh)([\s,.]+(um+|uh+|er+|so|well))*[\s,.!]*$/i;
@@ -611,6 +613,12 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   /** What patterns can add to the model's read: the call type, a tune-up, the system named in passing. */
   function assist(lower, modelDown = false) {
     const d = data.details;
+    // The Energy Efficiency Program, heating, cooling and generators are RSE's own work, whatever the model calls them.
+    if (data.outOfScopeTopic && IN_SCOPE_TOPIC.test(`${data.outOfScopeTopic} ${lower}`.replace(/water heaters?|hot water( heaters?| tanks?)?/gi, ''))) {
+      data.outOfScopeTopic = null;
+      if (data.intent === INTENT_TYPES.OUT_OF_SCOPE) data.intent = null;
+      if (!data.intent && /energy efficiency|efficiency program/i.test(lower)) data.intent = INTENT_TYPES.ENERGY_EFFICIENCY;
+    }
     if (data.outOfScopeTopic && !data.intent) data.intent = INTENT_TYPES.OUT_OF_SCOPE;
     if (!data.intent || data.intent === INTENT_TYPES.OUT_OF_SCOPE) {
       // The caller described the problem without naming a category: the fields say which call this is.
@@ -657,6 +665,14 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     if (stage === 'intake' && lastSlot === 'safety') {
       const denial = /^(no+|nope|nah|not?|none|nothing)\b/.test(lower) && words.length <= 14 && !/\b(but|except|though|although|however|earlier|before|was|were|maybe|might|kind of|sort of)\b/.test(lower) && !SMELL_MENTION.test(lower) && !/\?/.test(lower);
       if (denial && !detectSafetyEmergency(lower)) return { fields: [], flags: ['no'], reply: '' };
+    }
+    if (stage === 'intake' && (lastSlot === 'name' || lastSlot === 'last_name')) {
+      // "Derek Shaw." / "Sure, it's Maria Lopez.": two or three capitalised words and nothing else.
+      const bare = t.trim().replace(/[‘’]/g, "'").replace(/^(?:(?:sure|yeah|yes|okay|ok)[,.]?\s+)?(?:(?:it's|its|it is|my name is|my name's|this is|the name is|i'm|i am)\s+)?/i, '');
+      const m = bare.match(/^([A-Z][a-zA-Z'-]+)\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)?)[.!]?$/);
+      if (m && lastSlot === 'name' && ![m[1], ...m[2].split(/\s+/)].some((w) => NOT_A_NAME.has(w.toLowerCase()))) {
+        return { fields: [{ k: 'first_name', v: m[1] }, { k: 'last_name', v: m[2] }], flags: [], reply: '' };
+      }
     }
     if (stage === 'intake' && lastSlot === 'phone') {
       const spoken = normalizeSpokenNumbers(t, { cardinals: true });
