@@ -265,7 +265,23 @@ function grounding(transcript) {
     lower, digits,
     name: (v) => String(v).toLowerCase().split(/[^a-z]+/).filter((x) => x.length >= 2).every((tok) => joinedNoEmail.includes(tok)),
     city: (v) => joined.includes(String(v).toLowerCase().replace(/[^a-z]/g, '')),
-    email: (v) => { const local = String(v).split('@')[0].replace(/[^a-z0-9]/g, ''); return local.length < 3 || joined.includes(local.slice(0, 3)); },
+    // The letters and digits before the @ must all have been said, in order ("maria at example dot com" is
+    // not marialopez@...), reading "j underscore tran eighty eight" as jtran88.
+    email: (v) => {
+      const local = String(v).split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+      const said = spoken.replace(/\b(underscore|dot|dash|hyphen|period|point|space)\b/g, ' ').replace(/[^a-z0-9]/g, '');
+      return Boolean(local) && said.includes(local);
+    },
+    /** Dots, underscores and dashes stay only where the caller said the word. */
+    emailSeparators: (v) => {
+      const [local, domain] = String(v).split('@');
+      const before = lower.split(/\bat\b/)[0];
+      let l = local;
+      if (!/\b(dot|period|point)\b/.test(before)) l = l.replace(/\./g, '');
+      if (!/\bunderscore\b/.test(before)) l = l.replace(/_/g, '');
+      if (!/\b(dash|hyphen)\b/.test(before)) l = l.replace(/-/g, '');
+      return `${l}@${domain}`;
+    },
     text,
     digitRun,
     number: (v) => !digitsOf(v) || digits.includes(digitsOf(v)),
@@ -509,7 +525,13 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
           break;
         }
         case 'phone_ext': { const e = digitsOf(v); if (e && e.length <= 6) data.phoneExt = e; break; }
-        case 'email': { const e = normalizeEmail(v); if (e) { set('email', data, 'email', e); data._emailLocked = true; declined.delete('email'); } break; }
+        case 'email': {
+          let e = normalizeEmail(v);
+          if (e && !g.email(e)) { log(`🧹 Email not in the caller's words, dropped: ${e}`); e = null; }
+          if (e) e = normalizeEmail(g.emailSeparators(e));
+          if (e) { set('email', data, 'email', e); data._emailLocked = true; declined.delete('email'); }
+          break;
+        }
         // A house number, then a street name: not a phone number, not "the corner of Maple and Third".
         case 'street': {
           const houseNumber = (v.match(/^\d+/) || [''])[0];
@@ -537,7 +559,14 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
           break;
         }
         case 'start_time': set('issue', d, 'startTime', noDot(v).replace(/^(it\s+)?(started|began|since)\s+/i, '')); break;
-        case 'severity': set('issue', d, 'severity', noDot(v).toLowerCase()); break;
+        case 'severity': {
+          // Two standard wordings, so the read-back does not say "no heat, no heat at all".
+          let sev = noDot(v).toLowerCase();
+          if (SEVERITY_OUT.test(sev) || /^(out|off|dead|not working|no heat at all|nothing)$/.test(sev)) sev = 'completely out';
+          else if (/\b(still|running|works|working)\b/.test(sev) && !NOT_RUNNING.test(sev)) sev = 'still running';
+          set('issue', d, 'severity', sev);
+          break;
+        }
         case 'generator_type': if (/^(existing|new)$/i.test(v)) set('system', d, 'generatorType', v.toLowerCase()); break;
         case 'generator_issue': set('issue', d, 'generatorIssue', noDot(v)); break;
         case 'property_type': if (/^(residential|commercial)$/i.test(v)) set('system', d, 'propertyType', v.toLowerCase()); break;
