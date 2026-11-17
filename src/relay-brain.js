@@ -328,6 +328,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   let recapFixAsks = 0;
   let recapUnclear = 0;
   let recapSame = 0;
+  let lastFixLine = '';
   let closeTurns = 0;
   let extractFailures = 0;
   let callerTurns = 0;
@@ -341,6 +342,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   let idleTurns = 0; // turns with no request at all (a child, a prank, a bad line)
   let misses = 0; // caller turns in a row that moved nothing forward
   let helloTurns = 0;
+  let phonePieces = 0;
   let outOfScopeTurns = 0;
   const declined = new Set();
   const prepared = new Map(); // transcript -> promise of a model read started while the turn was still held
@@ -555,6 +557,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         case 'symptoms': {
           if (pendingKey === 'safety') break;
           const s = noDot(v);
+          // A complaint stated at the read-back means this was never a tune-up.
+          if (stage !== 'intake' && routine && !ROUTINE.test(s)) routine = false;
           const old = d.symptoms;
           // A second symptom adds to the first ("rumbling noise" then "oil smell"); at the read-back it replaces it.
           if (old && stage === 'intake' && !old.toLowerCase().includes(s.toLowerCase()) && !s.toLowerCase().includes(old.toLowerCase())) set('issue', d, 'symptoms', `${old}; ${s}`.slice(0, 140));
@@ -618,7 +622,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       }
     }
     if (data.intent === INTENT_TYPES.OUT_OF_SCOPE && SYSTEM_WORDS.some(([, re]) => re.test(lower)) && (ROUTINE.test(lower) || PROBLEM.test(lower))) data.intent = INTENT_TYPES.HVAC_SERVICE;
-    if (data.intent === INTENT_TYPES.HVAC_SERVICE && !routine && ROUTINE.test(lower) && !PROBLEM.test(lower) && !PROBLEM.test(d.symptoms || '')) routine = true;
+    if (data.intent === INTENT_TYPES.HVAC_SERVICE && !routine && ROUTINE.test(lower) && !PROBLEM.test(lower) && (!d.symptoms || ROUTINE.test(d.symptoms))) routine = true;
     if (data.intent === INTENT_TYPES.GENERATOR && !d.generatorType) {
       if (/\b(install\w*|new generator|getting a|get a|buy|purchase|quote|interested in|looking (to|into|for))\b/.test(lower)) d.generatorType = 'new';
       else if (/\b(my|our) generator\b|\b(won'?t|didn'?t|doesn'?t|isn'?t|not) (start|come on|turn on|run|running|working|kick)\w*\b|\b(servic\w*|repair\w*|maintenance|tune)\b/.test(lower)) d.generatorType = 'existing';
@@ -917,6 +921,15 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       if (waiting === 'hold' && !saidTakeYourTime) { saidTakeYourTime = true; return { say: 'Sure, take your time.' }; }
       return { wait: true };
     }
+    if (stage === 'intake' && lastSlot === 'phone' && !/\?/.test(said)) {
+      const soFar = digitsOf(normalizeSpokenNumbers(carry ? `${carry} ${said}` : said, { cardinals: true }));
+      if (soFar.length >= 3 && soFar.length < 10 && phonePieces < 2 && !/\b(no|don'?t|same|calling from|this number)\b/i.test(said)) {
+        phonePieces++;
+        carry = carry ? `${carry} ${said}` : said;
+        // If the rest does not follow within a moment, the caller is done: ask for the whole number.
+        return { wait: true, nudgeMs: 2500, nudge: REASK.phone };
+      }
+    }
     const t = carry ? `${carry} ${said}` : said;
     carry = '';
     const lower = t.toLowerCase().replace(/[‘’]/g, "'");
@@ -1158,6 +1171,12 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       if (interruptedRecap) return say(recapText(CONFIRMATION.correction_reread), { recap: true });
       const only = realChanges.filter((c) => c !== 'note');
       const lines = readBack(only.length ? only : realChanges, { spell: true });
+      if (lines === lastFixLine) {
+        notes.push(`caller kept correcting the ${(only.length ? only : realChanges).join(' and ')} at the read-back: confirm on the callback`);
+        recapConfirmed = true;
+        return enterClose("I'm sorry, I'm not getting that right. I've flagged it so the team confirms it with you.");
+      }
+      lastFixLine = lines;
       lastQuestion = 'Is everything else correct?';
       return say(`Got it. ${lines} ${lastQuestion}`);
     }
@@ -1196,7 +1215,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     const has = (f) => flags.has(f);
     const realChanges = changed.filter((c) => c !== 'intent');
     // "Thank you." right after the read-back is the tail of the confirmation, not an answer to "anything else?".
-    if (closeTurns === 0 && THANKS_ONLY.test(lower) && !realChanges.length) return { wait: true };
+    if (closeTurns === 0 && !realChanges.length && (THANKS_ONLY.test(lower) || (isConfirmation(lower) && lower.split(/\s+/).length <= 5 && !/\?/.test(lower)))) return { wait: true };
     closeTurns++;
     if (realChanges.length) {
       lastQuestion = 'Anything else?';
@@ -1286,6 +1305,10 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     getOutcome: () => outcome,
     intakeLog,
     updateData: (key, value) => { if (key === 'phone') { if (!phoneGiven) { data.phone = value; callerNumber = value; } } else if (key in data) data[key] = value; },
+    /** Will this turn need the model (so the relay can say "Okay." while it is read)? */
+    willRead: (saidNow) => { const s = String(saidNow || '').trim(); return Boolean(s) && stage !== 'ended' && !waitKind(s) && !fastPath(carry ? `${carry} ${s}` : s); },
+    /** The relay's short wait ran out: forget the broken-off piece and say the nudge. */
+    nudged: (text) => { carry = ''; lastSaid = text; return { say: text }; },
     /** For the relay's repeat handling and tests. */
     lastQuestion: () => lastQuestion,
     recapPending: () => stage === 'recap',

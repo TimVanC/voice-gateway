@@ -39,6 +39,8 @@ const RELAY_BRAIN = (process.env.RELAY_BRAIN || 'llm').toLowerCase();
 // sends nothing while the line is quiet, so the timer is ours.
 const RELAY_SILENCE_MS = Number(process.env.RELAY_SILENCE_MS ?? 9000);
 // Roughly how long the voice takes to say a line (v4 turbo, measured Nov 2026).
+// How long after a caller turn "Okay." is sent when the turn needs the model (-1 turns it off).
+const RELAY_EARLY_ACK_MS = Number(process.env.RELAY_EARLY_ACK_MS ?? 300);
 const SPEECH_MS_PER_CHAR = Number(process.env.RELAY_SPEECH_MS_PER_CHAR ?? 75);
 const estimateSpeakMs = (text) => (SPEECH_MS_PER_CHAR ? 500 + String(text || '').length * SPEECH_MS_PER_CHAR : 0);
 
@@ -263,18 +265,39 @@ class RelaySession {
     // The caller went on while the last piece was still being read: drop that read and take the whole thing.
     let whole = said;
     if (this.reading) { this.reading.stale = true; whole = `${this.reading.text} ${said}`; console.log(`🧷 Caller kept going during the read - merged: "${whole.slice(0, 80)}"`); }
-    const job = { text: whole, stale: false };
+    const job = { text: whole, stale: false, acked: false };
     this.reading = job;
+    // Reading a turn takes the model the better part of a second, and the voice needs as long again to
+    // start: about two seconds of nothing on a real call (Nov 17 2026). A receptionist says "Okay" while
+    // she writes. So does Ava: the word goes out at once and her answer follows in the same breath.
+    if (RELAY_EARLY_ACK_MS >= 0 && this.brain.willRead(said) && said.split(/\s+/).length >= 3 && !/\?\s*$/.test(said)) {
+      job.ackTimer = setTimeout(() => {
+        if (job.stale || this.reading !== job || this.callCompleted) return;
+        job.acked = true;
+        this.send({ type: 'text', token: 'Okay. ', last: false });
+      }, RELAY_EARLY_ACK_MS);
+    }
     const interruptedRecap = this.recapInterrupted;
     this.recapInterrupted = false;
     const overlap = this.interruptedSinceSay;
     this.interruptedSinceSay = false;
     this.brain.handle(whole, { interruptedRecap, overlap, stale: () => job.stale })
       .then((out) => {
+        if (job.ackTimer) clearTimeout(job.ackTimer);
         if (job.stale || (out && out.stale)) return;
         this.reading = null;
+        // "Okay." is already on its way: the answer does not open with a second acknowledgement.
+        if (job.acked && out && out.say) out = { ...out, spoken: out.say.replace(/^(Got it|Okay|Thanks|Thank you)\.\s+/, '') };
         // "Um." / "Hold on.": the caller is not done. Say nothing; the silence timer nudges if nothing follows.
-        if (out && out.wait) { console.log('⏳ Caller is mid-thought: waiting'); this.armSilence(''); return; }
+        if (out && out.wait) {
+          console.log('⏳ Caller is mid-thought: waiting');
+          if (out.nudge) {
+            // A broken-off answer (half a phone number): give it a moment, then ask again.
+            this.clearSilence();
+            this.silenceTimer = setTimeout(() => { this.silenceTimer = null; if (!this.callCompleted && !this.held && !this.reading) this.deliver(this.brain.nudged(out.nudge)); }, out.nudgeMs || 2500);
+          } else this.armSilence('');
+          return;
+        }
         this.deliver(out);
       })
       .catch((err) => {
@@ -307,7 +330,7 @@ class RelaySession {
       this.goodbyeTimer = setTimeout(() => this.endCall('goodbye_failsafe'), text === SAFETY.emergency_response ? 4000 : goodbyeFailsafeMs(text));
       return;
     }
-    this.say(text);
+    this.say(out.spoken || text);
     this.armSilence(shapeForSpeech(text));
   }
 
