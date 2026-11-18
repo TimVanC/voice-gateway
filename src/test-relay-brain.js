@@ -304,6 +304,24 @@ const f = (k, v) => ({ k, v });
     check('a different name is still a correction', brain.getData().lastName, 'Smith');
   }
 
+  console.log('\n🧪 An email said as words follows the spelled last name');
+  {
+    const { brain } = brainWith([
+      { fields: [f('intent', 'hvac_service'), f('symptoms', 'no cooling')] },
+      { fields: [f('first_name', 'Ramesh'), f('last_name', 'Iyer')] },
+      { fields: [f('email', 'ramesh.ayer@example.com')] },
+    ]);
+    await brain.handle('My AC is not cooling.');
+    await brain.handle('No, none of that.');
+    await brain.handle('My first name is Ramesh, and the last name is Iyer. I, Y, E, R.');
+    await brain.handle('973-555-0211.');
+    await brain.handle('The email is ramesh dot ayer at example dot com.');
+    check('the email takes the spelled last name', brain.getData().email, 'ramesh.iyer@example.com');
+    const { alignEmailToName } = require('./name-spelling');
+    check('an initial plus the name is left alone', alignEmailToName('mlopez@example.com', ['Lopez']), 'mlopez@example.com');
+    check('an unrelated address is left alone', alignEmailToName('sales@acme.com', ['Ames']), 'sales@acme.com');
+  }
+
   console.log(failures ? `\n❌ ${failures} check(s) failed` : '\n✅ All relay-brain checks passed');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

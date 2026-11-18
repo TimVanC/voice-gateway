@@ -181,19 +181,21 @@ function spelledIn(text, lastName) {
   return runs.some((r) => r === want || want.endsWith(r));
 }
 
-/** "Van Cowenberg" and "Van Cauwenberge", "Ayar" and "Iyer": the same name as the transcriber hears it. */
-function soundsAlike(a, b) {
+/** 1 = the same letters, 0 = nothing in common. */
+function closeness(a, b) {
   const x = String(a || '').toLowerCase().replace(/[^a-z]/g, '');
   const y = String(b || '').toLowerCase().replace(/[^a-z]/g, '');
-  if (!x || !y) return false;
+  if (!x || !y) return 0;
   let prev = Array.from({ length: y.length + 1 }, (_, i) => i);
   for (let i = 1; i <= x.length; i++) {
     const row = [i];
     for (let j = 1; j <= y.length; j++) row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1));
     prev = row;
   }
-  return 1 - prev[y.length] / Math.max(x.length, y.length) >= 0.5;
+  return 1 - prev[y.length] / Math.max(x.length, y.length);
 }
+/** "Van Cowenberg" and "Van Cauwenberge", "Ayar" and "Iyer": the same name as the transcriber hears it. */
+const soundsAlike = (a, b) => closeness(a, b) >= 0.5;
 
 /**
  * "No, it is N, W, O, S, U. My phone number is 973-555-0155.": the spelling, and what came after it.
@@ -211,9 +213,28 @@ function leadingSpelling(text, heard = '') {
   return null;
 }
 
+/**
+ * "ramesh dot ayer at example dot com" from a caller who spelled the last name I, Y, E, R: the
+ * transcriber guessed at the same two words again. Each part of the address before the @ that sounds
+ * like the caller's spelled last name is written the way it was spelled.
+ * Returns the address (unchanged when nothing matched).
+ */
+function alignEmailToName(email, names) {
+  const [local, domain] = String(email || '').split('@');
+  if (!local || !domain) return email;
+  const known = (names || []).map((n) => String(n || '').toLowerCase().replace(/[^a-z]/g, '')).filter((n) => n.length >= 3);
+  const fixed = local.split(/([._-])/).map((part) => {
+    // "mlopez" already holds the name: an initial in front of it is not a mishearing.
+    if (!/^[a-z]{3,}$/.test(part) || known.some((n) => part.includes(n))) return part;
+    const hit = known.find((n) => Math.abs(n.length - part.length) <= 2 && closeness(part, n) >= 0.7);
+    return hit || part;
+  }).join('');
+  return `${fixed}@${domain}`;
+}
+
 /** How Ava says it back: "I, Y, E, R". */
 function lettersLine(name) {
   return String(name || '').split('').map((c) => (c === ' ' ? 'space' : c === "'" ? 'apostrophe' : c === '-' ? 'dash' : c.toUpperCase())).join(', ');
 }
 
-module.exports = { COMMON_SURNAMES, SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, spelledIn, lettersLine, formatName };
+module.exports = { COMMON_SURNAMES, SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, alignEmailToName, spelledIn, lettersLine, formatName };

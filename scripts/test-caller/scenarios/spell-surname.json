@@ -1,0 +1,29 @@
+{
+  "name": "spell-surname",
+  "description": "A long two-word surname: Ava asks for the spelling and stores what was spelled.",
+  "callerNumber": "+19735550143",
+  "persona": {
+    "voice": "ash",
+    "silenceMs": 700,
+    "interruptible": false,
+    "instructions": "You are Tim Van Cauwenberge. Your furnace is making a loud rattling noise since yesterday; it still heats. No smoke, gas smell or sparks. Address 12 Laurel Avenue, Madison, New Jersey 07940. Phone 973-555-0127. You do not have an email to give: say 'No email, just call me.' Available weekdays after 3 PM. Open with: 'Hi, my furnace is making a loud rattling noise.' When asked for your name, say only 'Tim Van Cauwenberge' at normal speed and do not spell it. Only if the assistant asks you to spell your last name, say the letters one at a time, clearly: 'V, A, N, space, C, A, U, W, E, N, B, E, R, G, E.' If she reads the letters back wrong, correct her by spelling it again. When your details are read back, confirm if right, correct what is wrong. When asked if there is anything else, say 'No, that's it, thanks.' You are on the phone: speak naturally, no stage directions. Answer only what is asked, one or two short sentences. Never ask to speak to a person. If the assistant's sentence is cut off or you did not catch it, say 'Sorry, what was that?' and wait. When the assistant says goodbye, say 'Thanks, bye.' and nothing more. Once you have said goodbye, do not say anything else."
+  },
+  "interjections": [],
+  "maxCallSeconds": 360,
+  "expect": {
+    "outcome": "confirmation",
+    "fields": {
+      "intent": "hvac_service",
+      "firstName": "Tim",
+      "lastName": "Van Cauwenberge",
+      "phone": "9735550127",
+      "address": "12 Laurel"
+    },
+    "required": [
+      "intent",
+      "firstName",
+      "lastName",
+      "phone"
+    ]
+  }
+}

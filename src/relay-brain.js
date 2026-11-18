@@ -33,7 +33,7 @@ const { GREETING, INTENT_PROMPTS, SAFETY, CALLER_INFO, DETAILS, ADDRESS, AVAILAB
 const { detectSafetyEmergency, isConfirmation, isNothingElse } = require('./state/call-state-machine');
 const { detectRealPersonRequest, classifyIntent } = require('./utils/intent-classifier');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
-const { SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, spelledIn, lettersLine } = require('./name-spelling');
+const { SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, alignEmailToName, spelledIn, lettersLine } = require('./name-spelling');
 
 const EXTRACT_TIMEOUT_MS = Number(process.env.RELAY_BRAIN_TIMEOUT_MS || 3500);
 
@@ -560,6 +560,11 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
           let e = normalizeEmail(v);
           if (e && !g.email(e)) { log(`🧹 Email not in the caller's words, dropped: ${e}`); e = null; }
           if (e) e = normalizeEmail(g.emailSeparators(e));
+          // Said as words, not letter by letter: the name part is the transcriber's guess, and the spelled last name is the better one.
+          if (e && nameSpelled && data.lastName && !/(^|[\s,.])[a-z]([\s,.-]+[a-z]){2,}([\s,.]|$)/i.test(String(transcript).split(/\bat\b/i)[0])) {
+            const aligned = normalizeEmail(alignEmailToName(e, [data.lastName, ...data.lastName.split(/\s+/)]));
+            if (aligned && aligned !== e) { log(`🧹 Email written to match the name on file: ${e} -> ${aligned}`); notes.push(`email was heard as ${e}; written to match the spelled last name`); e = aligned; }
+          }
           if (e) { set('email', data, 'email', e); data._emailLocked = true; declined.delete('email'); }
           break;
         }
