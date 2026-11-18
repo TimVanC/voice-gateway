@@ -1355,6 +1355,54 @@
           "phone": "9735550155"
         }
       }
+    },
+    {
+      "id": "email-spell-garbled",
+      "description": "The line garbles an unusual email; the caller spells it when asked.",
+      "persona": "Ramesh Iyer, homeowner. Central air not cooling since yesterday, completely out. No smoke, gas smell or sparks. Address 48 Birch Road, Parsippany, New Jersey 07054. Phone 973-555-0211. Available Friday morning. When asked for your name, say exactly 'Ramish Ayar' (the phone line garbles it). When asked to spell your last name, say exactly 'I, Y, E, R.' When asked for your email, say exactly 'ramish dot ayer at example dot com' (the line garbles it again). When asked to spell the part before the at sign, say exactly 'R, A, M, E, S, H, dot, I, Y, E, R.' Polite, brief.",
+      "opening": "Hi, my central air isn't cooling, it went out yesterday.",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Ramesh",
+          "lastName": "Iyer",
+          "phone": "9735550211",
+          "email": "ramesh.iyer@example.com"
+        }
+      }
+    },
+    {
+      "id": "email-spell-whole-address",
+      "description": "Asked to spell the first part, the caller spells it and carries on through the whole address.",
+      "persona": "Dana Brooks. Furnace blowing cold air since this morning, still running. No smoke, gas smell or sparks. Address 9 Orchard Lane, Chatham, New Jersey 07928. Phone 908-555-0172. Available tomorrow after 2. When asked for your email, say exactly 'd kowalczyk seventy two at gmail dot com'. When asked to spell the part before the at sign, say exactly 'Sure. D, K, O, W, A, L, C, Z, Y, K, seven, two, at gmail dot com.' Friendly, short answers.",
+      "opening": "Hi, my furnace is blowing cold air.",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Dana",
+          "lastName": "Brooks",
+          "phone": "9085550172",
+          "email": "dkowalczyk72@gmail.com"
+        }
+      }
+    },
+    {
+      "id": "email-spell-refuses",
+      "description": "The caller will not spell the email; Ava keeps it as heard and moves on.",
+      "persona": "Tom Baker. Wants a yearly tune-up for his boiler, nothing is wrong. Address 5 Cedar Court, Summit, New Jersey 07901. Phone 908-555-0188. Available Saturday morning. When asked for your email, say exactly 'zbigniew at example dot com'. You never spell anything out and never say individual letters. If asked to spell any part of your email, say exactly 'Oh, it is just how it sounds.' the first time and exactly 'I would rather not go through all that.' the second time. Otherwise cooperative.",
+      "opening": "Hi, I'd like to book a tune-up for my boiler.",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Tom",
+          "lastName": "Baker",
+          "phone": "9085550188",
+          "email": "zbigniew@example.com"
+        }
+      }
     }
   ]
 }

@@ -237,4 +237,4 @@ function lettersLine(name) {
   return String(name || '').split('').map((c) => (c === ' ' ? 'space' : c === "'" ? 'apostrophe' : c === '-' ? 'dash' : c.toUpperCase())).join(', ');
 }
 
-module.exports = { COMMON_SURNAMES, SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, alignEmailToName, spelledIn, lettersLine, formatName };
+module.exports = { LETTER_SOUNDS, FILLER, closeness, COMMON_SURNAMES, SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, alignEmailToName, spelledIn, lettersLine, formatName };

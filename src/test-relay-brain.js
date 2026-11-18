@@ -322,6 +322,72 @@ const f = (k, v) => ({ k, v });
     check('an unrelated address is left alone', alignEmailToName('sales@acme.com', ['Ames']), 'sales@acme.com');
   }
 
+  console.log('\n🧪 An email Ava cannot trust as heard is spelled by the caller');
+  {
+    const { emailIsPlain, parseEmailSpelling } = require('./email-spelling');
+    check('everyday names are not asked about', emailIsPlain('john.smith@gmail.com', 'john dot smith at gmail dot com'), true);
+    check('an initial and a common surname are not asked about', emailIsPlain('j_tran88@protonmail.com', 'j underscore tran eighty eight at proton mail dot com'), true);
+    check('two names run together are not asked about', emailIsPlain('marialopez@example.com', 'maria lopez at example dot com'), true);
+    check('an unusual name said as a word is asked about', emailIsPlain('ramish.ayer@example.com', 'ramish dot ayer at example dot com'), false);
+    check('an unusual name already spelled is not asked about', emailIsPlain('dkowalski@example.com', 'd k o w a l s k i at example dot com'), true);
+    check('the spelled last name is trusted', emailIsPlain('priya.iyer@example.com', 'priya dot iyer at example dot com', 'Iyer'), false);
+    check('the spelled last name with a common first name is trusted', emailIsPlain('maria.iyer@example.com', 'maria dot iyer at example dot com', 'Iyer'), true);
+    check('letters and a dot', parseEmailSpelling('R, A, M, E, S, H, dot, I, Y, E, R.', 'ramish.ayer@example.com'), 'ramesh.iyer');
+    check('spelled straight through keeps the dot where it was heard', parseEmailSpelling('Sure. R A M E S H I Y E R.', 'ramish.ayer@example.com'), 'ramesh.iyer');
+    check('only the hard part spelled', parseEmailSpelling('I, Y, E, R.', 'ramesh.ayer@example.com'), 'ramesh.iyer');
+    check('a word next to its own spelling, and digits', parseEmailSpelling('D as in dog, Kowalski, K-O-W-A-L-S-K-I, seven two.', 'dkowalsky72@example.com'), 'dkowalski72');
+    check('the whole address spelled: the part before the at', parseEmailSpelling('r-a-m-e-s-h dot i-y-e-r at example dot com', 'ramish.ayer@example.com'), 'ramesh.iyer');
+    check('a sentence is not a spelling', parseEmailSpelling('It is just how it sounds.', 'ramish.ayer@example.com'), null);
+
+    const { brain } = brainWith([
+      { fields: [f('intent', 'hvac_service'), f('symptoms', 'no cooling')] },
+      { fields: [f('first_name', 'Ramish'), f('last_name', 'Iyer')] },
+      { fields: [f('email', 'ramish.ayer@example.com')] },
+    ]);
+    await brain.handle('My AC is not cooling.');
+    await brain.handle('No, none of that.');
+    await brain.handle('My first name is Ramish, and the last name is Iyer. I, Y, E, R.');
+    await brain.handle('973-555-0211.');
+    let o = await brain.handle('The email is ramish dot ayer at example dot com.');
+    check('Ava asks for the spelling', has(o.say, 'spell the part before the at sign'), true);
+    check('the relay is told an email spelling is pending', brain.slot(), 'email_spelling');
+    o = await brain.handle('R, A, M, E, S, H, dot, I, Y, E, R.');
+    check('the email is stored as spelled', brain.getData().email, 'ramesh.iyer@example.com');
+    check('the first name follows the spelling', brain.getData().firstName, 'Ramesh');
+    check('Ava thanks the caller and moves on', has(o.say, 'Thanks, got it.') && !has(o.say, 'spell'), true);
+  }
+
+  console.log('\n🧪 An everyday email is not spelled, and a caller who will not spell is not pressed');
+  {
+    const a = brainWith([
+      { fields: [f('intent', 'hvac_service'), f('symptoms', 'no cooling')] },
+      { fields: [f('email', 'maria.lopez@gmail.com')] },
+    ]);
+    await a.brain.handle('My AC is not cooling.');
+    await a.brain.handle('No, none of that.');
+    await a.brain.handle('Maria Lopez.');
+    await a.brain.handle('973-555-0211.');
+    let o = await a.brain.handle('maria dot lopez at gmail dot com.');
+    check('no spelling question for maria.lopez', has(o.say, 'spell'), false);
+
+    const b = brainWith([
+      { fields: [f('intent', 'hvac_service'), f('symptoms', 'no cooling')] },
+      { fields: [f('email', 'zbigniew@example.com')] },
+      { fields: [], flags: ['unclear'] },
+      { fields: [], flags: ['declined'] },
+    ]);
+    await b.brain.handle('My AC is not cooling.');
+    await b.brain.handle('No, none of that.');
+    await b.brain.handle('Maria Lopez.');
+    await b.brain.handle('973-555-0211.');
+    o = await b.brain.handle('zbigniew at example dot com.');
+    check('an unusual address is asked about', has(o.say, 'spell the part before the at sign'), true);
+    o = await b.brain.handle('It is just how it sounds.');
+    o = await b.brain.handle('I would rather not.');
+    check('Ava moves on', has(o.say, 'spell'), false);
+    check('the email is kept as heard', b.brain.getData().email, 'zbigniew@example.com');
+  }
+
   console.log(failures ? `\n❌ ${failures} check(s) failed` : '\n✅ All relay-brain checks passed');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
