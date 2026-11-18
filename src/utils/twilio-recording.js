@@ -13,7 +13,10 @@
  */
 
 const { pcm16ToMuLaw, muLawToPcm16 } = require('../g711');
-const { findCallRowIdBySid, saveRecordingTracks } = require('./call-db');
+const callDb = require('./call-db');
+const { transcribeAndStore } = require('./recording-transcript');
+
+const { findCallRowIdBySid, saveRecordingTracks } = callDb;
 
 /** Ask Twilio to record a live call, both legs on their own channel. */
 async function startCallRecording({ twilioClient, callSid, statusCallbackUrl }) {
@@ -104,6 +107,12 @@ async function ingestTwilioRecording({ recordingUrl, callSid, accountSid, authTo
     if (energy(tracks[0], 0, first) > energy(tracks[1], 0, first)) { ava = tracks[0]; caller = tracks[1]; }
   }
   const saved = await saveRecordingTracks(callRowId, { caller: pcm16ToMuLaw(caller), ava: pcm16ToMuLaw(ava) }, source);
+  // The transcript is then taken from the recording itself: what was on the line, not what was meant to be.
+  if (saved && saved.success) {
+    transcribeAndStore(callRowId, { caller, ava }, callDb)
+      .then((r) => console.log(r.ok ? `📝 Transcript of call ${callRowId} taken from the recording (${r.turns} turns, ${r.echoes} echo(es) of Ava on the caller's line)` : `📝 Transcript of call ${callRowId} left as the server kept it (${r.reason})`))
+      .catch((err) => console.error(`❌ Recording transcript failed for call ${callRowId}: ${err.message}`));
+  }
   return { ok: Boolean(saved && saved.success), callRowId, seconds: Math.round(caller.length / 8000), saved };
 }
 

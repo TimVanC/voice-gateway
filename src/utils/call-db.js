@@ -393,6 +393,53 @@ async function saveRecordingTracks(callRowId, { caller, ava }, source = 'twilio'
   }
 }
 
+/**
+ * The transcript the server kept during the call ([{ speaker, text, at }]), or null on failure.
+ * Once the transcript has been replaced by the one taken from the recording, the server's own is read
+ * from intake_json.server_transcript, so transcribing a call twice starts from the same place.
+ */
+async function getTranscriptTurns(callRowId) {
+  const pool = getPool();
+  if (!pool || !callRowId) return null;
+  try {
+    const kept = await pool.query("SELECT intake_json->'server_transcript' AS t FROM calls WHERE id = $1", [callRowId]);
+    if (kept.rows[0] && Array.isArray(kept.rows[0].t)) return kept.rows[0].t;
+    const res = await pool.query('SELECT speaker, text, at FROM transcript_turns WHERE call_id = $1 ORDER BY sequence', [callRowId]);
+    return res.rows.map((r) => ({ speaker: r.speaker, text: r.text, at: r.at }));
+  } catch (err) {
+    console.error(`❌ Transcript read failed for call ${callRowId}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Make the transcript taken from the recording the call's transcript (src/utils/recording-transcript.js).
+ * The server's own transcript is kept in intake_json.server_transcript. Never throws.
+ */
+async function replaceTranscriptFromRecording(callRowId, turns, serverTurns) {
+  if (!getPool() || !callRowId || !Array.isArray(turns) || !turns.length) return { success: false, skipped: true };
+  try {
+    await withTransaction(async (client) => {
+      await client.query(
+        "UPDATE calls SET intake_json = COALESCE(intake_json, '{}'::jsonb) || jsonb_build_object('server_transcript', $2::jsonb, 'transcript_source', 'recording') WHERE id = $1",
+        [callRowId, JSON.stringify(serverTurns || [])]
+      );
+      await client.query('DELETE FROM transcript_turns WHERE call_id = $1', [callRowId]);
+      const params = [];
+      const tuples = turns.map((t, i) => {
+        const base = i * 5;
+        params.push(callRowId, t.sequence, t.speaker, t.text, t.at);
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+      });
+      await client.query(`INSERT INTO transcript_turns (call_id, sequence, speaker, text, at) VALUES ${tuples.join(', ')}`, params);
+    });
+    return { success: true };
+  } catch (err) {
+    console.error(`❌ Transcript from the recording could not be stored for call ${callRowId}: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
 /** The calls.id for a Twilio call SID, or null. */
 async function findCallRowIdBySid(twilioCallSid) {
   const pool = getPool();
@@ -441,6 +488,8 @@ module.exports = {
   saveRecording,
   saveRecordingTracks,
   findCallRowIdBySid,
+  getTranscriptTurns,
+  replaceTranscriptFromRecording,
   pruneOldRecordings,
   createTranscriptRecorder,
   isOwnNumber,
