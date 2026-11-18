@@ -473,6 +473,23 @@ const f = (k, v) => ({ k, v });
     check('Ava waits for the rest of the address', Boolean(o.wait), true);
     o = await a.brain.handle('at g mail dot com.');
     check('the two breaths make one email', a.brain.getData().email, 'tvancauwenberge@gmail.com');
+    {
+      const { shapeForSpeech } = require('./pipeline/speech-shaping');
+      const c = brainWith([
+        { fields: [f('intent', 'hvac_service'), f('system_type', 'furnace'), f('symptoms', 'rattling noise'), f('start_time', 'yesterday'), f('severity', 'still running')] },
+        { fields: [f('street', '12 Laurel Avenue'), f('city', 'Madison'), f('state', 'NJ'), f('zip', '07940')] },
+        { fields: [f('availability', 'weekdays after 3 PM')] },
+      ]);
+      await c.brain.handle('My furnace has been making a rattling noise since yesterday, it is still running.');
+      await c.brain.handle('No, none of that.');
+      await c.brain.handle('Maria Lopez.');
+      await c.brain.handle('973-555-0127.');
+      await c.brain.handle('T, V, A, N, C, A, U, W, E, N, B, E, R, G, E at gmail dot com.');
+      await c.brain.handle('12 Laurel Avenue, Madison, New Jersey 07940.');
+      const r = await c.brain.handle('Weekdays after 3 PM.');
+      const spoken = shapeForSpeech(r.say);
+      check('a spelled email is not pronounced in the read-back', [has(spoken, 'email as you spelled it, at gmail dot com'), has(spoken, 'tvancauwenberge')], [true, false]);
+    }
     check('the last name is untouched', a.brain.getData().lastName, 'Lopez');
     check('Ava moves on without asking again', has(o.say, 'email') || has(o.say, 'spell'), false);
 

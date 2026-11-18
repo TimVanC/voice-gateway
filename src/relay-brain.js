@@ -357,6 +357,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   let helloTurns = 0;
   let phonePieces = 0;
   let emailPieces = 0;
+  let emailSpelledOut = false; // the caller spelled the email: the read-back does not try to pronounce it
   let messageIntro = false;
   let talkedOver = false;
   let helloWaited = false;
@@ -959,7 +960,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     const name = hardName ? [data.firstName, nameSpelled ? 'last name as you spelled it' : ''].filter(Boolean).join(', ') : [data.firstName, data.lastName].filter(Boolean).join(' ');
     if (name) parts.push(`Name: ${name}.`);
     if (phoneGiven && data.phone) parts.push(`Phone: ${data.phone}${data.phoneExt ? `, extension ${data.phoneExt}` : ''}.`);
-    if (data.email) parts.push(`Email: ${spokenEmail(data.email)}.`);
+    // A spelled address is not pronounced either (it usually holds the same hard name): only the part after the at sign is said.
+    if (data.email) parts.push(`Email: ${emailSpelledOut ? `as you spelled it, at ${spokenEmail(data.email.split("@")[1])}` : spokenEmail(data.email)}.`);
     if (data.address) parts.push(`Address: ${addressLine()}.`);
     const sys = systemLine();
     if (sys) parts.push(`System: ${sys}.`);
@@ -1202,11 +1204,12 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       intakeLog('field_parse', { field: 'last_name', source: 'spelled' });
     } else if (data.lastName && (turn.lastParsed || (changed.includes('name') && spelledIn(t, data.lastName)))) nameSpelled = true;
     // An address spelled without being asked is as good as one spelled when asked.
+    if (turn.emailParsed && data.email) emailSpelledOut = true;
     if (turn.emailParsed && data.email && pendingKey !== 'email_spelling') emailSure = emailIsPlain(data.email, t, nameSpelled ? data.lastName : '');
     // The email was spelled when asked, or came out the same on a second try: it is not asked about again.
     let emailSpelledNow = false;
     if (pendingKey === 'email_spelling' && data.email && turn.fields.some((x) => x.k === 'email') && (turn.emailSpelled || turn.emailParsed || changed.includes('email') || (attempts.email_spelling || 0) >= 1)) {
-      emailSure = true; emailSpelledNow = true;
+      emailSure = true; emailSpelledNow = true; emailSpelledOut = true;
       intakeLog('field_parse', { field: 'email', source: turn.emailSpelled || changed.includes('email') ? 'spelled' : 'repeated' });
       if (!turn.emailSpelled && !changed.includes('email')) notes.push('email was said twice but not spelled: confirm it on the callback');
       const fn = firstNameFromEmail(data.firstName, data.email);
