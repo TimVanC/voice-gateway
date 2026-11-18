@@ -43,10 +43,10 @@ const RELAY_SILENCE_MS = Number(process.env.RELAY_SILENCE_MS ?? 9000);
 // Off since Nov 18 2026: on a real call the "Okay." before every answer sounded out of place.
 const RELAY_EARLY_ACK_MS = Number(process.env.RELAY_EARLY_ACK_MS ?? -1);
 // Ava was cut off and no caller words followed (her own voice echoing back, a small noise): she says the line again after this long.
-// Twilio's own echo filter and unfinished prompts: both off by default. With both on (and sensitivity low) a real test call
-// lost whole caller answers (Nov 18 2026: "No email, just call me" arrived as "me.").
+// Twilio's own echo filter is off: with it on a real test call
+// lost whole caller answers (Nov 18 2026: "No email, just call me" arrived as "me."). Unfinished prompts are on: they tell us the caller is still talking (a long spelling no longer gets "Are you still there?").
 const RELAY_ECHO_FILTER = (process.env.RELAY_ECHO_FILTER || '').toLowerCase() === 'on' ? 'true' : 'false';
-const RELAY_PARTIAL_PROMPTS = (process.env.RELAY_PARTIAL_PROMPTS || '').toLowerCase() === 'on' ? 'true' : 'false';
+const RELAY_PARTIAL_PROMPTS = (process.env.RELAY_PARTIAL_PROMPTS || 'on').toLowerCase() === 'on' ? 'true' : 'false';
 // Without unfinished prompts there is no sign the caller is still talking, so the wait is longer.
 const RELAY_RESAY_MS = Number(process.env.RELAY_RESAY_MS ?? (RELAY_PARTIAL_PROMPTS === 'true' ? 2500 : 4500));
 const SPEECH_MS_PER_CHAR = Number(process.env.RELAY_SPEECH_MS_PER_CHAR ?? 75);

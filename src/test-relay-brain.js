@@ -462,6 +462,30 @@ const f = (k, v) => ({ k, v });
     check('no spelling question after a spelled address', has(o.say, 'spell'), false);
   }
 
+  console.log('\n🧪 A spelled email that arrives in two breaths is one email, and never a name');
+  {
+    const a = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'rattling noise')] }]);
+    await a.brain.handle('My furnace is making a rattling noise.');
+    await a.brain.handle('No, none of that.');
+    await a.brain.handle('Maria Lopez.');
+    await a.brain.handle('973-555-0127.');
+    let o = await a.brain.handle('It is t v a n c a u w e n b e r g e.');
+    check('Ava waits for the rest of the address', Boolean(o.wait), true);
+    o = await a.brain.handle('at g mail dot com.');
+    check('the two breaths make one email', a.brain.getData().email, 'tvancauwenberge@gmail.com');
+    check('the last name is untouched', a.brain.getData().lastName, 'Lopez');
+    check('Ava moves on without asking again', has(o.say, 'email') || has(o.say, 'spell'), false);
+
+    const b = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'rattling noise')] }]);
+    await b.brain.handle('My furnace is making a rattling noise.');
+    await b.brain.handle('No, none of that.');
+    await b.brain.handle('Maria Lopez.');
+    await b.brain.handle('973-555-0127.');
+    await b.brain.handle('D, K, O, W, A, L, C, Z, Y, K.');
+    await b.brain.handle('Gmail dot com.');
+    check('the rest given without the word "at"', b.brain.getData().email, 'dkowalczyk@gmail.com');
+  }
+
   console.log('\n🧪 No spelling loop: asked at most twice, never again once spelled');
   {
     const reads = [{ fields: [f('intent', 'hvac_service'), f('symptoms', 'rattling noise')] }]; // the bare name needs no model read

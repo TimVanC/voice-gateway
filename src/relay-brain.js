@@ -356,6 +356,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   let misses = 0; // caller turns in a row that moved nothing forward
   let helloTurns = 0;
   let phonePieces = 0;
+  let emailPieces = 0;
   let messageIntro = false;
   let talkedOver = false;
   let helloWaited = false;
@@ -1028,6 +1029,19 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         return { wait: true, nudgeMs: 2500, nudge: REASK.phone };
       }
     }
+    if (stage === 'intake' && lastSlot === 'email' && !/\?/.test(said)) {
+      const hasAt = (s) => /(^|\s)at\s|@/i.test(s);
+      // The rest came without the word "at" ("gmail dot com"): it goes after the letters.
+      if (carry && !hasAt(`${carry} ${said}`) && /\bdot\s+\w+/i.test(said)) carry = `${carry} at`;
+      // "It is t, v, a, n ... g, e" and a breath before "at gmail dot com": the address is half given. Wait for the rest
+      // (real test call, Nov 18 2026: the letters alone were read as a last name).
+      const soFar = carry ? `${carry} ${said}` : said;
+      if (!hasAt(soFar) && emailPieces < 2 && parseEmailSpelling(soFar)) {
+        emailPieces++;
+        carry = soFar;
+        return { wait: true, nudgeMs: 3000, nudge: 'And what comes after the at sign?' };
+      }
+    }
     let t = carry ? `${carry} ${said}` : said;
     carry = '';
     let lower = t.toLowerCase().replace(/[‘’]/g, "'");
@@ -1091,6 +1105,9 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     if (spelledAddress) {
       turn.fields = turn.fields.filter((x) => x.k !== 'email').concat([{ k: 'email', v: spelledAddress }]);
       turn.emailParsed = true;
+    } else if (stage === 'intake' && (lastSlot === 'email' || lastSlot === 'email_spelling')) {
+      // Letters spelled when the email was asked for are the email, never a name.
+      if (!/\bname\b/i.test(t) && nameFromSpelling(t, '', '')) turn.fields = turn.fields.filter((x) => x.k !== 'first_name' && x.k !== 'last_name');
     } else if (stage === 'intake' && !turn.spelled && (lastSlot === 'name' || lastSlot === 'last_name' || lastSlot === 'name_spelling' || turn.fields.some((x) => x.k === 'last_name'))) {
       const read = (k) => (turn.fields.find((x) => x.k === k) || {}).v || '';
       const nm = nameFromSpelling(t, read('first_name') || (lastSlot === 'name' ? '' : data.firstName || ''), read('last_name') || (lastSlot === 'name_spelling' ? data.lastName || '' : ''));
