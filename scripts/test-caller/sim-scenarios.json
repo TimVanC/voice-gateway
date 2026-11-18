@@ -1279,6 +1279,82 @@
           "phone": "9735550471"
         }
       }
+    },
+    {
+      "id": "spell-misheard-surname",
+      "description": "The line garbles an uncommon surname; the caller spells it when asked.",
+      "persona": "Priya Iyer, homeowner. Gas furnace not heating since last night, completely out. No smoke, gas smell or sparks. Address 31 Walnut Street, Livingston, New Jersey 07039. Phone 973-555-0164. Email priya at example dot com. Available Thursday afternoon. When asked for your name, say exactly 'Priya Ayar' (the phone line garbles your surname). When asked to spell your last name, say exactly 'I, Y, E, R.' Polite, brief.",
+      "opening": "Hi, my furnace isn't heating, it's been out since last night.",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Priya",
+          "lastName": "Iyer",
+          "phone": "9735550164",
+          "address": "31 Walnut"
+        }
+      }
+    },
+    {
+      "id": "spell-two-word-surname",
+      "description": "A long two-word surname, spelled with \"as in\" and no \"space\".",
+      "persona": "Tim Van Cauwenberge (that is how your name is written). Central air blowing warm since Monday, still running. No smoke, gas smell or sparks. Address 8 Orchard Road, Chatham, New Jersey 07928. Phone 973-555-0119. Email tim at example dot com. Available Friday morning. The phone line garbles your surname, so when asked for your name, say exactly 'Tim Van Cowenberg'. When asked to spell your last name, say exactly 'V as in Victor, A, N, C, A, U, W, E, N, B, E, R, G, E.' When the details are read back, 'Van Cauwenberge' is correct: confirm it. Easygoing.",
+      "opening": "Hey, my AC is blowing warm air.",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Tim",
+          "lastName": "Van Cauwenberge",
+          "phone": "9735550119"
+        }
+      }
+    },
+    {
+      "id": "spell-in-pieces",
+      "description": "The spelling arrives in pieces with pauses.",
+      "persona": "Oleksandr Petrenko. Boiler making a banging noise since yesterday, still heating. No smoke, gas smell or sparks. Address 77 Maple Avenue, Morristown, New Jersey 07960. Phone 862-555-0133. No email, you do not use one. Available any weekday after 4. When asked to spell your last name, say exactly 'P, E, T. R, E, N. K, O.' Patient, short answers.",
+      "opening": "Hello, my boiler is making a banging noise.",
+      "split": "all",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Oleksandr",
+          "lastName": "Petrenko",
+          "phone": "8625550133"
+        }
+      }
+    },
+    {
+      "id": "spell-refuses",
+      "description": "The caller will not spell the name; Ava moves on.",
+      "persona": "Marek Wojciechowski. Wants a yearly tune-up for his furnace, nothing is wrong. Address 5 Cedar Court, Summit, New Jersey 07901. Phone 908-555-0188. Email marek at example dot com. Available Saturday morning. You never spell anything out and never say individual letters. If asked to spell your last name, say exactly 'Oh, it is just how it sounds.' the first time and exactly 'I would rather not go through all that.' the second time. Otherwise cooperative.",
+      "opening": "Hi, I'd like to book a tune-up for my furnace.",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Marek",
+          "phone": "9085550188"
+        }
+      }
+    },
+    {
+      "id": "spell-corrects-readback",
+      "description": "Ava reads the letters back and the caller fixes one.",
+      "persona": "Chidi Nwosu. Heat pump not heating since this morning, completely out. No smoke, gas smell or sparks. Address 19 Grove Street, Maplewood, New Jersey 07040. Phone 973-555-0155. Email chidi at example dot com. Available tomorrow morning. When asked to spell your last name, say exactly 'N, W, O, S, O.' (you misspeak). When Ava reads the letters back, correct her before answering anything else: say exactly 'No, it is N, W, O, S, U.' Then answer her questions normally.",
+      "opening": "Hi, my heat pump stopped heating this morning.",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Chidi",
+          "lastName": "Nwosu",
+          "phone": "9735550155"
+        }
+      }
     }
   ]
 }

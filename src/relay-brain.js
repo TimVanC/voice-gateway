@@ -33,6 +33,7 @@ const { GREETING, INTENT_PROMPTS, SAFETY, CALLER_INFO, DETAILS, ADDRESS, AVAILAB
 const { detectSafetyEmergency, isConfirmation, isNothingElse } = require('./state/call-state-machine');
 const { detectRealPersonRequest, classifyIntent } = require('./utils/intent-classifier');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
+const { SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, spelledIn, lettersLine } = require('./name-spelling');
 
 const EXTRACT_TIMEOUT_MS = Number(process.env.RELAY_BRAIN_TIMEOUT_MS || 3500);
 
@@ -78,7 +79,7 @@ You are given what is already on file, the last thing Ava said, and the caller's
 List every fact the caller stated in THIS turn, including facts Ava did not ask for and corrections of facts already on file (give the corrected value in full). Only what the caller said: never guess, never work a value out from something else (no name taken from an email address, no age worked out from a year, no "residential" unless they said home or house), never copy from "on file". A turn with no facts has an empty list. Keys:
 - intent: give it whenever the caller's need is evident, even if they never name a category (a furnace that is out is hvac_service). If they only say "HVAC", "heating" or "cooling" without saying whether it is a repair or a new system, use hvac_service. Values: hvac_service (repair, no heat, no cooling, a noise, a leak, or a tune-up or maintenance visit for heating or cooling) | hvac_installation_or_upgrade (a new system, a replacement, a quote for one) | generator (anything about a generator, except the price of its service plan) | membership (Home Comfort Plan, maintenance plan or membership, plan pricing, generator service plan pricing) | energy_efficiency_program | existing_project (a job RSE has already started or quoted: the crew did not show, status of an installation) | other_out_of_scope (a SERVICE RSE does not provide: solar, plumbing, water heaters, electrical work, roofing). A billing or invoice question, a job inquiry, a vendor, paperwork, or any other matter for the office is not a service request: give no intent and put the request in help_needed.
 - out_of_scope_topic: what they wanted, two or three words ("solar panels")
-- first_name, last_name: as a person writes them. Keep particles and apostrophes (Van Cauwenberge, O'Brien, De La Cruz). Join spelled-out letters into the name. Never a word that is not a name.
+- first_name, last_name: as a person writes them. Keep particles and apostrophes (Van Cauwenberge, O'Brien, De La Cruz). Join spelled-out letters into the name. When Ava asked for the spelling, give last_name exactly as the caller spelled it, letter for letter ("B as in boy" is the letter B, "double L" is LL, "space" or "new word" starts a new word). Never a word that is not a name.
 - phone: the ten digits only. phone_ext: extension digits.
 - email: the written address in lower case. "j underscore tran eighty eight at proton mail dot com" is j_tran88@protonmail.com. Spelled letters are joined: "r, p, a, t, e, l at gmail dot com" is rpatel@gmail.com. Words said separately before the "at" are joined with nothing between them, and a dot, underscore or dash goes in only where the caller said that word: "maria lopez at example dot com" is marialopez@example.com.
 - street: house number and street name only, digits for the number ("four fifteen Bloomfield Avenue" is 415 Bloomfield Avenue). unit: Apt 4B, Suite 210. city. state: two letters. zip: five digits.
@@ -163,6 +164,7 @@ const IN_SCOPE_TOPIC = /\b(energy efficiency|efficiency program|heat\w*|cool\w*|
 const HOLD_ON = /\b(hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|minute|moment)|give me a (sec|second|minute|moment)|let me (see|think|check|look|find|grab|get)|bear with me)\b/i;
 const FILLER_ONLY = /^(um+|uh+|er+|hmm+|mm+|well|so|oh|okay|ok|sure|yeah|yes|yep|right|alright|and|it'?s|the|my)([\s,.]+(um+|uh+|er+|so|well|okay|ok|and|it'?s|the|my))*[\s,.!]*$/i;
 const FILLER_STRICT = /^(um+|uh+|er+|hmm+|mm+|well|so|oh)([\s,.]+(um+|uh+|er+|so|well))*[\s,.!]*$/i;
+const DONE_WORDS = /^((ok(ay)?|alright|all right|great|perfect|cool|good|got it|thanks?( you)?( so much| very much)?|that'?s (all|it)|bye( now)?|goodbye)[\s,.!]*)+$/i;
 const THANKS_ONLY = /^(thanks?( you)?( so much| very much)?|ok(ay)?|great|perfect|alright|cool|good|wonderful)[\s,.!]*$/i;
 const REPEAT_REQUEST = /^(sorry|pardon( me)?|excuse me|what|huh|come again|say (that )?again|what was that|what did you say|i didn'?t (hear|catch|get) (that|you)|(can|could) you (repeat|say) (that|it)( again)?|repeat that|one more time)[\s,?.!]*(dear|please|again|sorry|hon|honey)?[\s,?.!]*$/i;
 const HELLO_ONLY = /^(hello|hi|hey)[\s?.!,]*((hello|hi|hey|anybody|anyone|there|is anybody there|is anyone there|are you there|can you hear me)[\s?.!,]*)*$/i;
@@ -185,7 +187,7 @@ const FREE_TEXT_SLOTS = { availability: 'availability', symptoms: 'symptoms', st
 // Which fields answer which question: a field the caller was just asked for is taken as given,
 // any other must be found in the caller's own words (see grounding below).
 const SLOT_FIELDS = {
-  name: ['first_name', 'last_name'], last_name: ['last_name', 'first_name'], phone: ['phone', 'phone_ext'], email: ['email'],
+  name: ['first_name', 'last_name'], last_name: ['last_name', 'first_name'], name_spelling: ['last_name'], phone: ['phone', 'phone_ext'], email: ['email'],
   street: ['street', 'unit', 'city', 'state', 'zip'], city: ['city', 'state', 'zip'], zip: ['zip', 'state'], availability: ['availability'],
   system_type: ['system_type', 'system_age'], symptoms: ['symptoms', 'severity', 'start_time'], start_time: ['start_time'], severity: ['severity'],
   generator_type: ['generator_type'], generator_issue: ['generator_issue'], property_type: ['property_type'], brand: ['brand'],
@@ -195,6 +197,7 @@ const REASK = {
   street: "I'll need the house number and street name. What's the address?",
   name: 'Sorry, could I get your first and last name?',
   last_name: 'Sorry, what was your last name?',
+  name_spelling: SPELL_REASK,
   phone: "Sorry, what's the phone number, with the area code?",
   email: 'Sorry, could you say that email once more, slowly?',
   zip: "Sorry, what's the five digit zip code?",
@@ -353,6 +356,9 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   let messageIntro = false;
   let talkedOver = false;
   let helloWaited = false;
+  let answeredAtIntent = false; // a question was answered before the caller said what they need
+  let nameSpelled = false; // the caller spelled the last name, or it is too common to ask
+  let spellFixTurn = -1; // the caller turn at which the spelling was read back (the next turn may correct it)
   let outOfScopeTurns = 0;
   const declined = new Set();
   const prepared = new Map(); // transcript -> promise of a model read started while the turn was still held
@@ -387,6 +393,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     }
     if (!data.firstName) want('name', CALLER_INFO.name, true);
     else want('last_name', 'And your last name?', !data.lastName && !declined.has('name'));
+    // "Smith" is not asked about. "Ayar" (said "Iyer") and "Van Cauwenberge" are: the transcriber writes what it hears.
+    want('name_spelling', SPELL_QUESTION, Boolean(data.firstName && data.lastName) && !nameSpelled && needsSpelling(data.lastName));
     want('phone', CALLER_INFO.phone, !phoneGiven);
     const message = !data.intent; // a message for the office: no email, no address
     want('email', CALLER_INFO.email.primary, !data.email && !message);
@@ -443,7 +451,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     switch (lastSlot) {
       case 'intent': return callerTurns ? STATES.INTENT : STATES.GREETING;
       case 'safety': return STATES.SAFETY_CHECK;
-      case 'name': case 'last_name': return STATES.NAME;
+      case 'name': case 'last_name': case 'name_spelling': return STATES.NAME;
       case 'phone': return STATES.PHONE;
       case 'email': return STATES.EMAIL;
       case 'street': case 'city': case 'zip': return STATES.ADDRESS;
@@ -484,12 +492,12 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   }
 
   /** Apply the model's fields; returns the labels whose stored value changed and those restated unchanged. */
-  function apply(fields, transcript, pendingKey) {
+  function apply(fields, transcript, pendingKey, also = []) {
     const changed = [];
     const same = [];
     const d = data.details;
     const g = grounding(transcript);
-    const solicited = SLOT_FIELDS[pendingKey] || [];
+    const solicited = (SLOT_FIELDS[pendingKey] || []).concat(also);
     const set = (label, obj, prop, value) => {
       if (value == null || value === '') return;
       if (String(obj[prop] || '').toLowerCase() === String(value).toLowerCase()) { if (!same.includes(label)) same.push(label); return; }
@@ -527,7 +535,16 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         }
         case 'out_of_scope_topic': data.outOfScopeTopic = noDot(v).toLowerCase(); break;
         case 'first_name': set('name', data, 'firstName', titleName(v)); data._nameLocked = true; break;
-        case 'last_name': set('name', data, 'lastName', titleName(v)); data._nameLocked = true; break;
+        case 'last_name': {
+          const nv = titleName(v);
+          if (nameSpelled && !also.includes('last_name') && pendingKey !== 'name_spelling' && data.lastName && nv.toLowerCase() !== data.lastName.toLowerCase() && soundsAlike(nv, data.lastName) && !spelledIn(transcript, nv)) {
+            log(`🧹 Last name was spelled ${data.lastName}; "${nv}" is how it sounds, kept as spelled`);
+            if (!same.includes('name')) same.push('name');
+            break;
+          }
+          set('name', data, 'lastName', nv); data._nameLocked = true;
+          break;
+        }
         case 'phone': {
           // "Ninety-three, five fifty-five, zero one sixty-two" is nine digits; the model made a tenth up.
           // The number must be in the caller's words (or complete the one on file when they correct part of it).
@@ -676,6 +693,15 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         return { fields: [{ k: 'first_name', v: m[1] }, { k: 'last_name', v: m[2] }], flags: [], reply: '' };
       }
     }
+    if (stage === 'intake' && lastSlot === 'name_spelling') {
+      const sp = parseSpelling(t, data.lastName);
+      if (sp) return { fields: [{ k: 'last_name', v: sp }], flags: [], reply: '', spelled: true };
+    }
+    // Ava has just read the letters back and the caller puts one right: "No, it's I, Y, E, R."
+    if (stage === 'intake' && spellFixTurn >= 0 && callerTurns - spellFixTurn <= 1 && /^(no|nope|not quite|sorry|actually|wait)\b/.test(lower)) {
+      const sp = parseSpelling(t, data.lastName);
+      if (sp && sp.toLowerCase() !== String(data.lastName || '').toLowerCase()) return { fields: [{ k: 'last_name', v: sp }], flags: [], reply: '', spelled: true };
+    }
     if (stage === 'intake' && lastSlot === 'phone') {
       const spoken = normalizeSpokenNumbers(t, { cardinals: true });
       const phone = normalizePhone(spoken);
@@ -780,7 +806,10 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     const priced = ASKS_PRICE.test(lower) && aboutPlan;
     if (priced) r = planPriceLine(lower);
     const hours = ASKS_HOURS.test(lower);
-    if (hours) r = OFFICE_HOURS_LINE;
+    // "Are you open on Saturday?" gets the Saturday answer, not the whole week again.
+    if (hours) r = /\bsundays?\b/.test(lower) ? "No, we're closed Sunday. We're open Monday to Friday, 9 to 5, and Saturday 9 to noon."
+      : /\bsaturdays?\b/.test(lower) ? "Yes, we're open Saturday from 9 to noon."
+        : /\bweekends?\b/.test(lower) ? "We're open Saturday from 9 to noon, and closed Sunday." : OFFICE_HOURS_LINE;
     if (!r) return '';
     if (!(asked || priced || hours || UPSET.test(lower) || SMALL_TALK.test(lower) || flags.has('asks_if_human'))) return '';
     if (/\b(technician|tech|appointment|schedule[ds]?|booked)\b/i.test(r)) return '';
@@ -905,7 +934,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   function readBack(labels, { spell = false } = {}) {
     const out = [];
     for (const label of labels) {
-      if (label === 'name') out.push(`The name is ${[data.firstName, data.lastName].filter(Boolean).join(' ')}.`);
+      if (label === 'name') out.push(`The name is ${[data.firstName, data.lastName].filter(Boolean).join(' ')}${spell && data.lastName && needsSpelling(data.lastName) ? `, last name spelled ${lettersLine(data.lastName)}` : ''}.`);
       else if (label === 'phone' && data.phone) out.push(`The phone is ${data.phone}${data.phoneExt ? `, extension ${data.phoneExt}` : ''}.`);
       else if (label === 'email' && data.email) out.push(`The email is ${spell ? spelledEmail(data.email) : spokenEmail(data.email)}.`);
       else if (label === 'address' && data.address) out.push(`The address is ${addressLine()}.`);
@@ -961,9 +990,25 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         return { wait: true, nudgeMs: 2500, nudge: REASK.phone };
       }
     }
-    const t = carry ? `${carry} ${said}` : said;
+    let t = carry ? `${carry} ${said}` : said;
     carry = '';
-    const lower = t.toLowerCase().replace(/[‘’]/g, "'");
+    let lower = t.toLowerCase().replace(/[‘’]/g, "'");
+
+    // Ava has just read the letters back and the caller puts one right, often in the same breath as the
+    // next answer: "No, it is N, W, O, S, U. My phone number is 973-555-0155."
+    let spellFixLine = '';
+    if (stage === 'intake' && spellFixTurn >= 0 && callerTurns - spellFixTurn === 1 && /^(no|nope|not quite|sorry|actually|wait)\b/.test(lower)) {
+      const fix = leadingSpelling(t, data.lastName);
+      if (fix && fix.name.toLowerCase() !== String(data.lastName || '').toLowerCase()) {
+        data.lastName = fix.name;
+        spellFixTurn = callerTurns;
+        intakeLog('field_parse', { field: 'last_name', source: 'spelling_corrected' });
+        spellFixLine = `Sorry, that's ${lettersLine(data.lastName)}.`;
+        if (!fix.rest) return say(`${spellFixLine} ${lastQuestion}`);
+        t = fix.rest;
+        lower = t.toLowerCase().replace(/[‘’]/g, "'");
+      }
+    }
 
     // "Is the number you're calling from the best one?" (asked after two failed tries at the number).
     if (pendingCallerIdConfirm) {
@@ -1077,7 +1122,13 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     // up when the caller plainly refuses, and never on words spoken over Ava's question.
     if (has('declined') && (overlap || ((lastSlot === 'name' || lastSlot === 'last_name' || lastSlot === 'phone') && !/\b(rather not|prefer not|don'?t want|do not want|not (going to|gonna|giving)|won'?t (give|tell|say)|none of your|no thanks|skip)\b/i.test(lower)))) flags.delete('declined');
     const before = plan()[0];
-    let { changed, same } = apply(turn.fields, t, pendingKey);
+    let { changed, same } = apply(turn.fields, t, pendingKey, turn.spelled ? ['last_name'] : []);
+    // The last name was spelled (when asked, or in the same breath as the name): it is not asked about again.
+    let spelledNow = false;
+    if (stage === 'intake' && data.lastName && (turn.spelled || (pendingKey === 'name_spelling' && turn.fields.some((x) => x.k === 'last_name')))) {
+      nameSpelled = true; spelledNow = true; spellFixTurn = callerTurns;
+      intakeLog('field_parse', { field: 'last_name', source: 'spelled' });
+    } else if (changed.includes('name') && data.lastName && spelledIn(t, data.lastName)) nameSpelled = true;
     if (has('routine_maintenance') && !PROBLEM.test(lower)) routine = true;
     assist(lower, extractFailures > 0);
     // Billing, a job inquiry, a vendor: no call type fits, so Ava takes a message (name, number, what it is about).
@@ -1159,6 +1210,11 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         outcome = 'no_request';
         return finish("I'm not able to help without a few details. If you need heating, cooling or generator service, call us back anytime. Goodbye.", 'no_request');
       }
+      // The caller only wanted an answer (the hours, a price) and has it: say goodbye, do not press for a request.
+      if (next.key === 'intent' && answeredAtIntent && !reply && (DONE_WORDS.test(lower.trim()) || has('goodbye') || isNothingElse(lower) || /^(no|nope|nah)\b/.test(lower) || /\b(that'?s (all|it)|just (wanted|needed|checking|calling|a question))\b/.test(lower))) {
+        outcome = 'no_request';
+        return finish("You're welcome. Thanks for calling RSE Energy. Have a good one.", 'no_request');
+      }
       if (next.key === 'intent' && (has('greeting_only') || has('unclear')) && !reply) {
         idleTurns++;
         if (has('greeting_only')) helloTurns++;
@@ -1170,6 +1226,14 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         return finish(helloTurns >= 3 ? "I'm sorry, we seem to have a bad connection. Please call us back. Goodbye." : "It sounds like you don't need us right now. If you do, call us back anytime. Goodbye.", 'no_request');
       }
       if (has('greeting_only')) return say(`I'm here. ${lastQuestion}`);
+      if (reply && next.key === 'intent') {
+        // The second answer is followed by a lighter question than the list of services.
+        const follow = answeredAtIntent ? 'Is there anything I can help you with today?' : next.q;
+        answeredAtIntent = true;
+        misses = Math.max(0, misses - 1); // a question answered is not a failed turn
+        lastQuestion = follow;
+        return say(`${reply} ${follow}`);
+      }
       if (reply) return say(`${reply} ${next.q}`); // a question answered; the pending one is asked again
       // A hedged answer ("there was a burning smell earlier"): ask plainly whether it is there now.
       if (next.key === 'safety') return safety === 'recheck' && !recheckAsked ? ask(next, '') : say(`Sorry, I didn't catch that. ${next.q}`);
@@ -1180,6 +1244,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       if (attempts[next.key] >= 2) {
         // Two tries: move on without it. The office has the rest and the caller's number.
         if (next.key === 'intent') intentGivenUp = true; else declined.add(next.key);
+        if (next.key === 'name_spelling') notes.push('last name was not spelled: check the spelling on the callback');
         if (next.key === 'phone' && !callerIdAsked && normalizePhone(callerNumber)) {
           callerIdAsked = true;
           pendingCallerIdConfirm = true;
@@ -1196,6 +1261,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
 
     let prefix = reply;
     if (messageIntro) { messageIntro = false; prefix = `${reply ? `${reply} ` : ''}I can take a message for the office, or you can press 0 for a team member.`; }
+    if (spellFixLine) prefix = `${spellFixLine}${reply ? ` ${reply}` : ''}`;
+    if (spelledNow) prefix = `${reply ? `${reply} ` : ''}Thanks, that's ${lettersLine(data.lastName)}.`;
     if (!prefix) {
       if (before && before.key === 'safety' && safety === 'cleared' && lastSlot === 'safety') prefix = SAFETY.all_clear;
       else if (has('no_email') || has('declined')) prefix = 'No problem.';
@@ -1359,6 +1426,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     nudged: (text) => { carry = ''; lastSaid = text; return { say: text }; },
     /** For the relay's repeat handling and tests. */
     lastQuestion: () => lastQuestion,
+    /** What Ava is waiting on (the relay gives a spelling more time between letters). */
+    slot: () => (stage === 'intake' ? lastSlot : stage),
     recapPending: () => stage === 'recap',
   };
 }

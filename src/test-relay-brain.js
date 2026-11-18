@@ -204,6 +204,106 @@ const f = (k, v) => ({ k, v });
     check('and yes takes it', o.transfer, true);
   }
 
+  console.log('\n🧪 Spelling the last name: asked only when the name is not a common one');
+  {
+    // A common name: no spelling question.
+    let { brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'no heat')] }]);
+    await brain.handle('My furnace has no heat.');
+    await brain.handle('No, none of that.');
+    let o = await brain.handle('John Smith.');
+    check('Smith is not asked to spell', has(o.say, 'phone number') && !has(o.say, 'spell'), true);
+
+    // A name the transcriber got wrong: asked once, the letters win, and they are read back.
+    ({ brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'no heat')] }]));
+    await brain.handle('My furnace has no heat.');
+    await brain.handle('No, none of that.');
+    o = await brain.handle('Priya Ayar.');
+    check('an uncommon last name is asked to be spelled', has(o.say, 'Could you spell your last name'), true);
+    check('the relay is told a spelling is pending', brain.slot(), 'name_spelling');
+    o = await brain.handle('I, Y, E, R.');
+    check('the letters are read back, then the phone question', has(o.say, "that's I, Y, E, R.") && has(o.say, 'phone number'), true);
+    check('the spelled name is stored', brain.getData().lastName, 'Iyer');
+    o = await brain.handle('No, it is I, Y, A, R.');
+    check('a correction right after the read-back is taken', [brain.getData().lastName, has(o.say, "that's I, Y, A, R."), has(o.say, 'phone number')], ['Iyar', true, true]);
+    o = await brain.handle('973-555-0142.');
+    check('and the call carries on', has(o.say, 'email'), true);
+
+    // Two words, spelled without saying "space": the space goes where it was heard.
+    ({ brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'no heat')] }, { fields: [f('first_name', 'Tim'), f('last_name', 'Van Cowenberg')] }]));
+    await brain.handle('My furnace has no heat.');
+    await brain.handle('No, none of that.');
+    o = await brain.handle("Yeah it's Tim, last name Van Cowenberg.");
+    check('a two-word last name is asked to be spelled', has(o.say, 'Could you spell your last name'), true);
+    o = await brain.handle('V as in Victor, A, N, C, A, U, W, E, N, B, E, R, G, E.');
+    check('Van Cauwenberge', brain.getData().lastName, 'Van Cauwenberge');
+
+    // Already spelled in the same breath: not asked again.
+    ({ brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'no heat')] }, { fields: [f('first_name', 'Priya'), f('last_name', 'Iyer')] }]));
+    await brain.handle('My furnace has no heat.');
+    await brain.handle('No, none of that.');
+    o = await brain.handle("It's Priya Iyer, that's I Y E R.");
+    check('a name spelled up front is not asked about', has(o.say, 'phone number') && !has(o.say, 'spell'), true);
+
+    // The caller will not spell it: asked twice at most, then a note for the office.
+    ({ brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'no heat')] }, {}, {}]));
+    await brain.handle('My furnace has no heat.');
+    await brain.handle('No, none of that.');
+    await brain.handle('Marek Wojciechowski.');
+    o = await brain.handle('Just how it sounds.');
+    check('asked once more', has(o.say, 'one letter at a time'), true);
+    o = await brain.handle('I really could not tell you right now.');
+    check('then Ava moves on', has(o.say, 'phone number'), true);
+    check('the name as heard is kept', brain.getData().lastName, 'Wojciechowski');
+    check('and the office is told', /last name was not spelled/.test(JSON.stringify(brain.getData())), true);
+
+    // The model reads a spelling the pattern could not.
+    ({ brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'no heat')] }, { fields: [f('last_name', 'Nwosu')] }]));
+    await brain.handle('My furnace has no heat.');
+    await brain.handle('No, none of that.');
+    await brain.handle('Chidi Nosu.');
+    o = await brain.handle('Okay so it starts with an N then W then O S U.');
+    check('a spelling read by the model is stored', [brain.getData().lastName, has(o.say, "that's N, W, O, S, U.")], ['Nwosu', true]);
+  }
+
+  console.log('\n🧪 Spelling: a correction said with the next answer; a spelled name survives the read-back');
+  {
+    let { brain } = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'no heat')] }]);
+    await brain.handle('My furnace has no heat.');
+    await brain.handle('No, none of that.');
+    await brain.handle('Chidi Nosu.');
+    await brain.handle('N, W, O, S, O.');
+    let o = await brain.handle('No, it is N, W, O, S, U. My phone number is 973-555-0155.');
+    check('the fix and the phone number are both taken', [brain.getData().lastName, brain.getData().phone], ['Nwosu', '973-555-0155']);
+    check('Ava says the letters once more and moves on', has(o.say, "Sorry, that's N, W, O, S, U.") && has(o.say, 'email'), true);
+
+    ({ brain } = brainWith([
+      { fields: [f('intent', 'membership')] },
+      { fields: [f('first_name', 'Tim'), f('last_name', 'Van Cowenberg')] },
+      { fields: [f('email', 'tim@example.com')] },
+      { fields: [f('coverage_type', 'yearly')] },
+      { fields: [f('system_count', '1')] },
+      { fields: [f('street', '8 Orchard Road'), f('city', 'Chatham'), f('zip', '07928')] },
+      { fields: [f('availability', 'Friday morning')] },
+      { fields: [f('last_name', 'Van Cowenberg')] },
+      { fields: [f('last_name', 'Smith')] },
+    ]));
+    await brain.handle('I want to sign up for the maintenance plan.');
+    await brain.handle('Tim, last name Van Cowenberg.');
+    await brain.handle('V, A, N, space, C, A, U, W, E, N, B, E, R, G, E.');
+    await brain.handle('973-555-0119.');
+    await brain.handle('tim at example dot com');
+    await brain.handle('Yearly billing please.');
+    await brain.handle('Just the one system.');
+    await brain.handle('8 Orchard Road, Chatham, 07928.');
+    o = await brain.handle('Friday morning.');
+    check('the read-back has the spelled name', has(o.say, 'Name: Tim Van Cauwenberge.'), true);
+    o = await brain.handle('The last name is Van Cowenberg.');
+    check('the name said aloud again does not replace the spelling', brain.getData().lastName, 'Van Cauwenberge');
+    check('Ava says how she has it spelled', has(o.say, 'last name spelled V, A, N, space, C, A, U'), true);
+    o = await brain.handle('Actually put it under Smith, my wife’s name.');
+    check('a different name is still a correction', brain.getData().lastName, 'Smith');
+  }
+
   console.log(failures ? `\n❌ ${failures} check(s) failed` : '\n✅ All relay-brain checks passed');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

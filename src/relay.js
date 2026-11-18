@@ -57,6 +57,7 @@ const RELAY_EOT_THRESHOLD = process.env.RELAY_EOT_THRESHOLD || '0.8';
 // them ("171 Main Street," + "Madison, New Jersey." were answered apart).
 // Same idea as the pipeline's TURN_HOLD_MS.
 const RELAY_TURN_HOLD_MS = Number(process.env.RELAY_TURN_HOLD_MS ?? 700);
+const RELAY_SPELL_HOLD_MS = Number(process.env.RELAY_SPELL_HOLD_MS ?? 1500);
 // A turn that ends like a finished sentence ("Sure. It's Daniel Brooks.") is
 // held only this long; the full hold is for turns that trail off ("171 Main
 // Street,", "What's the"). The full hold on every turn made each reply 700 ms
@@ -242,7 +243,9 @@ class RelaySession {
     if (this.brain && !this.callCompleted && !this.reading) this.brain.prepare(this.held.text);
     // "No." + "That's it." + "Thanks so much.": a one- or two-word turn is often only the start (second demo call).
     const finished = /[.!?]["')\]]*$/.test(this.held.text) && this.held.text.split(/\s+/).length >= 3;
-    this.held.timer = setTimeout(() => this.flushHeld(), finished ? Math.min(RELAY_TURN_HOLD_SHORT_MS, RELAY_TURN_HOLD_MS) : RELAY_TURN_HOLD_MS);
+    // A name being spelled comes in pieces ("V, A, N..." then "C, A, U..."): wait longer for the rest.
+    const spelling = this.brain && typeof this.brain.slot === 'function' && this.brain.slot() === 'name_spelling';
+    this.held.timer = setTimeout(() => this.flushHeld(), spelling ? Math.max(RELAY_SPELL_HOLD_MS, RELAY_TURN_HOLD_MS) : finished ? Math.min(RELAY_TURN_HOLD_SHORT_MS, RELAY_TURN_HOLD_MS) : RELAY_TURN_HOLD_MS);
   }
 
   flushHeld() {
