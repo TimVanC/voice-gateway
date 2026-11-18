@@ -40,7 +40,10 @@ const RELAY_BRAIN = (process.env.RELAY_BRAIN || 'llm').toLowerCase();
 const RELAY_SILENCE_MS = Number(process.env.RELAY_SILENCE_MS ?? 9000);
 // Roughly how long the voice takes to say a line (v4 turbo, measured Nov 2026).
 // How long after a caller turn "Okay." is sent when the turn needs the model (-1 turns it off).
-const RELAY_EARLY_ACK_MS = Number(process.env.RELAY_EARLY_ACK_MS ?? 300);
+// Off since Nov 18 2026: on a real call the "Okay." before every answer sounded out of place.
+const RELAY_EARLY_ACK_MS = Number(process.env.RELAY_EARLY_ACK_MS ?? -1);
+// Ava was cut off and no caller words followed (her own voice echoing back, a small noise): she says the line again after this long.
+const RELAY_RESAY_MS = Number(process.env.RELAY_RESAY_MS ?? 2500);
 const SPEECH_MS_PER_CHAR = Number(process.env.RELAY_SPEECH_MS_PER_CHAR ?? 75);
 const estimateSpeakMs = (text) => (SPEECH_MS_PER_CHAR ? 500 + String(text || '').length * SPEECH_MS_PER_CHAR : 0);
 
@@ -63,7 +66,9 @@ const RELAY_SPELL_HOLD_MS = Number(process.env.RELAY_SPELL_HOLD_MS ?? 1500);
 // Street,", "What's the"). The full hold on every turn made each reply 700 ms
 // late (demo call Nov 9 2026: 1.6 s median from caller to Ava).
 const RELAY_TURN_HOLD_SHORT_MS = Number(process.env.RELAY_TURN_HOLD_SHORT_MS ?? 250);
-const RELAY_INTERRUPT_SENSITIVITY = process.env.RELAY_INTERRUPT_SENSITIVITY || 'medium';
+// "low": only confident, longer speech stops Ava. On "medium" her own voice coming back down the line and small
+// room noises cut her off several times on a real call from a quiet room (Nov 18 2026).
+const RELAY_INTERRUPT_SENSITIVITY = process.env.RELAY_INTERRUPT_SENSITIVITY || 'low';
 // Words the transcriber should expect: the trade's vocabulary and the towns callers live in.
 const HINTS = 'Ava,RSE Energy,HVAC,mini split,ductless,heat pump,furnace,boiler,thermostat,generator,Generac,Cummins,maintenance plan,membership,Home Comfort Plan,Energy Efficiency Program,New Jersey,Montclair,Madison,Morristown,Chatham,Summit,Livingston,Millburn,Short Hills,Maplewood,West Orange,Verona,Caldwell,West Caldwell,Glen Ridge,Bloomfield,Parsippany,Florham Park,Mendham,Bernardsville,Basking Ridge,Denville,Randolph,Boonton,Mountain Lakes,Fairfield,Dover,Chester';
 // Twilio's tokens-played does not always arrive (demo call Nov 9 2026: the
@@ -84,6 +89,7 @@ function relayTwiml({ host, callerNumber }) {
   <Connect action="https://${host}/twilio/relay-ended">
     <ConversationRelay url="wss://${host}/relay"
       welcomeGreeting="${esc(GREETING.primary)}" welcomeGreetingInterruptible="speech"
+      language="en-US" echoPromptFiltering="true" partialPrompts="true"
       ttsProvider="ElevenLabs" voice="${esc(RELAY_VOICE)}"
       transcriptionProvider="Deepgram" speechModel="flux" eotThreshold="${esc(RELAY_EOT_THRESHOLD)}"
       interruptible="any" interruptSensitivity="${esc(RELAY_INTERRUPT_SENSITIVITY)}" ignoreBackchannel="true"
@@ -159,6 +165,7 @@ class RelaySession {
     console.log(`🗣️ Relay says${sinceCaller != null ? ` (${sinceCaller} ms after the caller's text)` : ''}: "${text}"`);
     // The voice gets the spoken form (the recap as sentences, digits one at a time); logs and the transcript keep the text.
     const token = shapeForSpeech(text);
+    this.cutOff = false;
     this.send(interruptible ? { type: 'text', token, last } : { type: 'text', token, last, interruptible: false, preemptible: false });
   }
 
@@ -187,7 +194,12 @@ class RelaySession {
         // Any speech from the caller, finished or not, means the line is not silent.
         this.silences = 0;
         this.clearSilence();
-        if (!msg.last) return; // partial prompts are off; be safe
+        // Unfinished prompts only tell us the caller is talking: after a cut-off, the line is not said again over them.
+        const quiet = () => { if (this.callCompleted) return; if (this.cutOff) this.armResay(); else this.armSilence(''); };
+        if (!msg.last) { quiet(); return; }
+        // Twilio dropped every word as an echo of Ava's own voice: nothing was said.
+        if (!String(msg.voicePrompt || '').trim()) { quiet(); return; }
+        this.cutOff = false;
         this.lastCallerAt = Date.now();
         this.holdTurn(String(msg.voicePrompt || ''));
         break;
@@ -196,8 +208,8 @@ class RelaySession {
         // Cut into the read-back before its end: after the correction the whole read-back is said again.
         if (this.lastWasRecap && !/(right|correct)\?\s*$/i.test(String(msg.utteranceUntilInterrupt || '').trim())) this.recapInterrupted = true;
         this.interruptedSinceSay = true;
-        // The caller is talking; if no words follow (a cough, a door), the silence timer still nudges.
-        if (!this.callCompleted) this.armSilence('');
+        // Something stopped Ava. If no caller words follow (her own voice echoing back, a cough, a door), she says the line again.
+        if (!this.callCompleted) { this.cutOff = true; this.armResay(); }
         // The goodbye is sent uninterruptible; if it was cut off anyway, say it once more.
         if (this.callCompleted && !this.transferRequested && this.goodbyeText && !this.goodbyeRepeated) {
           this.goodbyeRepeated = true;
@@ -337,6 +349,24 @@ class RelaySession {
     }
     this.say(out.spoken || text);
     this.armSilence(shapeForSpeech(text));
+  }
+
+  /** After a cut-off: wait for the caller's words; if none come, say the interrupted line once more (twice at most per line). */
+  armResay() {
+    this.clearSilence();
+    if (!RELAY_RESAY_MS || !this.currentPromptText || this.resayFor === this.currentPromptText && this.resays >= 2) return this.armSilence('');
+    this.silenceTimer = setTimeout(() => {
+      this.silenceTimer = null;
+      if (this.callCompleted || this.held || this.reading || !this.cutOff) return;
+      this.cutOff = false;
+      this.recapInterrupted = false; // nobody corrected anything: the line is simply said again
+      this.interruptedSinceSay = false;
+      if (this.resayFor !== this.currentPromptText) { this.resayFor = this.currentPromptText; this.resays = 0; }
+      this.resays++;
+      console.log(`🔁 Cut off with no caller words: saying the line again (${this.resays})`);
+      this.say(this.currentPromptText);
+      this.armSilence(shapeForSpeech(this.currentPromptText));
+    }, RELAY_RESAY_MS);
   }
 
   // ----- The caller says nothing -----

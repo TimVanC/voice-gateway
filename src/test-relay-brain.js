@@ -221,7 +221,7 @@ const f = (k, v) => ({ k, v });
     check('an uncommon last name is asked to be spelled', has(o.say, 'Could you spell your last name'), true);
     check('the relay is told a spelling is pending', brain.slot(), 'name_spelling');
     o = await brain.handle('I, Y, E, R.');
-    check('the letters are read back, then the phone question', has(o.say, "that's I, Y, E, R.") && has(o.say, 'phone number'), true);
+    check('a short thanks, no letters read back, then the phone question', [o.say.startsWith('Thank you. '), has(o.say, 'I, Y, E, R'), has(o.say, 'phone number')], [true, false, true]);
     check('the spelled name is stored', brain.getData().lastName, 'Iyer');
     o = await brain.handle('No, it is I, Y, A, R.');
     check('a correction right after the read-back is taken', [brain.getData().lastName, has(o.say, "that's I, Y, A, R."), has(o.say, 'phone number')], ['Iyar', true, true]);
@@ -262,7 +262,7 @@ const f = (k, v) => ({ k, v });
     await brain.handle('No, none of that.');
     await brain.handle('Chidi Nosu.');
     o = await brain.handle('Okay so it starts with an N then W then O S U.');
-    check('a spelling read by the model is stored', [brain.getData().lastName, has(o.say, "that's N, W, O, S, U.")], ['Nwosu', true]);
+    check('a spelling read by the model is stored', [brain.getData().lastName, has(o.say, 'Thank you.')], ['Nwosu', true]);
   }
 
   console.log('\n🧪 Spelling: a correction said with the next answer; a spelled name survives the read-back');
@@ -296,7 +296,7 @@ const f = (k, v) => ({ k, v });
     await brain.handle('Just the one system.');
     await brain.handle('8 Orchard Road, Chatham, 07928.');
     o = await brain.handle('Friday morning.');
-    check('the read-back has the spelled name', has(o.say, 'Name: Tim Van Cauwenberge.'), true);
+    check('the read-back does not say the hard surname aloud', [has(o.say, 'Name: Tim, last name as you spelled it.'), has(o.say, 'Cauwenberge')], [true, false]);
     o = await brain.handle('The last name is Van Cowenberg.');
     check('the name said aloud again does not replace the spelling', brain.getData().lastName, 'Van Cauwenberge');
     check('Ava says how she has it spelled', has(o.say, 'last name spelled V, A, N, space, C, A, U'), true);
@@ -356,7 +356,7 @@ const f = (k, v) => ({ k, v });
     o = await brain.handle('R, A, M, E, S, H, dot, I, Y, E, R.');
     check('the email is stored as spelled', brain.getData().email, 'ramesh.iyer@example.com');
     check('the first name follows the spelling', brain.getData().firstName, 'Ramesh');
-    check('Ava thanks the caller and moves on', has(o.say, 'Thanks, got it.') && !has(o.say, 'spell'), true);
+    check('Ava thanks the caller and moves on', has(o.say, 'Thank you.') && !has(o.say, 'spell'), true);
   }
 
   console.log('\n🧪 An everyday email is not spelled, and a caller who will not spell is not pressed');

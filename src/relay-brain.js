@@ -868,9 +868,8 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
 
   // ----- what Ava says ---------------------------------------------------------
   function ack(t, flags) {
-    if (!empathyUsed && URGENT.test(t || '') && !routine && !flags.has('routine_maintenance')) { empathyUsed = true; return 'Sorry to hear that.'; }
-    const acks = ['Got it.', 'Okay.', 'Thanks.'];
-    return acks[ackIndex++ % acks.length];
+    // No filler between questions (Tim, Nov 18 2026: 'Okay', 'Got it', 'Sorry to hear that' sounded out of place on a real call).
+    return '';
   }
   function ask(slot, prefix) {
     lastSlot = slot.key;
@@ -953,7 +952,10 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
   /** The read-back, in the labelled form src/pipeline/speech-shaping.js turns into speech. */
   function recapText(intro) {
     const parts = [intro || CONFIRMATION.intro];
-    const name = [data.firstName, data.lastName].filter(Boolean).join(' ');
+    // A hard surname is not said aloud in the read-back: the voice slid into a Dutch accent on 'Van Cauwenberge' and stayed
+    // there for the rest of it (real call, Nov 18 2026). The caller spelled it; the first name is enough to confirm who this is.
+    const hardName = Boolean(data.lastName) && needsSpelling(data.lastName);
+    const name = hardName ? [data.firstName, nameSpelled ? 'last name as you spelled it' : ''].filter(Boolean).join(', ') : [data.firstName, data.lastName].filter(Boolean).join(' ');
     if (name) parts.push(`Name: ${name}.`);
     if (phoneGiven && data.phone) parts.push(`Phone: ${data.phone}${data.phoneExt ? `, extension ${data.phoneExt}` : ''}.`);
     if (data.email) parts.push(`Email: ${spokenEmail(data.email)}.`);
@@ -1328,8 +1330,9 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     let prefix = reply;
     if (messageIntro) { messageIntro = false; prefix = `${reply ? `${reply} ` : ''}I can take a message for the office, or you can press 0 for a team member.`; }
     if (spellFixLine) prefix = `${spellFixLine}${reply ? ` ${reply}` : ''}`;
-    if (emailSpelledNow) prefix = (reply ? reply + ' ' : '') + 'Thanks, got it.';
-    if (spelledNow) prefix = `${reply ? `${reply} ` : ''}Thanks, that's ${lettersLine(data.lastName)}.`;
+    if (emailSpelledNow) prefix = (reply ? reply + ' ' : '') + 'Thank you.';
+    // No letter-by-letter read-back: it went straight on to the next question, so there was no moment to correct it anyway (Tim, Nov 18 2026).
+    if (spelledNow) prefix = `${reply ? `${reply} ` : ''}Thank you.`;
     if (!prefix) {
       if (before && before.key === 'safety' && safety === 'cleared' && lastSlot === 'safety') prefix = SAFETY.all_clear;
       else if (has('no_email') || has('declined')) prefix = 'No problem.';

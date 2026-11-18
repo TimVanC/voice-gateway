@@ -1412,7 +1412,7 @@
       "expect": {
         "outcome": "completed",
         "neverSays": [
-          "spell"
+          "could you spell"
         ],
         "fields": {
           "intent": "hvac_service",
@@ -1431,7 +1431,7 @@
       "expect": {
         "outcome": "completed",
         "neverSays": [
-          "spell"
+          "could you spell"
         ],
         "fields": {
           "intent": "hvac_service",
