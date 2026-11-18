@@ -43,7 +43,12 @@ const RELAY_SILENCE_MS = Number(process.env.RELAY_SILENCE_MS ?? 9000);
 // Off since Nov 18 2026: on a real call the "Okay." before every answer sounded out of place.
 const RELAY_EARLY_ACK_MS = Number(process.env.RELAY_EARLY_ACK_MS ?? -1);
 // Ava was cut off and no caller words followed (her own voice echoing back, a small noise): she says the line again after this long.
-const RELAY_RESAY_MS = Number(process.env.RELAY_RESAY_MS ?? 2500);
+// Twilio's own echo filter and unfinished prompts: both off by default. With both on (and sensitivity low) a real test call
+// lost whole caller answers (Nov 18 2026: "No email, just call me" arrived as "me.").
+const RELAY_ECHO_FILTER = (process.env.RELAY_ECHO_FILTER || '').toLowerCase() === 'on' ? 'true' : 'false';
+const RELAY_PARTIAL_PROMPTS = (process.env.RELAY_PARTIAL_PROMPTS || '').toLowerCase() === 'on' ? 'true' : 'false';
+// Without unfinished prompts there is no sign the caller is still talking, so the wait is longer.
+const RELAY_RESAY_MS = Number(process.env.RELAY_RESAY_MS ?? (RELAY_PARTIAL_PROMPTS === 'true' ? 2500 : 4500));
 const SPEECH_MS_PER_CHAR = Number(process.env.RELAY_SPEECH_MS_PER_CHAR ?? 75);
 const estimateSpeakMs = (text) => (SPEECH_MS_PER_CHAR ? 500 + String(text || '').length * SPEECH_MS_PER_CHAR : 0);
 
@@ -82,6 +87,29 @@ const SAME_PROMPT_LIMIT = 3;
 
 const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/**
+ * Is this "caller" turn really Ava's own line heard back? Four words or more, at least two thirds of them
+ * found in her line in the same order and close together. ("Yes" and "973..." never qualify: too short, or not hers.)
+ */
+function isEcho(heard, avaLine) {
+  const words = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s']/g, ' ').split(/\s+/).filter(Boolean);
+  const h = words(heard);
+  const a = words(shapeForSpeech(avaLine));
+  if (h.length < 4 || !a.length) return false;
+  // Longest run of heard words found in order in Ava's line, starting anywhere.
+  let best = 0;
+  for (let start = 0; start < a.length; start++) {
+    let at = start;
+    let hit = 0;
+    for (const w of h) {
+      const found = a.indexOf(w, at);
+      if (found >= 0 && found - at <= 2) { hit++; at = found + 1; }
+    }
+    if (hit > best) best = hit;
+  }
+  return best / h.length >= 0.65;
+}
+
 /** The TwiML that hands the call to ConversationRelay. */
 function relayTwiml({ host, callerNumber }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -89,7 +117,7 @@ function relayTwiml({ host, callerNumber }) {
   <Connect action="https://${host}/twilio/relay-ended">
     <ConversationRelay url="wss://${host}/relay"
       welcomeGreeting="${esc(GREETING.primary)}" welcomeGreetingInterruptible="speech"
-      language="en-US" echoPromptFiltering="true" partialPrompts="true"
+      language="en-US" echoPromptFiltering="${RELAY_ECHO_FILTER}" partialPrompts="${RELAY_PARTIAL_PROMPTS}"
       ttsProvider="ElevenLabs" voice="${esc(RELAY_VOICE)}"
       transcriptionProvider="Deepgram" speechModel="flux" eotThreshold="${esc(RELAY_EOT_THRESHOLD)}"
       interruptible="any" interruptSensitivity="${esc(RELAY_INTERRUPT_SENSITIVITY)}" ignoreBackchannel="true"
@@ -199,6 +227,13 @@ class RelaySession {
         if (!msg.last) { quiet(); return; }
         // Twilio dropped every word as an echo of Ava's own voice: nothing was said.
         if (!String(msg.voicePrompt || '').trim()) { quiet(); return; }
+        // Ava was cut off and what came back is her own question ("Do you spell the part of" for "Could you spell the
+        // part before..."): her voice echoing down the line, not the caller. It is not answered; the line is said again.
+        if (this.cutOff && !this.lastWasRecap && !this.callCompleted && isEcho(String(msg.voicePrompt), this.currentPromptText)) {
+          console.log(`🔁 Heard Ava's own words back, ignored: "${String(msg.voicePrompt).slice(0, 60)}"`);
+          this.armResay(900);
+          return;
+        }
         this.cutOff = false;
         this.lastCallerAt = Date.now();
         this.holdTurn(String(msg.voicePrompt || ''));
@@ -352,7 +387,7 @@ class RelaySession {
   }
 
   /** After a cut-off: wait for the caller's words; if none come, say the interrupted line once more (twice at most per line). */
-  armResay() {
+  armResay(afterMs = RELAY_RESAY_MS) {
     this.clearSilence();
     if (!RELAY_RESAY_MS || !this.currentPromptText || this.resayFor === this.currentPromptText && this.resays >= 2) return this.armSilence('');
     this.silenceTimer = setTimeout(() => {
@@ -366,7 +401,7 @@ class RelaySession {
       console.log(`🔁 Cut off with no caller words: saying the line again (${this.resays})`);
       this.say(this.currentPromptText);
       this.armSilence(shapeForSpeech(this.currentPromptText));
-    }, RELAY_RESAY_MS);
+    }, afterMs);
   }
 
   // ----- The caller says nothing -----
@@ -587,4 +622,4 @@ class RelaySession {
   }
 }
 
-module.exports = { relayTwiml, relayEndedTwiml, RelaySession, RELAY_VOICE, RELAY_BRAIN };
+module.exports = { relayTwiml, relayEndedTwiml, RelaySession, RELAY_VOICE, RELAY_BRAIN, isEcho };
