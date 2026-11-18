@@ -244,7 +244,9 @@ class RelaySession {
     // "No." + "That's it." + "Thanks so much.": a one- or two-word turn is often only the start (second demo call).
     const finished = /[.!?]["')\]]*$/.test(this.held.text) && this.held.text.split(/\s+/).length >= 3;
     // A name being spelled comes in pieces ("V, A, N..." then "C, A, U..."): wait longer for the rest.
-    const spelling = this.brain && typeof this.brain.slot === 'function' && ['name_spelling', 'email_spelling'].includes(this.brain.slot());
+    // The same when the caller is spelling without being asked: the turn so far ends in letters said one at a time.
+    const midSpelling = /(^|[\s,.-])[A-Za-z]([\s,.-]+[A-Za-z]){2,}[\s,.]*$/.test(this.held.text);
+    const spelling = midSpelling || (this.brain && typeof this.brain.slot === 'function' && ['name_spelling', 'email_spelling'].includes(this.brain.slot()));
     this.held.timer = setTimeout(() => this.flushHeld(), spelling ? Math.max(RELAY_SPELL_HOLD_MS, RELAY_TURN_HOLD_MS) : finished ? Math.min(RELAY_TURN_HOLD_SHORT_MS, RELAY_TURN_HOLD_MS) : RELAY_TURN_HOLD_MS);
   }
 

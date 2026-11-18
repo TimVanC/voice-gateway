@@ -34,6 +34,7 @@ const { detectSafetyEmergency, isConfirmation, isNothingElse } = require('./stat
 const { detectRealPersonRequest, classifyIntent } = require('./utils/intent-classifier');
 const { normalizeSpokenNumbers } = require('./pipeline/numbers');
 const { EMAIL_SPELL_QUESTION, EMAIL_SPELL_REASK, emailIsPlain, parseEmailSpelling, firstNameFromEmail } = require('./email-spelling');
+const { nameFromSpelling, spelledEmailIn } = require('./unprompted-spelling');
 const { SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, alignEmailToName, spelledIn, lettersLine } = require('./name-spelling');
 
 const EXTRACT_TIMEOUT_MS = Number(process.env.RELAY_BRAIN_TIMEOUT_MS || 3500);
@@ -574,7 +575,7 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
         case 'email': {
           let e = normalizeEmail(v);
           // Spelled out when Ava asked: taken as spelled.
-          if (also.includes('email')) { if (e) { set('email', data, 'email', e); data._emailLocked = true; } break; }
+          if (also.includes('email')) { if (e) { set('email', data, 'email', e); data._emailLocked = true; declined.delete('email'); } break; }
           if (e && !g.email(e)) { log(`🧹 Email not in the caller's words, dropped: ${e}`); e = null; }
           if (e) e = normalizeEmail(g.emailSeparators(e));
           // Said as words, not letter by letter: the name part is the transcriber's guess, and the spelled last name is the better one.
@@ -718,7 +719,15 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     }
     if (stage === 'intake' && lastSlot === 'name_spelling') {
       const sp = parseSpelling(t, data.lastName);
-      if (sp) return { fields: [{ k: 'last_name', v: sp }], flags: [], reply: '', spelled: true };
+      // Only the hard word spelled ("C, A, U, W, E, N, B, E, R, G, E" for Van Cowenberg): the "Van" in front of it stays.
+      const fit = sp ? nameFromSpelling(t, data.firstName || '', data.lastName || '') : null;
+      const fitted = fit && fit.spelledLast && fit.last.toLowerCase().endsWith(sp.toLowerCase()) ? fit.last : sp;
+      if (sp) return { fields: [{ k: 'last_name', v: fitted }], flags: [], reply: '', spelled: true };
+    }
+    // "T, V, A, N ... at gmail dot com." and nothing after it: read from the letters, no model needed.
+    if (stage === 'intake' && lastSlot === 'email' && /\b(com|net|org|edu|gov|us|co|io|biz|info|me|ca|uk)[.!]?\s*$/i.test(t)) {
+      const e = normalizeEmail(spelledEmailIn(t) || '');
+      if (e) return { fields: [{ k: 'email', v: e }], flags: [], reply: '' };
     }
     if (stage === 'intake' && lastSlot === 'email_spelling' && data.email) {
       const local = parseEmailSpelling(t, data.email);
@@ -1074,6 +1083,23 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
       }
     }
     prepared.clear();
+    // Letters the caller spelled without being asked are read here, not by the model: the letters are the
+    // truth, and the word said before them is only how it sounded ("Tim Van Cowenberg, V, A, N, C, A, U ...").
+    const spelledAddress = normalizeEmail(spelledEmailIn(t) || '');
+    if (spelledAddress) {
+      turn.fields = turn.fields.filter((x) => x.k !== 'email').concat([{ k: 'email', v: spelledAddress }]);
+      turn.emailParsed = true;
+    } else if (stage === 'intake' && !turn.spelled && (lastSlot === 'name' || lastSlot === 'last_name' || lastSlot === 'name_spelling' || turn.fields.some((x) => x.k === 'last_name'))) {
+      const read = (k) => (turn.fields.find((x) => x.k === k) || {}).v || '';
+      const nm = nameFromSpelling(t, read('first_name') || (lastSlot === 'name' ? '' : data.firstName || ''), read('last_name') || (lastSlot === 'name_spelling' ? data.lastName || '' : ''));
+      if (nm && (nm.first || nm.last)) {
+        turn.fields = turn.fields.filter((x) => x.k !== 'first_name' && x.k !== 'last_name')
+          .concat(nm.first ? [{ k: 'first_name', v: nm.first }] : [], nm.last ? [{ k: 'last_name', v: nm.last }] : []);
+        turn.nameParsed = true;
+        turn.lastParsed = nm.spelledLast;
+        intakeLog('field_parse', { field: 'name', source: 'spelled_unprompted' });
+      }
+    }
     const flags = new Set(turn.flags);
     const has = (f) => flags.has(f);
     const pendingKey = stage === 'intake' ? lastSlot : null;
@@ -1149,16 +1175,18 @@ function createRelayBrain({ extractor, callerNumber = null, log = console.log } 
     // up when the caller plainly refuses, and never on words spoken over Ava's question.
     if (has('declined') && (overlap || ((lastSlot === 'name' || lastSlot === 'last_name' || lastSlot === 'phone') && !/\b(rather not|prefer not|don'?t want|do not want|not (going to|gonna|giving)|won'?t (give|tell|say)|none of your|no thanks|skip)\b/i.test(lower)))) flags.delete('declined');
     const before = plan()[0];
-    let { changed, same } = apply(turn.fields, t, pendingKey, turn.spelled ? ['last_name'] : turn.emailSpelled ? ['email'] : []);
+    let { changed, same } = apply(turn.fields, t, pendingKey, [].concat(turn.spelled || turn.nameParsed ? ['last_name', 'first_name'] : [], turn.emailSpelled || turn.emailParsed ? ['email'] : []));
     // The last name was spelled (when asked, or in the same breath as the name): it is not asked about again.
     let spelledNow = false;
     if (stage === 'intake' && data.lastName && (turn.spelled || (pendingKey === 'name_spelling' && turn.fields.some((x) => x.k === 'last_name')))) {
       nameSpelled = true; spelledNow = true; spellFixTurn = callerTurns;
       intakeLog('field_parse', { field: 'last_name', source: 'spelled' });
-    } else if (changed.includes('name') && data.lastName && spelledIn(t, data.lastName)) nameSpelled = true;
+    } else if (data.lastName && (turn.lastParsed || (changed.includes('name') && spelledIn(t, data.lastName)))) nameSpelled = true;
+    // An address spelled without being asked is as good as one spelled when asked.
+    if (turn.emailParsed && data.email && pendingKey !== 'email_spelling') emailSure = emailIsPlain(data.email, t, nameSpelled ? data.lastName : '');
     // The email was spelled when asked, or came out the same on a second try: it is not asked about again.
     let emailSpelledNow = false;
-    if (pendingKey === 'email_spelling' && data.email && turn.fields.some((x) => x.k === 'email') && (turn.emailSpelled || changed.includes('email') || (attempts.email_spelling || 0) >= 1)) {
+    if (pendingKey === 'email_spelling' && data.email && turn.fields.some((x) => x.k === 'email') && (turn.emailSpelled || turn.emailParsed || changed.includes('email') || (attempts.email_spelling || 0) >= 1)) {
       emailSure = true; emailSpelledNow = true;
       intakeLog('field_parse', { field: 'email', source: turn.emailSpelled || changed.includes('email') ? 'spelled' : 'repeated' });
       if (!turn.emailSpelled && !changed.includes('email')) notes.push('email was said twice but not spelled: confirm it on the callback');

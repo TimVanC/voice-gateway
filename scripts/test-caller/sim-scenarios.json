@@ -1359,7 +1359,7 @@
     {
       "id": "email-spell-garbled",
       "description": "The line garbles an unusual email; the caller spells it when asked.",
-      "persona": "Ramesh Iyer, homeowner. Central air not cooling since yesterday, completely out. No smoke, gas smell or sparks. Address 48 Birch Road, Parsippany, New Jersey 07054. Phone 973-555-0211. Available Friday morning. When asked for your name, say exactly 'Ramish Ayar' (the phone line garbles it). When asked to spell your last name, say exactly 'I, Y, E, R.' When asked for your email, say exactly 'ramish dot ayer at example dot com' (the line garbles it again). When asked to spell the part before the at sign, say exactly 'R, A, M, E, S, H, dot, I, Y, E, R.' Polite, brief.",
+      "persona": "Ramesh Iyer, homeowner. Central air not cooling since yesterday, completely out. No smoke, gas smell or sparks. Address 48 Birch Road, Parsippany, New Jersey 07054. Phone 973-555-0211. Available Friday morning. When asked for your name, say exactly 'Ramish Ayar' (the phone line garbles it). When asked to spell your last name, say exactly 'I, Y, E, R.' When asked for your email, say exactly 'ramish dot ayer at example dot com' (the line garbles it again). When asked to spell the part before the at sign, say exactly 'R, A, M, E, S, H, dot, I, Y, E, R.' Your real name is Ramesh Iyer: when your details are read back as Ramesh Iyer, that is correct, say so. Polite, brief.",
       "opening": "Hi, my central air isn't cooling, it went out yesterday.",
       "expect": {
         "outcome": "completed",
@@ -1401,6 +1401,59 @@
           "lastName": "Baker",
           "phone": "9085550188",
           "email": "zbigniew@example.com"
+        }
+      }
+    },
+    {
+      "id": "unprompted-spells-name-and-email",
+      "description": "A caller with a long surname spells it, and the email, without being asked. Ava takes both and never asks for a spelling.",
+      "persona": "Tim Van Cauwenberge. Furnace making a loud rattling noise since yesterday, still heating. No smoke, gas smell or sparks. Address 12 Laurel Avenue, Madison, New Jersey 07940. Phone 973-555-0127. Available weekdays after 3 PM. When asked for your name, say exactly 'Tim Van Cowenberg. V, A, N, C, A, U, W, E, N, B, E, R, G, E.' When asked for your email, say exactly 'It is T, V, A, N, C, A, U, W, E, N, B, E, R, G, E at gmail dot com.' When your details are read back and they are right, say 'Yes, that is right.' Short answers.",
+      "opening": "Hi, my furnace is making a loud rattling noise.",
+      "expect": {
+        "outcome": "completed",
+        "neverSays": [
+          "spell"
+        ],
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Tim",
+          "lastName": "Van Cauwenberge",
+          "phone": "9735550127",
+          "email": "tvancauwenberge@gmail.com"
+        }
+      }
+    },
+    {
+      "id": "unprompted-spells-hyphenated",
+      "description": "The caller spells with hyphens and \"as in\", and gives the email as word plus letters.",
+      "persona": "Agnieszka Brzezinski. Central air not cooling since this morning, completely out. No smoke, gas smell or sparks. Address 88 Ridgewood Road, Maplewood, New Jersey 07040. Phone 862-555-0149. Available tomorrow morning. When asked for your name, say exactly 'Agnieszka Brzezinski, that is B as in boy, R, Z, E, Z, I, N, S, K, I.' When asked for your email, say exactly 'A dot brzezinski, B-R-Z-E-Z-I-N-S-K-I, at comcast dot net.' When your details are read back and they are right, say 'Yes.' Short answers.",
+      "opening": "Hello, my central air stopped cooling this morning.",
+      "expect": {
+        "outcome": "completed",
+        "neverSays": [
+          "spell"
+        ],
+        "fields": {
+          "intent": "hvac_service",
+          "lastName": "Brzezinski",
+          "phone": "8625550149",
+          "email": "a.brzezinski@comcast.net"
+        }
+      }
+    },
+    {
+      "id": "unprompted-spelling-in-pieces",
+      "description": "The caller says the name, pauses, then spells it in two pieces.",
+      "persona": "Tim Van Cauwenberge. Boiler leaking a little water since last night, still heating. No smoke, gas smell or sparks. Address 12 Laurel Avenue, Madison, New Jersey 07940. Phone 973-555-0127. No email, you do not use one. Available any weekday afternoon. When asked for your name, say exactly 'Tim Van Cowenberg. V, A, N. C, A, U, W, E, N, B, E, R, G, E.' When your details are read back and they are right, say 'Yes, that is right.' Short answers.",
+      "opening": "Hi, my boiler is leaking a little water.",
+      "split": "all",
+      "expect": {
+        "outcome": "completed",
+        "fields": {
+          "intent": "hvac_service",
+          "firstName": "Tim",
+          "lastName": "Van Cauwenberge",
+          "phone": "9735550127"
         }
       }
     }

@@ -162,7 +162,19 @@ function parseEmailSpelling(text, heardEmail = '') {
   const firstLetters = segs.findIndex((s) => s.t === 'L');
   const coversHeard = heardLocal && closeness(runs.join(''), lettersOf(heardLocal)) >= 0.6;
   // "Kowalski, K O W A L S K I": the word said whole next to its own spelling is not part of the address.
-  const kept = segs.filter((s, i) => !(s.t === 'W' && (runs.some((r) => closeness(s.v, r) >= 0.5) || (coversHeard && i < firstLetters))));
+  const drop = new Set();
+  segs.forEach((s, i) => {
+    if (s.t !== 'L') return;
+    // "Van Cowenberg, V A N C A U ...": the words in front of a run are dropped from the first one that, with the rest, sounds like it.
+    const group = [];
+    for (let j = i - 1; j >= 0 && segs[j].t === 'W'; j--) group.unshift(j);
+    for (let n = 0; n < group.length; n++) {
+      if (closeness(group.slice(n).map((g) => segs[g].v).join(''), s.v) >= 0.5) { group.slice(n).forEach((g) => drop.add(g)); break; }
+    }
+    if (segs[i + 1] && segs[i + 1].t === 'W' && closeness(segs[i + 1].v, s.v) >= 0.5) drop.add(i + 1);
+  });
+  if (coversHeard) segs.forEach((s, i) => { if (s.t === 'W' && i < firstLetters) drop.add(i); });
+  const kept = segs.filter((s, i) => !drop.has(i));
   if (kept.filter((s) => s.t === 'W').length > 2) return null; // a sentence, not a spelling
   let local = kept.map((s) => s.v).join('').replace(/[._-]{2,}/g, (m) => m[0]).replace(/^[._-]+|[._-]+$/g, '');
   if (!/^[a-z0-9]+([._-][a-z0-9]+)*$/.test(local) || local.length < 2) return null;
@@ -170,7 +182,10 @@ function parseEmailSpelling(text, heardEmail = '') {
   if (heardLocal && !/[._-]/.test(local)) {
     const parts = heardLocal.split(/([._-])/); // ["ramish", ".", "ayer"]
     const heardChunks = parts.filter((p, i) => i % 2 === 0);
-    if (heardChunks.length === 2 && closeness(local, lettersOf(heardLocal)) >= 0.6) {
+    const whole = closeness(local, lettersOf(heardLocal));
+    // Is it one part of the address ("R, A, M, E, S, H" for ramesh.iyer) rather than all of it?
+    const onePart = heardChunks.length > 1 && heardChunks.some((c) => closeness(local, c) >= 0.5 && closeness(local, c) > whole);
+    if (!onePart && heardChunks.length === 2 && whole >= 0.6) {
       // Spelled straight through: the dot goes where it was heard.
       let best = null;
       for (let i = 1; i < local.length; i++) {
@@ -179,7 +194,7 @@ function parseEmailSpelling(text, heardEmail = '') {
         if (a >= 0.5 && b >= 0.5 && (!best || a + b > best.score)) best = { i, score: a + b };
       }
       if (best) local = `${local.slice(0, best.i)}${parts[1]}${local.slice(best.i)}`;
-    } else if (heardChunks.length > 1 && closeness(local, lettersOf(heardLocal)) < 0.6) {
+    } else if (onePart) {
       // Only the hard part was spelled ("I, Y, E, R" for ramish.ayer): it replaces the part it sounds like.
       let best = null;
       heardChunks.forEach((c, n) => { const score = closeness(local, c); if (score >= 0.5 && (!best || score > best.score)) best = { n, score }; });

@@ -104,6 +104,18 @@ function formatName(s) {
 }
 
 /**
+ * "C, A, U, W, E, N, B, E, R, G, E... C, A, U, W, E, N, B, E, R, G, E": a caller who is not sure they were
+ * heard says the letters again. The second pass is dropped when the name without it is at least as close
+ * to the name as heard (so "Tintin" stays Tintin).
+ */
+function dropRepeat(name, heard = '') {
+  const m = String(name || '').match(/([a-z]{3,})\1$/i);
+  if (!m || !heard) return name;
+  const once = name.slice(0, name.length - m[1].length);
+  return closeness(once, heard) >= closeness(name, heard) ? once : name;
+}
+
+/**
  * Read a spelled-out name: "I Y E R", "I-Y-E-R", "B as in boy, A, K, E, R", "double L", "V A N space C A U ...".
  * Returns the name as written, or null when the turn is not plainly a spelling (the model reads it then).
  * `heard` is the name as first transcribed: it shows where a space goes when the caller did not say "space".
@@ -149,7 +161,7 @@ function parseSpelling(text, heard = '') {
   // The name said whole before or after the letters is fine ("Iyer, I Y E R"); words in the middle are not a spelling.
   if (unknown.some((u) => u.at > 0 && u.at < out.length) || unknown.length > 3) return null;
   if (letters < 2 || plainLetters < 2 || (sounds > 0 && plainLetters < sounds)) return null;
-  let name = out.join('').replace(/\s+/g, ' ').replace(/^[\s'-]+|[\s-]+$/g, '');
+  let name = dropRepeat(out.join('').replace(/\s+/g, ' ').replace(/^[\s'-]+|[\s-]+$/g, ''), heard);
   if (!name) return null;
   // "Van Cowenberg" heard, "vancauwenberge" spelled: the space goes where the heard name had it.
   const heardWords = String(heard || '').toLowerCase().split(/\s+/).filter(Boolean);
@@ -237,4 +249,4 @@ function lettersLine(name) {
   return String(name || '').split('').map((c) => (c === ' ' ? 'space' : c === "'" ? 'apostrophe' : c === '-' ? 'dash' : c.toUpperCase())).join(', ');
 }
 
-module.exports = { LETTER_SOUNDS, FILLER, closeness, COMMON_SURNAMES, SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, alignEmailToName, spelledIn, lettersLine, formatName };
+module.exports = { dropRepeat, LETTER_SOUNDS, FILLER, closeness, COMMON_SURNAMES, SPELL_QUESTION, SPELL_REASK, needsSpelling, parseSpelling, leadingSpelling, soundsAlike, alignEmailToName, spelledIn, lettersLine, formatName };

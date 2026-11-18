@@ -337,6 +337,8 @@ const f = (k, v) => ({ k, v });
     check('only the hard part spelled', parseEmailSpelling('I, Y, E, R.', 'ramesh.ayer@example.com'), 'ramesh.iyer');
     check('a word next to its own spelling, and digits', parseEmailSpelling('D as in dog, Kowalski, K-O-W-A-L-S-K-I, seven two.', 'dkowalsky72@example.com'), 'dkowalski72');
     check('the whole address spelled: the part before the at', parseEmailSpelling('r-a-m-e-s-h dot i-y-e-r at example dot com', 'ramish.ayer@example.com'), 'ramesh.iyer');
+    check('only the first part spelled: the rest of the address stays', parseEmailSpelling('R-A-M-E-S-H.', 'ramesh.iyer@example.com'), 'ramesh.iyer');
+    check('only the first part spelled, and it was heard wrong', parseEmailSpelling('R, A, M, E, S, H.', 'ramish.iyer@example.com'), 'ramesh.iyer');
     check('a sentence is not a spelling', parseEmailSpelling('It is just how it sounds.', 'ramish.ayer@example.com'), null);
 
     const { brain } = brainWith([
@@ -386,6 +388,114 @@ const f = (k, v) => ({ k, v });
     o = await b.brain.handle('I would rather not.');
     check('Ava moves on', has(o.say, 'spell'), false);
     check('the email is kept as heard', b.brain.getData().email, 'zbigniew@example.com');
+  }
+
+  console.log('\n🧪 A caller who spells without being asked: the letters win, whatever the model read');
+  {
+    const { nameFromSpelling, spelledEmailIn, spellingRuns } = require('./unprompted-spelling');
+    const TIM = 'Tim Van Cowenberg. V, A, N, C, A, U, W, E, N, B, E, R, G, E.';
+    check('"Tim Van" + "Cowenberg" is put right', nameFromSpelling(TIM, 'Tim Van', 'Cowenberg'), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    check('heard right, spelled straight through', nameFromSpelling(TIM, 'Tim', 'Van Cowenberg'), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    check('nothing read by the model', nameFromSpelling(TIM, '', ''), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    check('only the hard word spelled', nameFromSpelling('Tim Van Cowenberg. C, A, U, W, E, N, B, E, R, G, E.', 'Tim', 'Van Cowenberg'), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    check('letters written as capitals', nameFromSpelling('Tim Van Cowenberg. VAN CAUWENBERGE.', 'Tim', 'Van Cowenberg'), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    check('hyphens between the letters', nameFromSpelling("It's Tim Van Cowenberg, that's V-A-N C-A-U-W-E-N-B-E-R-G-E.", 'Tim', 'Van Cowenberg'), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    check('a letter written as a word', nameFromSpelling('Tim Van Cowenberg. V, A, N, C, A, you, W, E, N, B, E, R, G, E.', 'Tim', 'Van Cowenberg'), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    check('a two-word first name stays whole', nameFromSpelling('Mary Ann Kovalchik, K, O, W, A, L, C, Z, Y, K.', 'Mary Ann', 'Kovalchik'), { first: 'Mary Ann', last: 'Kowalczyk', spelledLast: true });
+    check('both names spelled', nameFromSpelling('Shavon Nguyen Okafor. First name is S, I, O, B, H, A, N. Last name N, G, U, Y, E, N, hyphen, O, K, A, F, O, R.', 'Shavon', 'Nguyen Okafor'), { first: 'Siobhan', last: 'Nguyen-Okafor', spelledLast: true });
+    check('first name spelled, then the last', nameFromSpelling('My name is Tim, T-I-M, Van Cowenberg, V-A-N-C-A-U-W-E-N-B-E-R-G-E.', 'Tim', 'Van Cowenberg'), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    check('an apostrophe', nameFromSpelling("Kevin O'Shaughnessy. O, apostrophe, S, H, A, U, G, H, N, E, S, S, Y.", 'Kevin', 'Oshawnessy'), { first: 'Kevin', last: "O'Shaughnessy", spelledLast: true });
+    check('a spelling that has only begun changes nothing yet', nameFromSpelling('Tim Van Cowenberg. V, A, N.', 'Tim', 'Van Cowenberg'), { first: 'Tim', last: 'Van Cowenberg', spelledLast: false });
+    check('the letters said twice are taken once', nameFromSpelling('Tim Van Cowenberg. C, A, U, W, E, N, B, E, R, G, E. C, A, U, W, E, N, B, E, R, G, E.', 'Tim', 'Van Cowenberg'), { first: 'Tim', last: 'Van Cauwenberge', spelledLast: true });
+    {
+      const { parseSpelling } = require('./name-spelling');
+      check('asked to spell: the letters said twice are taken once', parseSpelling('V, A, N. C, A, U, W, E, N, B, E, R, G, E. C, A, U, W, E, N, B, E, R, G, E.', 'Van Cowenberg'), 'Van Cauwenberge');
+      check('a name that repeats itself is left alone', parseSpelling('T, I, N, T, I, N.', 'Tintin'), 'Tintin');
+      const p = brainWith([{ fields: [f('intent', 'hvac_service'), f('symptoms', 'leak')] }]);
+      await p.brain.handle('My boiler is leaking.');
+      await p.brain.handle('No, none of that.');
+      await p.brain.handle('Tim Van Cowenberg.');
+      await p.brain.handle('C, A, U, W, E, N, B, E, R, G, E.');
+      check('asked to spell, only the hard word spelled: "Van" stays', p.brain.getData().lastName, 'Van Cauwenberge');
+    }
+    check('"my A C is out" is not a spelling', spellingRuns('Hi, my A C is out and the HVAC guy never came.').length, 0);
+    check('no letters, nothing to do', nameFromSpelling('Maria Lopez.', 'Maria', 'Lopez'), null);
+
+    check('an address spelled straight through', spelledEmailIn("It's T, V, A, N, C, A, U, W, E, N, B, E, R, G, E at gmail dot com."), 'tvancauwenberge@gmail.com');
+    check('the word, then its letters', spelledEmailIn('Tim dot Van Cowenberg, V A N C A U W E N B E R G E, at gmail dot com.'), 'tim.vancauwenberge@gmail.com');
+    check('letters, a dot and digits', spelledEmailIn('Sure, it is r a m e s h dot i y e r eight two at outlook dot com.'), 'ramesh.iyer82@outlook.com');
+    check('"D as in dog"', spelledEmailIn('D as in dog, K, O, W, A, L, C, Z, Y, K, seven two, at gmail dot com.'), 'dkowalczyk72@gmail.com');
+    check('letters in the part after the at', spelledEmailIn('S, I, O, B, H, A, N at okafor dash H, V, A, C dot com.'), 'siobhan@okafor-hvac.com');
+    check('a pause before the at', spelledEmailIn('M, B, R, Z, E, Z, I, N, S, K, I. At comcast dot net.'), 'mbrzezinski@comcast.net');
+    check('an address said as words is left to the reader', spelledEmailIn('maria dot lopez at gmail dot com'), null);
+
+    // The model files "Tim Van" as the first name and keeps the heard surname: the letters still win.
+    const a = brainWith([
+      { fields: [f('intent', 'hvac_service'), f('symptoms', 'rattling noise')] },
+      { fields: [f('first_name', 'Tim Van'), f('last_name', 'Cowenberg')] },
+    ]);
+    await a.brain.handle('My furnace is making a rattling noise.');
+    await a.brain.handle('No, none of that.');
+    let o = await a.brain.handle(TIM);
+    check('first name is Tim', a.brain.getData().firstName, 'Tim');
+    check('last name is as spelled', a.brain.getData().lastName, 'Van Cauwenberge');
+    check('Ava does not ask for a spelling she already has', has(o.say, 'spell'), false);
+    check('Ava goes on to the phone number', has(o.say, 'phone number'), true);
+    await a.brain.handle('973-555-0127.');
+    // The address is spelled without being asked: no model read is left for this turn, and none is needed.
+    o = await a.brain.handle("It's T, V, A, N, C, A, U, W, E, N, B, E, R, G, E at gmail dot com.");
+    check('the email is as spelled', a.brain.getData().email, 'tvancauwenberge@gmail.com');
+    check('Ava does not ask for the email again', has(o.say, 'spell') || has(o.say, 'email'), false);
+    check('no model read was used for the spelled address', a.used(), 2);
+
+    // The model reads a spelled address wrong: the letters still win.
+    const b = brainWith([
+      { fields: [f('intent', 'hvac_service'), f('symptoms', 'rattling noise')] },
+      { fields: [f('email', 'rameshiyer82@outlook.com'), f('availability', 'weekday mornings')] },
+    ]);
+    await b.brain.handle('My furnace is making a rattling noise.');
+    await b.brain.handle('No, none of that.');
+    await b.brain.handle('Maria Lopez.');
+    await b.brain.handle('973-555-0127.');
+    o = await b.brain.handle('Sure, it is r a m e s h dot i y e r eight two at outlook dot com. I am home weekday mornings.');
+    check('the dot the model dropped is kept', b.brain.getData().email, 'ramesh.iyer82@outlook.com');
+    check('no spelling question after a spelled address', has(o.say, 'spell'), false);
+  }
+
+  console.log('\n🧪 No spelling loop: asked at most twice, never again once spelled');
+  {
+    const reads = [{ fields: [f('intent', 'hvac_service'), f('symptoms', 'rattling noise')] }]; // the bare name needs no model read
+    for (let n = 0; n < 12; n++) reads.push({ fields: [], flags: ['unclear'] });
+    const a = brainWith(reads);
+    await a.brain.handle('My furnace is making a rattling noise.');
+    await a.brain.handle('No, none of that.');
+    let asks = 0;
+    let o = await a.brain.handle('Marek Voychekovski.');
+    if (has(o.say, 'spell')) asks++;
+    for (const said of ['Double you oh jay see eye.', 'Whoa, jeh, see, eye, eh.', 'Like I said.', 'Hello?']) {
+      if (!has(o.say, 'spell')) break;
+      o = await a.brain.handle(said);
+      if (has(o.say, 'spell')) asks++;
+    }
+    check('the spelling is asked for at most twice', asks, 2);
+    check('then Ava moves on', has(o.say, 'spell'), false);
+
+    const b = brainWith([
+      { fields: [f('intent', 'hvac_service'), f('symptoms', 'rattling noise')] },
+      { fields: [f('first_name', 'Marek'), f('last_name', 'Voychekovski')] },
+      { fields: [f('last_name', 'Voychekovski')] },
+      { fields: [f('email', 'marek@example.com'), f('last_name', 'Voychekovski')] },
+    ]);
+    await b.brain.handle('My furnace is making a rattling noise.');
+    await b.brain.handle('No, none of that.');
+    o = await b.brain.handle('Marek Voychekovski.');
+    check('an uncommon name is asked about once', has(o.say, 'spell your last name'), true);
+    o = await b.brain.handle('W, O, J, C, I, E, C, H, O, W, S, K, I.');
+    check('the spelling is taken', b.brain.getData().lastName, 'Wojciechowski');
+    check('and not asked for again', has(o.say, 'spell your last name') || has(o.say, 'spell that'), false);
+    o = await b.brain.handle('973-555-0127. That is Marek Voychekovski.');
+    check('saying the name again does not bring the question back', has(o.say, 'spell your last name') || has(o.say, 'spell that'), false);
+    check('the spelled name is kept', b.brain.getData().lastName, 'Wojciechowski');
   }
 
   console.log(failures ? `\n❌ ${failures} check(s) failed` : '\n✅ All relay-brain checks passed');

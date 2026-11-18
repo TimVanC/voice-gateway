@@ -384,6 +384,11 @@ function check(scenario, r) {
     if (/[*#_`]|\n- /.test(t.text)) flags.push(`markup in speech: "${t.text.slice(0, 60)}"`);
     if (t.latencyMs != null && t.latencyMs > 4000) flags.push(`slow reply ${t.latencyMs} ms: "${t.text.slice(0, 40)}"`);
   }
+  // Things Ava must not say on this call ("spell": the caller already spelled it without being asked).
+  for (const phrase of exp.neverSays || []) {
+    const hit = ava.find((t) => t.text.toLowerCase().includes(String(phrase).toLowerCase()));
+    if (hit) flags.push(`said "${phrase}": "${hit.text.slice(0, 80)}"`);
+  }
   if (exp.outcome) {
     const transfer = Boolean(r.handoff && r.handoff.reason === 'transfer');
     // The simulated caller often hangs up right after the goodbye, before Ava's own hang-up lands: still a completed call.

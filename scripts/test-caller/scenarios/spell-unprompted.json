@@ -1,0 +1,31 @@
+{
+  "name": "spell-unprompted",
+  "description": "The caller spells the surname right after saying it, and spells the email, without being asked. Ava takes both and never asks for a spelling.",
+  "callerNumber": "+19735550144",
+  "persona": {
+    "voice": "ash",
+    "silenceMs": 700,
+    "interruptible": false,
+    "instructions": "You are Tim Van Cauwenberge. Your furnace is making a loud rattling noise since yesterday; it still heats. No smoke, gas smell or sparks. Address 12 Laurel Avenue, Madison, New Jersey 07940. Phone 973-555-0127. Available weekdays after 3 PM. Open with: 'Hi, my furnace is making a loud rattling noise.' You have a hard name, so you always spell it without waiting to be asked. When asked for your name, say: 'Tim Van Cauwenberge. That is V, A, N, C, A, U, W, E, N, B, E, R, G, E.' saying each letter clearly, one at a time, at a steady pace without long pauses. When asked for your email, say: 'It is T, V, A, N, C, A, U, W, E, N, B, E, R, G, E, at gmail dot com.' again one letter at a time. If the assistant asks you to spell something you already spelled, spell it once more the same way. When your details are read back, confirm if right, correct what is wrong. When asked if there is anything else, say 'No, that's it, thanks.' You are on the phone: speak naturally, no stage directions. Answer only what is asked, one or two short sentences. Never ask to speak to a person. If the assistant's sentence is cut off or you did not catch it, say 'Sorry, what was that?' and wait. When the assistant says goodbye, say 'Thanks, bye.' and nothing more. Once you have said goodbye, do not say anything else."
+  },
+  "interjections": [],
+  "maxCallSeconds": 360,
+  "expect": {
+    "outcome": "confirmation",
+    "fields": {
+      "intent": "hvac_service",
+      "firstName": "Tim",
+      "lastName": "Van Cauwenberge",
+      "phone": "9735550127",
+      "email": "tvancauwenberge@gmail.com",
+      "address": "12 Laurel"
+    },
+    "required": [
+      "intent",
+      "firstName",
+      "lastName",
+      "phone",
+      "email"
+    ]
+  }
+}
