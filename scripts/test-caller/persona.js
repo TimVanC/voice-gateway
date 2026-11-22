@@ -2,7 +2,8 @@
  * Persona: the caller side of a test call, an OpenAI Realtime session that
  * plays a scripted human (name, problem, address, mood) and talks to Ava
  * over 8 kHz mu-law in both directions, so no transcoding sits between the
- * two bots. Same API key and model family as Ava.
+ * two bots. Same API key as Ava; gpt-realtime-mini by default (Ava runs on
+ * gpt-realtime).
  *
  * Audio in:  Ava's frames, straight into input_audio_buffer (server VAD
  *            decides when Ava has finished a turn).
@@ -23,6 +24,7 @@ const { scaleMulaw } = require('./audio');
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=';
 const CLIP_PURPOSE = 'clip';
 const DEFAULT_GAIN_DB = -6;
+const DEFAULT_MODEL = 'gpt-realtime-mini';
 
 class Persona extends EventEmitter {
   /**
@@ -30,7 +32,7 @@ class Persona extends EventEmitter {
    * @param {string} opts.apiKey
    * @param {string} opts.instructions     who the caller is and how they behave
    * @param {string} [opts.voice]          Realtime voice, default "ash" (Ava uses sage)
-   * @param {string} [opts.model]          default gpt-realtime
+   * @param {string} [opts.model]          default gpt-realtime-mini
    * @param {number} [opts.silenceMs]      VAD silence before the caller answers, default 700
    * @param {number} [opts.threshold]      VAD threshold, default 0.5
    * @param {boolean} [opts.interruptible] cancel the caller mid-sentence when Ava talks over them
@@ -41,7 +43,11 @@ class Persona extends EventEmitter {
     this.apiKey = opts.apiKey;
     this.instructions = opts.instructions;
     this.voice = opts.voice || 'ash';
-    this.model = opts.model || 'gpt-realtime';
+    // The caller only has to sound like a person and follow its brief; the
+    // mini model does that for about a third of gpt-realtime's audio price
+    // (Nov 2026: test calls were two-thirds of the OpenAI bill). Ava keeps
+    // gpt-realtime. Override with opts.model / TEST_CALLER_MODEL.
+    this.model = opts.model || DEFAULT_MODEL;
     this.silenceMs = opts.silenceMs || 700;
     this.threshold = opts.threshold || 0.5;
     this.interruptible = Boolean(opts.interruptible);
