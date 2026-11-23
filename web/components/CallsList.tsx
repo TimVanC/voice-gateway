@@ -1,6 +1,6 @@
 import Link from "next/link";
 import TopBar from "@/components/TopBar";
-import { FlagBadges, StatusBadge } from "@/components/Badges";
+import { EnvironmentBadge, FlagBadges, StatusBadge } from "@/components/Badges";
 import { requireSession } from "@/lib/auth";
 import { formatDateTime, formatDuration, formatIntent, formatPhone, fullName, truncate } from "@/lib/format";
 import { countSummary, listCalls, PAGE_SIZE, parseFilters, type CallFilters, type CallScope } from "@/lib/queries";
@@ -115,6 +115,7 @@ export default async function CallsList({
                       {name || <span className="muted">unknown</span>}
                       <div>
                         <FlagBadges isTest={c.is_test} preFix={c.pre_caller_id_fix} source={c.source} testReason={c.test_reason} />
+                        {scope === "test" && <EnvironmentBadge environment={c.environment} />}
                         {c.has_recording && (
                           <span className="badge rec" title="Recording available">
                             audio

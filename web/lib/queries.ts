@@ -173,7 +173,7 @@ export async function listCalls(f: CallFilters): Promise<{ rows: CallRow[]; tota
   const offset = (f.page - 1) * PAGE_SIZE;
   const [rows, counts] = await Promise.all([
     query<CallRow>(
-      `SELECT id, call_id, source, is_test, test_reason, pre_caller_id_fix, caller_number, started_at,
+      `SELECT id, call_id, source, environment, is_test, test_reason, pre_caller_id_fix, caller_number, started_at,
               duration_seconds, first_name, last_name, phone_number, email, primary_intent,
               call_summary, call_status, was_transferred, created_at,
               EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id) AS has_recording

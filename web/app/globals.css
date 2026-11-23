@@ -204,6 +204,22 @@ th.nowrap {
   background: #eef0f3;
   color: #4b5563;
 }
+.badge.env {
+  background: #eef0f3;
+  color: #4b5563;
+}
+.badge.env-production {
+  background: #dcfce7;
+  color: #166534;
+}
+.badge.env-staging {
+  background: #fef3c7;
+  color: #92400e;
+}
+.badge.env-local {
+  background: #e0e7ff;
+  color: #3730a3;
+}
 .badge.status-complete,
 .badge.status-completed {
   background: var(--ok-bg);
