@@ -236,6 +236,9 @@ async function runFullSmokeCall({ twilioClient = null, config = smoke.smokeCallC
     apiKey: process.env.OPENAI_API_KEY,
     instructions: scenario.persona.instructions,
     voice: scenario.persona.voice,
+    // Persona's default (gpt-realtime-mini) unless the scenario or
+    // SMOKE_CALLER_MODEL says otherwise.
+    model: scenario.persona.model || process.env.SMOKE_CALLER_MODEL || undefined,
     silenceMs: scenario.persona.silenceMs,
     interruptible: scenario.persona.interruptible,
   });

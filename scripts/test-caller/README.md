@@ -16,7 +16,7 @@ Nothing under `src/` changes; Ava behaves exactly as in production.
 | `run.js` | wires everything together, writes the outputs, exits 0/1/2 |
 | `fake-twilio.js` | local mode: WebSocket client that speaks Twilio's media-stream protocol to Ava's `/stream` (`connected`, `start`, 20 ms `media`, `mark`, `dtmf`, `stop`; honours `clear`, echoes marks after a real-time playout buffer) |
 | `phone-leg.js` | phone mode: places a real outbound Twilio call to Ava's number and takes the caller leg back over `<Connect><Stream>` |
-| `persona.js` | the caller: a `gpt-realtime` session with PCMU in/out, server VAD, and an out-of-band clip synthesiser for interjections ("mm-hm") |
+| `persona.js` | the caller: a `gpt-realtime-mini` session (override with `TEST_CALLER_MODEL`) with PCMU in/out, server VAD, and an out-of-band clip synthesiser for interjections ("mm-hm") |
 | `audio.js` | frame inspection and WAV writing, decoding with `src/g711.js` |
 | `report.js` | reads Ava's intake from her log (or the Neon row), checks it, renders the transcript and latency table |
 | `scenarios/*.json` | who is calling, what they want, what Ava should end up with |
@@ -172,8 +172,12 @@ Two Realtime sessions (Ava's and the caller's) for a 3 to 5 minute call, plus
 transcription on both sides. A measured 4-minute `no-heat` run cost the caller
 side about 6,500 audio tokens in and 1,200 out, which at the published
 `gpt-realtime` audio rates ($32 / $64 per million) is about $0.30; Ava's side
-is similar plus her text prompts, so budget roughly $0.60 to $1.00 per local
-run and check the OpenAI usage page after the first few. Phone mode adds
+is similar plus her text prompts. Since Nov 2026 the caller runs on
+`gpt-realtime-mini` by default (about a third of that price), so budget
+roughly $0.40 to $0.70 per local run; set `TEST_CALLER_MODEL=gpt-realtime` to
+compare against the full model. In November 2026 test calls were two-thirds
+of the OpenAI bill and pushed the account past its monthly spend limit, which
+took Ava offline for two days, so keep big batches deliberate. Phone mode adds
 Twilio: an outbound leg plus Ava's inbound leg and two media streams, a few
 cents per minute. Nothing else is billed; no new services are involved.
 
